@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "release": "osascript -e 'if application \"gneovim\" is running then quit application \"gneovim\"' >/dev/null 2>&1; sleep 1; npm run tauri build -- --bundles app && rm -rf /Applications/gneovim.app && ditto src-tauri/target/release/bundle/macos/gneovim.app /Applications/gneovim.app && (xattr -dr com.apple.quarantine /Applications/gneovim.app >/dev/null 2>&1 || true)"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.3.4",
