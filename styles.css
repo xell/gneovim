@@ -1,0 +1,97 @@
+@import "modern-normalize";
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  line-height: 1.5;
+}
+
+main {
+  max-width: 52rem;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 6rem;
+}
+
+.note {
+  color: light-dark(#6b7280, #9ca3af);
+  font-size: 0.9rem;
+}
+
+#status {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin-top: 0.75rem;
+  font: 0.8rem/1 ui-monospace, Menlo, monospace;
+}
+#status #conn::before {
+  content: "\25cf  ";
+}
+#status.ok #conn {
+  color: light-dark(#15803d, #4ade80);
+}
+#status.down #conn {
+  color: light-dark(#b91c1c, #f87171);
+}
+#mode {
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  background: light-dark(#e5e7eb, #374151);
+}
+#file {
+  color: light-dark(#6b7280, #9ca3af);
+}
+
+#editor {
+  margin-top: 1rem;
+  border: 1px solid light-dark(#d1d5db, #3f3f46);
+  border-radius: 6px;
+}
+.cm-editor {
+  border-radius: 6px;
+}
+.cm-editor.cm-focused {
+  outline: none;
+}
+
+/* nvim command line (:, /, ?) — shown only while cmdline mode is active */
+#cmdline {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  padding: 0.35rem 0.9rem;
+  font: 0.9rem / 1.4 ui-monospace, Menlo, monospace;
+  white-space: pre;
+  background: light-dark(#1f2937, #0b0f19);
+  color: light-dark(#f9fafb, #e5e7eb);
+  border-top: 1px solid light-dark(#374151, #1f2937);
+}
+.cmdline-prefix {
+  opacity: 0.6;
+}
+.cmdline-caret {
+  background: light-dark(#60a5fa, #3b82f6);
+  color: #ffffff;
+}
+
+/* nvim cursor. The native CM caret is hidden except when nvim is in insert
+   mode (data-mode starting "i"); the block/underline below covers the rest. */
+#editor:not([data-mode^="i"]) .cm-cursor.cm-cursor-primary {
+  display: none;
+}
+
+.nvim-cursor-block {
+  background: light-dark(#2563eb, #60a5fa);
+  color: light-dark(#ffffff, #0b0b0b);
+  border-radius: 1px;
+}
+.nvim-cursor-underline {
+  border-bottom: 2px solid light-dark(#2563eb, #60a5fa);
+}
+.nvim-cursor-eol {
+  display: inline-block;
+  width: 0.5ch;
+}

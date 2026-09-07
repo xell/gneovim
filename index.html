@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>nvim &harr; codemirror</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>nvim &harr; codemirror</h1>
+        <p class="note">
+          Buffer-sync step 3. A real <code>nvim --embed</code> owns the buffer.
+          Keystrokes go to <code>nvim_input()</code> and nvim's changes stream
+          back as minimal diffs. CodeMirror stays editable, so edits made in it
+          (Grammarly, paste) are forwarded to nvim via <code>nvim_buf_set_text</code>.
+        </p>
+        <div id="status" class="down">
+          <span id="conn">connecting…</span>
+          <span id="mode">—</span>
+          <span id="file">—</span>
+        </div>
+      </header>
+      <div id="editor"></div>
+    </main>
+    <div id="cmdline" hidden></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
