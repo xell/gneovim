@@ -24,6 +24,7 @@ fn tag(e: &BridgeEvent) -> String {
             format!("cmdline {:?} {:?} {}", p.ctype, p.content, p.pos)
         }
         BridgeEvent::CmdlineHide => "cmdline_hide".into(),
+        _ => "other".into(),
     }
 }
 
@@ -31,6 +32,10 @@ async fn settle() {
     tokio::time::sleep(Duration::from_millis(250)).await;
 }
 
+// The spike branch changes connect() to force a markdown-island + code-split
+// layout and drops the gnv_bufchanged autocmd, so this pre-spike round trip
+// no longer holds. See tests/spike.rs for the current flow.
+#[ignore = "superseded on spike/grid-plus-md-island by tests/spike.rs"]
 #[tokio::test]
 async fn bridge_round_trip() {
     std::fs::write(

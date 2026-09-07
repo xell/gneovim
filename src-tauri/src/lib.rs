@@ -183,6 +183,10 @@ fn spawn_bridge(app: AppHandle, label: String) {
                     BridgeEvent::Cursor(p) => emit_app.emit_to(t, "gnv://cursor", p),
                     BridgeEvent::Cmdline(p) => emit_app.emit_to(t, "gnv://cmdline", p),
                     BridgeEvent::CmdlineHide => emit_app.emit_to(t, "gnv://cmdline_hide", ()),
+                    BridgeEvent::Grid(ops) => emit_app.emit_to(t, "gnv://grid", ops),
+                    BridgeEvent::WinFt { win, buf, ft } => {
+                        emit_app.emit_to(t, "gnv://winft", serde_json::json!({"win":win,"buf":buf,"ft":ft}))
+                    }
                 };
                 if let Err(e) = r {
                     log::warn!("emit to {emit_label}: {e}");
@@ -257,6 +261,16 @@ async fn nvim_resync(app: AppHandle, window: tauri::Window) -> Result<ResetPaylo
 }
 
 #[tauri::command]
+async fn nvim_resize(
+    app: AppHandle,
+    window: tauri::Window,
+    cols: i64,
+    rows: i64,
+) -> Result<(), String> {
+    bridge_for(&app, window.label()).await?.resize(cols, rows).await
+}
+
+#[tauri::command]
 async fn new_window(app: AppHandle) -> Result<(), String> {
     spawn_window(&app, false);
     Ok(())
@@ -316,6 +330,7 @@ pub fn run() {
             nvim_cursor_set,
             nvim_edit,
             nvim_resync,
+            nvim_resize,
             new_window,
             new_tab
         ])

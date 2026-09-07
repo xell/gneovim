@@ -14,9 +14,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use nvim_rs::{
-    compat::tokio::Compat, create::tokio as create, Buffer, Handler, Neovim, Value,
+    compat::tokio::Compat, create::tokio as create, Buffer, Handler, Neovim,
+    UiAttachOptions, Value,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value as Json};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc::UnboundedSender, Mutex};
 
@@ -83,6 +85,10 @@ pub enum BridgeEvent {
     Cursor(CursorPayload),
     Cmdline(CmdlinePayload),
     CmdlineHide,
+    /// One flushed frame of normalized grid ops (spike: multigrid renderer).
+    Grid(Vec<Json>),
+    /// A window's filetype, so the client can pick which grid is the CM island.
+    WinFt { win: i64, buf: i64, ft: String },
 }
 
 #[derive(Deserialize)]
@@ -108,6 +114,79 @@ struct Shared {
     skip_snapshot: Arc<AtomicBool>,
     /// Debounce generation for the BufEnter/WinEnter burst from one `:e`.
     buf_epoch: Arc<AtomicU64>,
+    /// Grid ops accumulated since the last `flush` (spike multigrid renderer).
+    grid_batch: Arc<std::sync::Mutex<Vec<Json>>>,
+}
+
+/// Decode a Neovim ext handle (window/buffer/tabpage) to its integer id.
+fn ext_id(v: &Value) -> Option<i64> {
+    if let Value::Ext(_, bytes) = v {
+        rmpv::decode::read_value(&mut bytes.as_slice())
+            .ok()
+            .and_then(|x| x.as_i64())
+    } else {
+        v.as_i64()
+    }
+}
+
+fn jcell(v: &Value) -> Json {
+    // grid_line cell: [text, hl_id?, repeat?]
+    let a = v.as_array().map(|x| x.as_slice()).unwrap_or(&[]);
+    json!([
+        a.first().and_then(Value::as_str).unwrap_or(""),
+        a.get(1).and_then(Value::as_i64),
+        a.get(2).and_then(Value::as_i64),
+    ])
+}
+
+fn attr_map(v: &Value) -> Json {
+    let mut o = serde_json::Map::new();
+    if let Some(m) = v.as_map() {
+        for (k, val) in m {
+            let Some(k) = k.as_str() else { continue };
+            let jv = match val {
+                Value::Boolean(b) => json!(b),
+                Value::Integer(_) => json!(val.as_i64()),
+                Value::String(_) => json!(val.as_str()),
+                _ => continue,
+            };
+            o.insert(k.to_string(), jv);
+        }
+    }
+    Json::Object(o)
+}
+
+/// Translate one redraw call (event name already stripped) into a normalized op.
+fn grid_op(ev: &str, a: &[Value]) -> Option<Json> {
+    let i = |n: usize| a.get(n).and_then(Value::as_i64);
+    Some(match ev {
+        "grid_resize" => json!({"op":"resize","grid":i(0),"w":i(1),"h":i(2)}),
+        "grid_clear" => json!({"op":"clear","grid":i(0)}),
+        "grid_destroy" => json!({"op":"destroy","grid":i(0)}),
+        "grid_cursor_goto" => json!({"op":"cursor","grid":i(0),"row":i(1),"col":i(2)}),
+        "grid_scroll" => json!({"op":"scroll","grid":i(0),"top":i(1),"bot":i(2),
+            "left":i(3),"right":i(4),"rows":i(5)}),
+        "grid_line" => json!({"op":"line","grid":i(0),"row":i(1),"col":i(2),
+            "cells": a.get(3).and_then(Value::as_array)
+                .map(|c| c.iter().map(jcell).collect::<Vec<_>>()).unwrap_or_default(),
+            "wrap": a.get(4).and_then(Value::as_bool)}),
+        "win_pos" => json!({"op":"win_pos","grid":i(0),"win":a.get(1).and_then(ext_id),
+            "srow":i(2),"scol":i(3),"w":i(4),"h":i(5)}),
+        "win_float_pos" => json!({"op":"win_float","grid":i(0),"win":a.get(1).and_then(ext_id),
+            "anchor":a.get(2).and_then(Value::as_str),"agrid":a.get(3).and_then(ext_id),
+            "arow":a.get(4).and_then(Value::as_f64),"acol":a.get(5).and_then(Value::as_f64),
+            "zindex":i(7)}),
+        "win_hide" => json!({"op":"win_hide","grid":i(0)}),
+        "win_close" => json!({"op":"win_close","grid":i(0)}),
+        "msg_set_pos" => json!({"op":"msg_pos","grid":i(0),"row":i(1)}),
+        "win_viewport" => json!({"op":"viewport","grid":i(0),"win":a.get(1).and_then(ext_id),
+            "topline":i(2),"botline":i(3),"curline":i(4),"curcol":i(5),"linecount":i(6)}),
+        "default_colors_set" => json!({"op":"colors","fg":i(0),"bg":i(1),"sp":i(2)}),
+        "hl_attr_define" => json!({"op":"hl","id":i(0),"attr":attr_map(a.get(1).unwrap_or(&Value::Nil))}),
+        "mode_change" => json!({"op":"mode","name":a.first().and_then(Value::as_str),"idx":i(1)}),
+        "flush" => json!({"op":"flush"}),
+        _ => return None,
+    })
 }
 
 struct BufState {
@@ -184,6 +263,33 @@ impl Handler for NvHandler {
             "gnv_bufchanged" => {
                 let this = self.clone();
                 tokio::spawn(async move { this.sync_buffer(nvim).await });
+            }
+            "gnv_winft" => {
+                let win = args.first().and_then(Value::as_i64).unwrap_or(0);
+                let buf = args.get(1).and_then(Value::as_i64).unwrap_or(0);
+                let ft = args.get(2).and_then(Value::as_str).unwrap_or("").to_string();
+                let _ = self.shared.tx.send(BridgeEvent::WinFt { win, buf, ft });
+            }
+            "redraw" => {
+                let mut batch = self.shared.grid_batch.lock().unwrap();
+                for group in &args {
+                    let Some(arr) = group.as_array() else { continue };
+                    let Some(ev) = arr.first().and_then(Value::as_str) else {
+                        continue;
+                    };
+                    for call in &arr[1..] {
+                        if let Some(op) =
+                            grid_op(ev, call.as_array().map(|x| x.as_slice()).unwrap_or(&[]))
+                        {
+                            let is_flush = ev == "flush";
+                            batch.push(op);
+                            if is_flush {
+                                let frame = std::mem::take(&mut *batch);
+                                let _ = self.shared.tx.send(BridgeEvent::Grid(frame));
+                            }
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -339,6 +445,7 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
         suppress: Arc::new(AtomicI64::new(0)),
         skip_snapshot: Arc::new(AtomicBool::new(false)),
         buf_epoch: Arc::new(AtomicU64::new(0)),
+        grid_batch: Arc::new(std::sync::Mutex::new(Vec::new())),
     };
     let bufstate: Arc<Mutex<Option<BufState>>> = Arc::new(Mutex::new(None));
 
@@ -354,26 +461,28 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
     let buf = nvim.get_current_buf().await.map_err(err)?;
     let id = buf.get_number().await.map_err(err)?;
 
-    // Seed the welcome text only into a genuinely fresh session.
-    let bufs = nvim.list_bufs().await.map_err(err)?;
-    let name0 = buf.get_name().await.unwrap_or_default();
-    let lines0 = buf.get_lines(0, -1, false).await.map_err(err)?;
-    if bufs.len() == 1 && name0.is_empty() && lines0 == [""] {
-        buf.set_lines(
-            0,
-            -1,
-            false,
-            INITIAL.iter().map(|s| s.to_string()).collect(),
-        )
+    // ---- spike layout: a markdown island window + a code grid window ----
+    nvim.command("filetype on").await.ok();
+    buf.set_lines(0, -1, false, INITIAL.iter().map(|s| s.to_string()).collect())
         .await
         .map_err(err)?;
-        nvim.command("setlocal buftype=nofile noswapfile")
-            .await
-            .map_err(err)?;
-    }
+    nvim.command("setlocal buftype=nofile noswapfile filetype=markdown")
+        .await
+        .map_err(err)?;
+    std::fs::write(
+        "/tmp/gnv-spike-code.txt",
+        (1..=200)
+            .map(|n| format!("line {n:>3}: the quick brown fox jumps over the lazy dog"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .ok();
+    nvim.command("belowright vsplit /tmp/gnv-spike-code.txt")
+        .await
+        .map_err(err)?;
+    nvim.command("wincmd h").await.map_err(err)?; // back to the markdown window
 
-    // Autocmds in one augroup, targeted at our channel, so a reused nvim does
-    // not accumulate duplicates.
+    // Autocmds in one augroup, targeted at our channel.
     let api = nvim.get_api_info().await.map_err(err)?;
     let chan = api.first().and_then(Value::as_i64).ok_or("no channel id")?;
     nvim.command("augroup gnv | autocmd! | augroup END")
@@ -385,23 +494,39 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
              call rpcnotify({chan}, 'gnv_cursor', line('.') - 1, charcol('.') - 1, mode())"
         ),
         format!(
-            "autocmd gnv BufEnter,BufWinEnter,WinEnter * call rpcnotify({chan}, 'gnv_bufchanged')"
-        ),
-        format!(
             "autocmd gnv CmdlineEnter,CmdlineChanged * \
              call rpcnotify({chan}, 'gnv_cmdline', getcmdtype(), getcmdline(), getcmdpos())"
         ),
         format!("autocmd gnv CmdlineLeave * call rpcnotify({chan}, 'gnv_cmdline_hide')"),
+        format!(
+            "autocmd gnv BufWinEnter,FileType,WinEnter,WinNew,WinClosed * \
+             call rpcnotify({chan}, 'gnv_winft', win_getid(), bufnr(), &filetype)"
+        ),
     ] {
         nvim.command(&spec).await.map_err(err)?;
     }
 
+    // Attach the markdown buffer (current window after `wincmd h`) for buffer-sync.
+    let md_buf = nvim.get_current_buf().await.map_err(err)?;
+    let md_id = md_buf.get_number().await.map_err(err)?;
     *bufstate.lock().await = Some(BufState {
-        buf: buf.clone(),
-        id,
+        buf: md_buf.clone(),
+        id: md_id,
     });
     shared.skip_snapshot.store(true, Ordering::SeqCst);
-    buf.attach(true, vec![]).await.map_err(err)?;
+    md_buf.attach(true, vec![]).await.map_err(err)?;
+    let _ = id;
+
+    // Attach the UI last so we get the layout events for the split we just made.
+    let mut opts = UiAttachOptions::new();
+    opts.set_linegrid_external(true).set_multigrid_external(true);
+    nvim.ui_attach(220, 60, &opts).await.map_err(err)?;
+    // fire an initial winft sweep so the client learns both windows
+    nvim.command(&format!(
+        "call rpcnotify({chan}, 'gnv_winft', win_getid(), bufnr(), &filetype)"
+    ))
+    .await
+    .ok();
 
     Ok((
         Bridge {
@@ -458,6 +583,17 @@ impl Bridge {
 
     pub async fn reset(&self) -> Result<ResetPayload, String> {
         build_reset(&self.nvim, &self.bufstate).await
+    }
+
+    pub async fn resize(&self, cols: i64, rows: i64) -> Result<(), String> {
+        let cols = cols.max(20);
+        let rows = rows.max(4);
+        self.nvim
+            .call("nvim_ui_try_resize", vec![cols.into(), rows.into()])
+            .await
+            .map_err(err)?
+            .map_err(|e| format!("{e:?}"))
+            .map(|_| ())
     }
 
     /// `:edit` a file path, splitting nothing on spaces.
