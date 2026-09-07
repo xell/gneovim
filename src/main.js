@@ -2,6 +2,8 @@ import { EditorView, basicSetup } from "codemirror";
 import { Decoration, WidgetType } from "@codemirror/view";
 import { Annotation, StateEffect, StateField } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 const editorEl = document.getElementById("editor");
 const te = new TextEncoder();
@@ -168,7 +170,7 @@ function applyCursor(row, col, mode) {
   editorEl.dataset.mode = mode;
 }
 
-// --- WebSocket bridge --------------------------------------------------------
+// --- transport: Tauri IPC --------------------------------------------------------
 const statusEl = document.getElementById("status");
 const connEl = document.getElementById("conn");
 const modeEl = document.getElementById("mode");
@@ -213,51 +215,58 @@ const MODE_NAMES = {
 };
 const modeName = (m) => MODE_NAMES[m] ?? MODE_NAMES[m?.[0]] ?? m ?? "—";
 
-let ws = null;
+function applyReset(m) {
+  nvimTx({
+    changes: { from: 0, to: view.state.doc.length, insert: m.lines.join("\n") },
+  });
+  applyCursor(m.row, m.col, m.mode);
+  modeEl.textContent = modeName(m.mode);
+  if (m.name !== undefined) fileEl.textContent = basename(m.name);
+  hideCmdline();
+  statusEl.className = "ok";
+  connEl.textContent = "connected";
+}
 
+// Outbound: dispatch the same {type, ...} shape the rest of the file produces
+// to the matching Tauri command.
 function send(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  if (obj.type === "input") {
+    invoke("nvim_input", { keys: obj.keys });
+  } else if (obj.type === "cursor-set") {
+    invoke("nvim_cursor_set", { row: obj.row, col: obj.col });
+  } else if (obj.type === "edit") {
+    invoke("nvim_edit", { regions: obj.regions });
+  } else if (obj.type === "resync") {
+    invoke("nvim_resync").then(applyReset).catch(() => {});
+  }
 }
 
-function connect() {
-  ws = new WebSocket(`ws://${location.host}/nvim`);
+// Inbound: nvim -> Rust -> webview events.
+listen("gnv://reset", (e) => applyReset(e.payload));
+listen("gnv://lines", (e) =>
+  applyBufLines(e.payload.firstline, e.payload.lastline, e.payload.linedata),
+);
+listen("gnv://cursor", (e) => {
+  applyCursor(e.payload.row, e.payload.col, e.payload.mode);
+  modeEl.textContent = modeName(e.payload.mode);
+});
+listen("gnv://cmdline", (e) =>
+  renderCmdline(e.payload.ctype, e.payload.content, e.payload.pos),
+);
+listen("gnv://cmdline_hide", () => hideCmdline());
 
-  ws.onopen = () => {
-    statusEl.className = "ok";
-    connEl.textContent = "connected";
-  };
-
-  ws.onclose = () => {
-    statusEl.className = "down";
-    connEl.textContent = "disconnected — retrying";
-    hideCmdline();
-    setTimeout(connect, 1000);
-  };
-
-  ws.onmessage = (e) => {
-    const m = JSON.parse(e.data);
-    if (m.type === "reset") {
-      nvimTx({
-        changes: { from: 0, to: view.state.doc.length, insert: m.lines.join("\n") },
-      });
-      applyCursor(m.row, m.col, m.mode);
-      modeEl.textContent = modeName(m.mode);
-      if (m.name !== undefined) fileEl.textContent = basename(m.name);
-      hideCmdline();
-    } else if (m.type === "lines") {
-      applyBufLines(m.firstline, m.lastline, m.linedata);
-    } else if (m.type === "cursor") {
-      applyCursor(m.row, m.col, m.mode);
-      modeEl.textContent = modeName(m.mode);
-    } else if (m.type === "cmdline") {
-      renderCmdline(m.ctype, m.content, m.pos);
-    } else if (m.type === "cmdline_hide") {
-      hideCmdline();
+// Initial snapshot, retried until the bridge has finished connecting to nvim.
+(async function initialSync() {
+  for (let i = 0; i < 100; i++) {
+    try {
+      applyReset(await invoke("nvim_resync"));
+      return;
+    } catch {
+      await new Promise((r) => setTimeout(r, 100));
     }
-  };
-}
-
-connect();
+  }
+  connEl.textContent = "nvim unavailable";
+})();
 
 // --- keyboard -> nvim_input ------------------------------------------------------
 const NAMED = {
@@ -297,6 +306,7 @@ function keyToNvim(e) {
 }
 
 addEventListener("keydown", (e) => {
+  // Cmd+N / Cmd+T (New Window / New Tab) are handled by the native menu.
   const keys = keyToNvim(e);
   if (keys === null) return;
   e.preventDefault();

@@ -11,10 +11,11 @@
       <header>
         <h1>nvim &harr; codemirror</h1>
         <p class="note">
-          Buffer-sync step 3. A real <code>nvim --embed</code> owns the buffer.
-          Keystrokes go to <code>nvim_input()</code> and nvim's changes stream
-          back as minimal diffs. CodeMirror stays editable, so edits made in it
-          (Grammarly, paste) are forwarded to nvim via <code>nvim_buf_set_text</code>.
+          A real headless <code>nvim</code>, driven from the Tauri (Rust) shell
+          via <code>nvim-rs</code>. Keystrokes go to <code>nvim_input()</code> over
+          Tauri IPC; nvim's changes come back as minimal diffs. CodeMirror stays
+          editable, so edits made in it (Grammarly, paste) are forwarded via
+          <code>nvim_buf_set_text</code>.
         </p>
         <div id="status" class="down">
           <span id="conn">connecting…</span>
