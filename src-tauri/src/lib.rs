@@ -53,6 +53,65 @@ fn add_as_tab(parent: &tauri::WebviewWindow, child: &tauri::WebviewWindow) {
     }
 }
 
+/// Set the NSWindow corner radius to match macOS 26's new design language (~26 pt).
+/// Uses the long-standing private `_setCornerRadius:` selector, which remains
+/// valid on macOS 26; the OS takes care of fullscreen and tab-bar junctions.
+#[cfg(target_os = "macos")]
+fn apply_corner_radius(win: &tauri::WebviewWindow) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    let ns_win = match win.ns_window() {
+        Ok(p) if !p.is_null() => p as *mut AnyObject,
+        _ => return,
+    };
+    unsafe {
+        let _: () = msg_send![ns_win, _setCornerRadius: 26.0_f64];
+    }
+}
+
+/// Shift the traffic-light buttons rightward so they sit inside the macOS 26
+/// corner radius (~26 pt). Button centres land at x ≈ 20, 40, 60 pt from the
+/// left edge; the inter-button gap chosen by AppKit is preserved.
+/// Must be called on the main thread. Re-called on every `Resized` event so
+/// that AppKit's own layout pass cannot silently override our positions.
+#[cfg(target_os = "macos")]
+fn apply_traffic_light_inset(win: &tauri::WebviewWindow) {
+    use objc2_app_kit::{NSView, NSWindow, NSWindowButton};
+
+    let ptr = match win.ns_window() {
+        Ok(p) if !p.is_null() => p,
+        _ => return,
+    };
+    // Safety: Tauri hands us a valid, live NSWindow pointer.
+    let ns_win: &NSWindow = unsafe { &*(ptr as *const NSWindow) };
+
+    let Some(close) = ns_win.standardWindowButton(NSWindowButton::CloseButton) else {
+        return;
+    };
+    let Some(mini) = ns_win.standardWindowButton(NSWindowButton::MiniaturizeButton) else {
+        return;
+    };
+    let zoom = ns_win.standardWindowButton(NSWindowButton::ZoomButton);
+
+    // Keep the gap AppKit chose between buttons (typically ~20 pt).
+    let close_rect = NSView::frame(&close);
+    let mini_rect = NSView::frame(&mini);
+    let gap = mini_rect.origin.x - close_rect.origin.x;
+
+    let mut buttons = vec![close, mini];
+    if let Some(z) = zoom {
+        buttons.push(z);
+    }
+
+    // Close-button frame origin at x = 13 pt → button centre at 20 pt.
+    for (i, btn) in buttons.into_iter().enumerate() {
+        let mut rect = NSView::frame(&btn);
+        rect.origin.x = 13.0 + i as f64 * gap;
+        NSView::setFrameOrigin(&btn, rect.origin);
+    }
+}
+
 /// Create a gui-window with its own nvim. `as_tab` adds it to the focused
 /// window's tab group (macOS); otherwise it is a standalone window.
 fn spawn_window(app: &AppHandle, as_tab: bool) -> Option<String> {
@@ -86,6 +145,11 @@ fn spawn_window(app: &AppHandle, as_tab: bool) -> Option<String> {
             return None;
         }
     };
+
+    #[cfg(target_os = "macos")]
+    apply_corner_radius(&win);
+    #[cfg(target_os = "macos")]
+    apply_traffic_light_inset(&win);
 
     #[cfg(target_os = "macos")]
     if as_tab {
@@ -214,8 +278,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         Some("CmdOrCtrl+N"),
     )?;
-    let new_tab =
-        MenuItem::with_id(app, "gnv:new_tab", "New Tab", true, Some("CmdOrCtrl+T"))?;
+    let new_tab = MenuItem::with_id(app, "gnv:new_tab", "New Tab", true, Some("CmdOrCtrl+T"))?;
     let sep = PredefinedMenuItem::separator(app)?;
     for kind in menu.items()? {
         if let Some(sub) = kind.as_submenu() {
@@ -278,10 +341,21 @@ pub fn run() {
                     *state.last_focused.lock().unwrap() = Some(window.label().to_string());
                 }
             }
+            #[cfg(target_os = "macos")]
+            WindowEvent::Resized(_) => {
+                if let Some(win) = window.app_handle().get_webview_window(window.label()) {
+                    apply_traffic_light_inset(&win);
+                }
+            }
             _ => {}
         })
         .setup(|app| {
             spawn_bridge(app.handle().clone(), "main".to_string());
+            #[cfg(target_os = "macos")]
+            if let Some(win) = app.get_webview_window("main") {
+                apply_corner_radius(&win);
+                apply_traffic_light_inset(&win);
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
