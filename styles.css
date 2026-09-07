@@ -25,11 +25,11 @@ body {
   font: 13px / 1.3 ui-monospace, "SF Mono", Menlo, monospace;
   white-space: pre;
   overflow: hidden;
-  contain: strict;
 }
 
 .gridwin {
   position: absolute;
+  contain: strict;
 }
 
 .grid-row {

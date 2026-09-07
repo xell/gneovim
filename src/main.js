@@ -12,6 +12,19 @@ const viewportEl = document.getElementById("viewport");
 const te = new TextEncoder();
 const byteLen = (s) => te.encode(s).length;
 
+// mirror the webview console into the app log (spike debugging)
+const jlog = (m) => invoke("js_log", { msg: String(m) }).catch(() => {});
+addEventListener("error", (e) =>
+  jlog(`ERROR ${e.message} @ ${e.filename}:${e.lineno}\n${e.error?.stack || ""}`),
+);
+addEventListener("unhandledrejection", (e) => jlog(`REJECT ${e.reason}`));
+const _origErr = console.error.bind(console);
+console.error = (...a) => {
+  jlog("console.error " + a.map(String).join(" "));
+  _origErr(...a);
+};
+jlog("main.js loaded");
+
 // ---------------------------------------------------------------------------
 // cell metrics (monospace grid)
 // ---------------------------------------------------------------------------
@@ -187,7 +200,9 @@ function layout() {
       if (p) {
         place(islandEl, p);
         islandEl.style.zIndex = 5;
+        const wasHidden = islandEl.hidden;
         islandEl.hidden = false;
+        if (wasHidden) view.requestMeasure();
       }
       continue;
     }
@@ -475,22 +490,6 @@ function applyGridBatch(ops) {
 // ---------------------------------------------------------------------------
 // transport
 // ---------------------------------------------------------------------------
-listen("gnv://grid", (e) => applyGridBatch(e.payload));
-listen("gnv://winft", (e) => {
-  const { win, ft } = e.payload;
-  winFt.set(win, ft || "");
-  recomputeIsland();
-});
-listen("gnv://reset", (e) => applyReset(e.payload));
-listen("gnv://lines", (e) =>
-  applyBufLines(e.payload.firstline, e.payload.lastline, e.payload.linedata),
-);
-listen("gnv://cursor", (e) => {
-  if (islandGrid != null) applyCursor(e.payload.row, e.payload.col, e.payload.mode);
-});
-listen("gnv://cmdline", () => {});
-listen("gnv://cmdline_hide", () => {});
-
 function pushSize() {
   const r = viewportEl.getBoundingClientRect();
   const cols = Math.max(20, Math.floor(r.width / cellW));
@@ -498,19 +497,75 @@ function pushSize() {
   invoke("nvim_resize", { cols, rows }).catch(() => {});
 }
 
+// surface any uncaught error as visible text (webview has no visible console)
+addEventListener("error", (e) => {
+  const pre = document.createElement("pre");
+  pre.style.cssText =
+    "position:fixed;inset:0;margin:0;padding:1rem;background:#300;color:#fdd;white-space:pre-wrap;z-index:999;font:12px monospace";
+  pre.textContent = `${e.message}\n${e.filename}:${e.lineno}\n${e.error?.stack || ""}`;
+  document.body.append(pre);
+});
+
 measureCell();
-new ResizeObserver(() => pushSize()).observe(viewportEl);
 
 (async function boot() {
+  // register every listener BEFORE anything can trigger a redraw
+  await Promise.all([
+    listen("gnv://grid", (e) => applyGridBatch(e.payload)),
+    listen("gnv://winft", (e) => {
+      winFt.set(e.payload.win, e.payload.ft || "");
+      recomputeIsland();
+    }),
+    listen("gnv://reset", (e) => applyReset(e.payload)),
+    listen("gnv://lines", (e) =>
+      applyBufLines(e.payload.firstline, e.payload.lastline, e.payload.linedata),
+    ),
+    listen("gnv://cursor", (e) => {
+      if (islandGrid != null)
+        applyCursor(e.payload.row, e.payload.col, e.payload.mode);
+    }),
+    listen("gnv://cmdline", () => {}),
+    listen("gnv://cmdline_hide", () => {}),
+  ]);
+
+  jlog(`listeners ready; cellW=${cellW.toFixed(2)} cellH=${cellH.toFixed(2)}`);
+
   for (let i = 0; i < 100; i++) {
     try {
-      pushSize();
       applyReset(await invoke("nvim_resync"));
-      return;
-    } catch {
+      jlog("resync ok");
+      break;
+    } catch (e) {
+      if (i === 20) jlog("resync still failing: " + e);
       await new Promise((r) => setTimeout(r, 100));
     }
   }
+
+  // winft events fired before we were listening; replay them.
+  try {
+    for (const [win, , ft] of await invoke("nvim_winfts")) {
+      winFt.set(win, ft || "");
+    }
+    recomputeIsland();
+    jlog(`winfts replayed: ${JSON.stringify([...winFt])} island=${islandGrid}`);
+  } catch (e) {
+    jlog("winfts failed: " + e);
+  }
+
+  new ResizeObserver(() => pushSize()).observe(viewportEl);
+  pushSize();
+  // the first frames from ui_attach were emitted before we were listening;
+  // force a full repaint now that the listeners are live.
+  await new Promise((r) => setTimeout(r, 60));
+  invoke("nvim_redraw").catch(() => {});
+  setTimeout(
+    () =>
+      jlog(
+        `state: grids=${grids.size} winPos=${winPos.size} island=${islandGrid} ` +
+          `winFt=${JSON.stringify([...winFt])}`,
+      ),
+    800,
+  );
 })();
 
 // ---------------------------------------------------------------------------

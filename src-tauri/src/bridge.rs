@@ -596,6 +596,35 @@ impl Bridge {
             .map(|_| ())
     }
 
+    /// Force nvim to repaint the whole screen (recovers a lost first frame).
+    pub async fn redraw(&self) -> Result<(), String> {
+        self.nvim.command("mode").await.map_err(err)
+    }
+
+    /// `[[winid, bufnr, filetype], ...]` for every window (winft replay).
+    pub async fn win_fts(&self) -> Result<Vec<(i64, i64, String)>, String> {
+        let v = self
+            .nvim
+            .eval(
+                "map(getwininfo(), {_,w -> \
+                 [w.winid, w.bufnr, getbufvar(w.bufnr, '&filetype')]})",
+            )
+            .await
+            .map_err(err)?;
+        Ok(v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                let r = row.as_array()?;
+                Some((
+                    r.first().and_then(Value::as_i64)?,
+                    r.get(1).and_then(Value::as_i64)?,
+                    r.get(2).and_then(Value::as_str).unwrap_or("").to_string(),
+                ))
+            })
+            .collect())
+    }
+
     /// `:edit` a file path, splitting nothing on spaces.
     pub async fn open_file(&self, path: &str) -> Result<(), String> {
         self.nvim
