@@ -165,7 +165,10 @@ class GridWin {
           flush();
           runHl = hl;
         }
-        run += ch === "" ? " " : ch;
+        // "" is the right half of a preceding double-width (CJK) cell; the wide
+        // glyph already covers this column, so emit nothing for it
+        if (ch === "") continue;
+        run += ch;
       }
       flush();
       if (this.cursor && this.cursor.row === r) {
@@ -297,6 +300,7 @@ function placeGridCursor() {
   const pct = m && m.cell_percentage ? m.cell_percentage / 100 : 1;
   gridCursorEl.hidden = false;
   gridCursorEl.dataset.shape = shape;
+  gridCursorEl.style.zIndex = (p.zindex ?? 1) + 1; // ride above the focused float
   if (shape === "vertical") {
     gridCursorEl.style.left = `${x}px`;
     gridCursorEl.style.top = `${y}px`;
@@ -508,18 +512,30 @@ function applyGridBatch(ops) {
         if (o.win != null) gridToWin.set(o.grid, o.win);
         layoutDirty = true;
         break;
-      case "win_float":
+      case "win_float": {
+        const fg = grids.get(o.grid) || {};
+        const w = fg.cols || 20;
+        const h = fg.rows || 5;
+        // position is relative to anchor_grid (grid 1 = whole screen, at 0,0)
+        const ap =
+          o.agrid != null && o.agrid !== 1 ? winPos.get(o.agrid) : null;
+        let srow = (ap ? ap.srow : 0) + (o.arow ?? 0);
+        let scol = (ap ? ap.scol : 0) + (o.acol ?? 0);
+        const anchor = o.anchor || "NW"; // which float corner sits at (row,col)
+        if (anchor[0] === "S") srow -= h;
+        if (anchor[1] === "E") scol -= w;
         winPos.set(o.grid, {
-          srow: Math.round(o.arow ?? 0),
-          scol: Math.round(o.acol ?? 0),
-          w: (grids.get(o.grid) || {}).cols || 20,
-          h: (grids.get(o.grid) || {}).rows || 5,
+          srow: Math.round(srow),
+          scol: Math.round(scol),
+          w,
+          h,
           float: true,
           zindex: o.zindex ?? 50,
         });
         if (o.win != null) gridToWin.set(o.grid, o.win);
         layoutDirty = true;
         break;
+      }
       case "win_hide":
       case "win_close": {
         const g = grids.get(o.grid);
@@ -528,16 +544,18 @@ function applyGridBatch(ops) {
         layoutDirty = true;
         break;
       }
-      case "msg_pos":
+      case "msg_pos": {
+        const mg = grids.get(o.grid) || {};
         winPos.set(o.grid, {
           srow: o.row,
           scol: 0,
-          w: (grids.get(1) || {}).cols || 200,
-          h: (grids.get(o.grid) || {}).rows || 1,
-          zindex: 40,
+          w: mg.cols || (grids.get(1) || {}).cols || 200,
+          h: mg.rows || 1,
+          zindex: 250, // messages ride above floats
         });
         layoutDirty = true;
         break;
+      }
       case "viewport":
         if (o.grid === islandGrid) {
           islandScrollTo(o.topline);
