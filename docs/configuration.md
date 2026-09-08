@@ -17,7 +17,24 @@ Every key is optional.
 # Path to the nvim binary to run. A leading ~/ is expanded to $HOME.
 # If unset or not a file, gneovim auto-detects (see below).
 path = "~/.local/share/bob/nvim-bin/nvim"
+
+# Which init to load. Default is "none".
+#   "none"              -> nvim runs with -u NONE (a bare nvim, no plugins)
+#   "user"              -> no -u flag; nvim loads ~/.config/nvim as normal
+#   "~/path/to/init.lua" -> nvim runs with -u <that path>
+config = "user"
 ```
+
+## Loading your Neovim config
+
+By default gneovim runs `nvim -u NONE`, so your `~/.config/nvim` is not read. This keeps the renderer working against a predictable nvim while it is still being built. Set `config = "user"` to load your real config.
+
+Two caveats:
+
+- The renderer is not finished. A full config (a colorscheme, statusline plugins, treesitter, LSP, render-markdown and similar) will exercise parts of the renderer that are still rough, so expect visual glitches.
+- gneovim always adds `-i NONE` (no shada) and `-n` (no swap) for now.
+
+Launched from `/Applications`, a macOS app gets a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), so config that shells out to `git`, `cc`, `rg`, `node` and the like may fail. Launched with `npm run tauri dev` from a terminal it inherits your full shell environment. Importing the login shell environment for the bundled app is a later change.
 
 ## How the nvim binary is chosen
 

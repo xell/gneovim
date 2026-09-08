@@ -22,6 +22,23 @@ pub struct Neovim {
     /// or not a file, the bridge falls back to auto-detection. Overridden by the
     /// `GNV_NVIM` environment variable.
     pub path: Option<String>,
+
+    /// Which init to load:
+    ///   unset or "none" -> `-u NONE` (a bare nvim, the default)
+    ///   "user"          -> no `-u`, nvim finds `~/.config/nvim` normally
+    ///   "~/path/init.lua" (anything else) -> `-u <that path>` (`~/` expanded)
+    pub config: Option<String>,
+}
+
+impl Neovim {
+    /// The `-u ...` args for `nvim`, per `config`. Empty means "no -u flag".
+    pub fn init_args(&self) -> Vec<String> {
+        match self.config.as_deref().unwrap_or("none") {
+            s if s.eq_ignore_ascii_case("none") => vec!["-u".into(), "NONE".into()],
+            s if s.eq_ignore_ascii_case("user") || s.is_empty() => vec![],
+            path => vec!["-u".into(), expand_tilde(path)],
+        }
+    }
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -93,6 +110,19 @@ mod tests {
         assert!(toml::from_str::<Config>("[neovim]\n").unwrap().neovim.path.is_none());
         // unknown keys are tolerated, not fatal
         assert!(toml::from_str::<Config>("[general]\nfoo = 1\n").is_ok());
+    }
+
+    #[test]
+    fn init_args_from_config() {
+        std::env::set_var("HOME", "/home/x");
+        let none = Neovim { path: None, config: None };
+        assert_eq!(none.init_args(), vec!["-u", "NONE"]);
+        let explicit_none = Neovim { path: None, config: Some("none".into()) };
+        assert_eq!(explicit_none.init_args(), vec!["-u", "NONE"]);
+        let user = Neovim { path: None, config: Some("user".into()) };
+        assert!(user.init_args().is_empty());
+        let custom = Neovim { path: None, config: Some("~/x/init.lua".into()) };
+        assert_eq!(custom.init_args(), vec!["-u", "/home/x/x/init.lua"]);
     }
 
     #[test]

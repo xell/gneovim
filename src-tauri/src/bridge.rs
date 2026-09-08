@@ -440,9 +440,12 @@ pub struct Bridge {
 /// handle so the caller can keep it alive (and kill it) with the app.
 pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child), String> {
     let bin = find_nvim().await;
-    log::info!("using nvim at {bin}");
+    let init_args = crate::config::get().neovim.init_args();
+    log::info!("using nvim at {bin} (init: {init_args:?})");
     let mut cmd = Command::new(&bin);
-    cmd.args(["--embed", "--headless", "-n", "-u", "NONE", "-i", "NONE"])
+    cmd.args(["--embed", "--headless", "-n"])
+        .args(&init_args)
+        .args(["-i", "NONE"])
         .kill_on_drop(true);
 
     let shared = Shared {
