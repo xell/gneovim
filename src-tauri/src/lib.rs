@@ -261,6 +261,20 @@ async fn nvim_resync(app: AppHandle, window: tauri::Window) -> Result<ResetPaylo
 }
 
 #[tauri::command]
+async fn island_attach(
+    app: AppHandle,
+    window: tauri::Window,
+    win: i64,
+) -> Result<ResetPayload, String> {
+    bridge_for(&app, window.label()).await?.island_attach(win).await
+}
+
+#[tauri::command]
+async fn island_detach(app: AppHandle, window: tauri::Window) -> Result<(), String> {
+    bridge_for(&app, window.label()).await?.island_detach().await
+}
+
+#[tauri::command]
 async fn nvim_resize(
     app: AppHandle,
     window: tauri::Window,
@@ -362,6 +376,8 @@ pub fn run() {
             nvim_cursor_set,
             nvim_edit,
             nvim_resync,
+            island_attach,
+            island_detach,
             nvim_resize,
             nvim_redraw,
             nvim_ui_start,

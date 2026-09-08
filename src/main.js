@@ -160,6 +160,8 @@ const winPos = new Map(); // gridId -> {srow,scol,w,h,float,zindex}
 const gridToWin = new Map(); // gridId -> winId
 const winFt = new Map(); // winId -> filetype
 let islandGrid = null;
+let islandWin = null; // window id whose buffer the CM island is synced to
+let islandBusy = false;
 let modeName_ = "n";
 
 function gw(id) {
@@ -172,14 +174,32 @@ function gw(id) {
   return g;
 }
 
-function recomputeIsland() {
+async function recomputeIsland() {
   let found = null;
   for (const [gid, wid] of gridToWin) {
     if ((winFt.get(wid) || "").includes("markdown")) found = gid;
   }
+  const foundWin = found == null ? null : (gridToWin.get(found) ?? null);
   if (found !== islandGrid) {
     islandGrid = found;
     layout();
+  }
+  // point the buffer-sync stream at the markdown window's buffer (or detach)
+  if (foundWin !== islandWin && !islandBusy) {
+    islandBusy = true;
+    islandWin = foundWin;
+    try {
+      if (foundWin == null) {
+        await invoke("island_detach");
+        nvimTx({ changes: { from: 0, to: view.state.doc.length, insert: "" } });
+      } else {
+        applyReset(await invoke("island_attach", { win: foundWin }));
+      }
+    } catch (e) {
+      jlog("island toggle failed: " + e);
+    }
+    islandBusy = false;
+    recomputeIsland(); // state may have moved while we awaited
   }
 }
 
@@ -594,18 +614,8 @@ addEventListener("error", (e) => {
     }
   }
 
-  for (let i = 0; i < 100; i++) {
-    try {
-      applyReset(await invoke("nvim_resync"));
-      jlog("resync ok");
-      break;
-    } catch (e) {
-      if (i === 20) jlog("resync still failing: " + e);
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  }
-
-  // winft events fired before we were listening; replay them.
+  // winft events fired before we were listening; replay them. recomputeIsland()
+  // then attaches the island to a markdown window's buffer if one exists.
   try {
     for (const [win, , ft] of await invoke("nvim_winfts")) {
       winFt.set(win, ft || "");

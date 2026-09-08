@@ -25,11 +25,12 @@ use tokio::sync::{mpsc::UnboundedSender, Mutex};
 pub type NWriter = Compat<ChildStdin>;
 pub type Nvim = Neovim<NWriter>;
 
-// Apply edit regions (already sorted bottom-up so earlier offsets stay valid).
+// Apply edit regions to a specific buffer (regions already sorted bottom-up so
+// earlier offsets stay valid). The island buffer is not always the current one.
 const LUA_APPLY_EDIT: &str = r#"
-  local regions = ...
+  local bufnr, regions = ...
   for _, r in ipairs(regions) do
-    vim.api.nvim_buf_set_text(0, r.sr, r.sc, r.er, r.ec, r.repl)
+    vim.api.nvim_buf_set_text(bufnr, r.sr, r.sc, r.er, r.ec, r.repl)
   end
 "#;
 
@@ -523,6 +524,10 @@ impl Bridge {
     }
 
     pub async fn edit(&self, regions: Vec<Region>) -> Result<(), String> {
+        let bufnr = match self.bufstate.lock().await.as_ref() {
+            Some(s) => s.id,
+            None => return Ok(()), // no island attached, nothing to forward
+        };
         let lua_regions: Vec<Value> = regions
             .iter()
             .map(|r| {
@@ -544,7 +549,10 @@ impl Bridge {
         self.shared.suppress.fetch_add(1, Ordering::SeqCst);
         let res = self
             .nvim
-            .exec_lua(LUA_APPLY_EDIT, vec![Value::Array(lua_regions)])
+            .exec_lua(
+                LUA_APPLY_EDIT,
+                vec![Value::from(bufnr), Value::Array(lua_regions)],
+            )
             .await;
         // Let trailing lines events for this edit drain, then reopen.
         let suppress = self.shared.suppress.clone();
@@ -557,6 +565,43 @@ impl Bridge {
 
     pub async fn reset(&self) -> Result<ResetPayload, String> {
         build_reset(&self.nvim, &self.bufstate).await
+    }
+
+    /// Point the buffer-sync stream (the markdown island) at `win`'s buffer,
+    /// detaching whatever was attached before. Returns a fresh snapshot for the
+    /// client to load into the island's CodeMirror. `win` is a raw window id.
+    pub async fn island_attach(&self, win: i64) -> Result<ResetPayload, String> {
+        let buf_val = self
+            .nvim
+            .call("nvim_win_get_buf", vec![Value::from(win)])
+            .await
+            .map_err(err)?
+            .map_err(|e| format!("nvim_win_get_buf: {e:?}"))?;
+        let new_id = ext_id(&buf_val).ok_or("nvim_win_get_buf returned no id")?;
+
+        let mut st = self.bufstate.lock().await;
+        if st.as_ref().map(|s| s.id) != Some(new_id) {
+            if let Some(old) = st.as_ref() {
+                let _ = old.buf.detach().await;
+            }
+            let new_buf = Buffer::new(Value::from(new_id), self.nvim.clone());
+            self.shared.skip_snapshot.store(true, Ordering::SeqCst);
+            new_buf.attach(true, vec![]).await.map_err(err)?;
+            *st = Some(BufState {
+                buf: new_buf,
+                id: new_id,
+            });
+        }
+        drop(st);
+        build_reset(&self.nvim, &self.bufstate).await
+    }
+
+    /// Detach the buffer-sync stream. Called when no markdown window is visible.
+    pub async fn island_detach(&self) -> Result<(), String> {
+        if let Some(old) = self.bufstate.lock().await.take() {
+            let _ = old.buf.detach().await;
+        }
+        Ok(())
     }
 
     /// Attach the Neovim UI (multigrid) at `cols`x`rows`. Called by the client
