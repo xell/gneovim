@@ -31,6 +31,7 @@ jlog("main.js loaded");
 // ---------------------------------------------------------------------------
 let cellW = 8.4;
 let cellH = 17;
+let originX = 12; // left margin in px; the grid is letterboxed, see screenMetrics
 function measureCell() {
   const probe = document.createElement("div");
   // explicit font so we measure the natural line box, not whatever --cell-h is
@@ -252,7 +253,7 @@ function attachIsland(isl) {
 const islandForGrid = (gid) => islands.get(gridToWin.get(gid));
 
 function place(el, p) {
-  el.style.left = `${p.scol * cellW}px`;
+  el.style.left = `${p.scol * cellW + originX}px`;
   el.style.top = `${p.srow * cellH}px`;
   el.style.width = `${p.w * cellW}px`;
   el.style.height = `${p.h * cellH}px`;
@@ -262,9 +263,9 @@ function place(el, p) {
 function layout() {
   for (const [gid, g] of grids) {
     if (gid === 1) {
-      // outer grid: statuslines, separators, tabline, fills the viewport
+      // outer grid: statuslines, separators, tabline. Letterboxed by originX.
       g.el.style.cssText =
-        "position:absolute;left:0;top:0;right:0;bottom:0;z-index:0";
+        `position:absolute;left:${originX}px;right:${originX}px;top:0;bottom:0;z-index:0`;
       g.el.hidden = false;
       continue;
     }
@@ -310,7 +311,7 @@ function placeGridCursor() {
     gridCursorEl.hidden = true;
     return;
   }
-  const x = (p.scol + g.cursor.col) * cellW;
+  const x = (p.scol + g.cursor.col) * cellW + originX;
   const y = (p.srow + g.cursor.row) * cellH;
   const m = cursorStyleEnabled ? curMode : null;
   const shape = (m && m.cursor_shape) || "block";
@@ -652,8 +653,9 @@ function forceRepaint(el) {
 // transport
 // ---------------------------------------------------------------------------
 const MIN_PAD_X = 12; // minimum left/right breathing room, px
-// Fit an integer cell grid in the viewport and letterbox it: equal horizontal
-// padding absorbs the sub-cell remainder so left and right margins match.
+// Fit an integer cell grid in the viewport and letterbox it: the sub-cell
+// horizontal remainder is split evenly so left and right margins match.
+// originX is the left margin; every grid is placed at scol*cellW + originX.
 function screenMetrics() {
   const r = viewportEl.getBoundingClientRect();
   const cols = Math.max(20, Math.floor((r.width - 2 * MIN_PAD_X) / cellW));
@@ -662,8 +664,9 @@ function screenMetrics() {
   return { cols, rows, padX };
 }
 function applyScreen(m) {
-  viewportEl.style.paddingLeft = `${m.padX}px`;
-  viewportEl.style.paddingRight = `${m.padX}px`;
+  originX = m.padX;
+  layout();
+  placeGridCursor();
 }
 let lastSize = { cols: 0, rows: 0 };
 function pushSize() {
