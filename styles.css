@@ -18,6 +18,9 @@ body {
   position: absolute;
   inset: 0;
   overflow: hidden;
+  /* breathing room; absolutely-positioned grids sit inside this padding box, so
+     grid (0,0) lands at the padding edge. computeSize() subtracts it back out. */
+  padding: 0 12px;
 }
 
 /* monospace grid windows (non-markdown, verbatim Neovim).

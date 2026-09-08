@@ -651,19 +651,27 @@ function forceRepaint(el) {
 // ---------------------------------------------------------------------------
 // transport
 // ---------------------------------------------------------------------------
-function computeSize() {
+const MIN_PAD_X = 12; // minimum left/right breathing room, px
+// Fit an integer cell grid in the viewport and letterbox it: equal horizontal
+// padding absorbs the sub-cell remainder so left and right margins match.
+function screenMetrics() {
   const r = viewportEl.getBoundingClientRect();
-  return {
-    cols: Math.max(20, Math.floor(r.width / cellW)),
-    rows: Math.max(4, Math.floor(r.height / cellH)),
-  };
+  const cols = Math.max(20, Math.floor((r.width - 2 * MIN_PAD_X) / cellW));
+  const rows = Math.max(4, Math.floor(r.height / cellH));
+  const padX = Math.max(MIN_PAD_X, Math.round((r.width - cols * cellW) / 2));
+  return { cols, rows, padX };
+}
+function applyScreen(m) {
+  viewportEl.style.paddingLeft = `${m.padX}px`;
+  viewportEl.style.paddingRight = `${m.padX}px`;
 }
 let lastSize = { cols: 0, rows: 0 };
 function pushSize() {
-  const s = computeSize();
-  if (s.cols === lastSize.cols && s.rows === lastSize.rows) return;
-  lastSize = s;
-  invoke("nvim_resize", s).catch(() => {});
+  const m = screenMetrics();
+  applyScreen(m);
+  if (m.cols === lastSize.cols && m.rows === lastSize.rows) return;
+  lastSize = { cols: m.cols, rows: m.rows };
+  invoke("nvim_resize", { cols: m.cols, rows: m.rows }).catch(() => {});
 }
 
 // surface any uncaught error as visible text (webview has no visible console)
@@ -718,10 +726,12 @@ addEventListener("error", (e) => {
   // Now that grid/winft listeners are live, attach the Neovim UI. The first
   // redraw (every window's grid_line) is emitted only after this point, so
   // nothing is lost and no redraw-replay hack is needed.
+  const m0 = screenMetrics();
+  applyScreen(m0);
   for (let i = 0; i < 100; i++) {
     try {
-      await invoke("nvim_ui_start", computeSize());
-      jlog(`ui_start ok ${JSON.stringify(computeSize())}`);
+      await invoke("nvim_ui_start", { cols: m0.cols, rows: m0.rows });
+      jlog(`ui_start ok ${m0.cols}x${m0.rows} pad=${m0.padX}`);
       break;
     } catch (e) {
       if (i === 20) jlog("ui_start still failing: " + e);
@@ -742,7 +752,7 @@ addEventListener("error", (e) => {
     jlog("winfts failed: " + e);
   }
 
-  lastSize = computeSize();
+  lastSize = { cols: m0.cols, rows: m0.rows };
   new ResizeObserver(() => pushSize()).observe(viewportEl);
   setTimeout(
     () =>
