@@ -8,6 +8,12 @@ import { Annotation, StateEffect, StateField, Compartment } from "@codemirror/st
 import { markdown } from "@codemirror/lang-markdown";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+
+// this webview's window label; event names are per-window (gnv://<label>/<kind>)
+// because emit_to() broadcasts to every webview in this app.
+const winLabel = getCurrentWebviewWindow().label;
+const ev = (kind) => `gnv://${winLabel}/${kind}`;
 
 const viewportEl = document.getElementById("viewport");
 const te = new TextEncoder();
@@ -824,6 +830,15 @@ function forceRepaint(el) {
   el.style.display = prev;
 }
 
+// On WindowEvent::Focused, Rust emits gnv://<label>/focus; rebuild every grid as
+// cheap insurance against a stale WKWebView surface after a tab/window reveal.
+function repaintNow() {
+  for (const [id, g] of grids) if (!islandGridIds.has(id)) g.repaint();
+  for (const isl of islands.values()) isl.view.requestMeasure();
+  layout();
+  placeGridCursor();
+}
+
 // ---------------------------------------------------------------------------
 // transport
 // ---------------------------------------------------------------------------
@@ -888,29 +903,30 @@ addEventListener("error", (e) => {
 
   // register every listener BEFORE anything can trigger a redraw
   await Promise.all([
-    listen("gnv://grid", (e) => applyGridBatch(e.payload)),
-    listen("gnv://winft", (e) => {
+    listen(ev("grid"), (e) => applyGridBatch(e.payload)),
+    listen(ev("winft"), (e) => {
       winFt.set(e.payload.win, e.payload.ft || "");
       if (e.payload.buf != null) winBuf.set(e.payload.win, e.payload.buf);
       reconcileIslands();
     }),
-    listen("gnv://reset", (e) => {
+    listen(ev("reset"), (e) => {
       for (const isl of islands.values())
         if (isl.bufnr === e.payload.buf) isl.applyReset(e.payload);
     }),
-    listen("gnv://lines", (e) => {
+    listen(ev("lines"), (e) => {
       const { buf, firstline, lastline, linedata } = e.payload;
       for (const isl of islands.values())
         if (isl.bufnr === buf) isl.applyBufLines(firstline, lastline, linedata);
     }),
-    listen("gnv://cursor", (e) => {
+    listen(ev("cursor"), (e) => {
       // CursorMoved reports the *global* cursor wherever focus is; route it to
       // the island that owns the focused grid, if any.
       const isl = islandForGrid(cursorGrid);
       if (isl) isl.applyCursor(e.payload.row, e.payload.col, e.payload.mode);
     }),
-    listen("gnv://cmdline", () => {}),
-    listen("gnv://cmdline_hide", () => {}),
+    listen(ev("cmdline"), () => {}),
+    listen(ev("cmdline_hide"), () => {}),
+    listen(ev("focus"), () => repaintNow()),
   ]);
 
   jlog(`listeners ready; cellW=${cellW.toFixed(2)} cellH=${cellH.toFixed(2)}`);

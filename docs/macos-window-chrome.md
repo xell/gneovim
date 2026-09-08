@@ -81,23 +81,32 @@ The algorithm, which mirrors WRY's own `inset_traffic_lights`, is:
    ```
    for i, button in [close, miniaturize, zoom]:
        rect        = NSView::frame(button)
-       rect.origin.x = 13.0 + i × gap
+       rect.origin.x = TRAFFIC_LIGHT_X + i × gap
        NSView::setFrameOrigin(button, rect.origin)
    ```
-   `x = 13 pt` puts the close button's centre at 20 pt from the left edge.
-   Miniaturize and zoom follow at 40 pt and 60 pt respectively.
+   `TRAFFIC_LIGHT_X` is a constant (currently `15.0`), which puts the close
+   button's centre at roughly 22 pt from the left edge; miniaturize and zoom
+   follow at `+gap` each. Tune the constant to taste.
 
 The title text is centred by AppKit within whatever horizontal space remains
 after the traffic lights, so it moves naturally without any extra code.
 
-### Why re-apply on every resize
+### Why it has to be re-applied
 
-`NSThemeFrame` (the private AppKit class that contains the traffic lights) runs
-its own layout pass on every window resize, which resets button origins back to
-the system default. To survive this, `apply_traffic_light_inset` is also called
-from `on_window_event(WindowEvent::Resized)`. That event fires on the main
-thread after AppKit has finished its layout pass, so the override happens before
-the next screen refresh — no visual flicker.
+`NSThemeFrame` (the private AppKit class that holds the traffic lights) runs its
+own layout pass and resets the button origins to the system default whenever the
+window resizes, gains focus, or a tab group's tab bar appears or disappears.
+Some of those relayouts happen synchronously (resize) and some a tick or two
+later (tab bar). So the inset is re-asserted:
+
+- synchronously from `on_window_event(Resized)` and `Focused(true)`
+- deferred (16 ms + 120 ms on the next runloop ticks, via
+  `apply_traffic_light_inset_deferred`) after `add_as_tab`, on `Focused(true)`,
+  and — for every remaining window — on `Destroyed`, since closing a tab can
+  collapse a two-tab group's bar and shift a background window's buttons
+
+All of these run on the main thread after AppKit's layout pass, so the override
+lands before the next screen refresh with no visible flicker.
 
 ### Dependency
 
@@ -126,8 +135,11 @@ before it was added here, so it imposes no extra build cost.
 | Location | Reason |
 |---|---|
 | `spawn_window`, after `build()` | Every new standalone window or tab |
+| `spawn_window`, deferred after `add_as_tab` (new tab + parent) | Tab bar appears; AppKit relayouts async |
 | `setup`, for label `"main"` | Initial window from `tauri.conf.json` |
 | `on_window_event(Resized)` | Re-assert after each AppKit layout pass |
+| `on_window_event(Focused(true))`, sync + deferred | Tab close returns focus to a sibling |
+| `on_window_event(Destroyed)`, deferred for all windows | Background-tab close collapses the bar |
 
 Both functions are gated `#[cfg(target_os = "macos")]` and are no-ops on other
 platforms.

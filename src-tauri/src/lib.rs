@@ -71,11 +71,17 @@ fn apply_corner_radius(win: &tauri::WebviewWindow) {
     }
 }
 
+
+/// x of the close-button frame origin, in points. AppKit's default is ~7; we
+/// shift the whole cluster right a touch so it clears the 26 pt corner
+/// (close-button centre then sits ~22 pt from the edge).
+#[cfg(target_os = "macos")]
+const TRAFFIC_LIGHT_X: f64 = 15.0;
+
 /// Shift the traffic-light buttons rightward so they sit inside the macOS 26
-/// corner radius (~26 pt). Button centres land at x ≈ 20, 40, 60 pt from the
-/// left edge; the inter-button gap chosen by AppKit is preserved.
-/// Must be called on the main thread. Re-called on every `Resized` event so
-/// that AppKit's own layout pass cannot silently override our positions.
+/// corner radius. The inter-button gap chosen by AppKit is preserved.
+/// Must be called on the main thread. Re-called on every `Resized` event and
+/// after tab grouping so AppKit's own layout pass cannot override our positions.
 #[cfg(target_os = "macos")]
 fn apply_traffic_light_inset(win: &tauri::WebviewWindow) {
     use objc2_app_kit::{NSView, NSWindow, NSWindowButton};
@@ -105,12 +111,24 @@ fn apply_traffic_light_inset(win: &tauri::WebviewWindow) {
         buttons.push(z);
     }
 
-    // Close-button frame origin at x = 13 pt → button centre at 20 pt.
     for (i, btn) in buttons.into_iter().enumerate() {
         let mut rect = NSView::frame(&btn);
-        rect.origin.x = 13.0 + i as f64 * gap;
+        rect.origin.x = TRAFFIC_LIGHT_X + i as f64 * gap;
         NSView::setFrameOrigin(&btn, rect.origin);
     }
+}
+
+/// Re-assert the traffic-light inset on the next runloop tick, after AppKit has
+/// laid out a change it does asynchronously (tab bar appearing/disappearing).
+#[cfg(target_os = "macos")]
+fn apply_traffic_light_inset_deferred(win: tauri::WebviewWindow) {
+    async_runtime::spawn(async move {
+        for delay in [16u64, 120] {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+            let w = win.clone();
+            let _ = win.run_on_main_thread(move || apply_traffic_light_inset(&w));
+        }
+    });
 }
 
 /// Create a gui-window with its own nvim. `as_tab` adds it to the focused
@@ -158,10 +176,17 @@ fn spawn_window(app: &AppHandle, as_tab: bool) -> Option<String> {
             Some(p) => {
                 log::info!("new tab: grouping with {}", p.label());
                 add_as_tab(p, &win);
+                let _ = win.show();
+                // The tab bar now appears on both windows; AppKit re-lays out
+                // the traffic lights asynchronously, so re-assert the inset.
+                apply_traffic_light_inset_deferred(win.clone());
+                apply_traffic_light_inset_deferred(p.clone());
             }
-            None => log::warn!("new tab: no parent window, opening standalone"),
+            None => {
+                log::warn!("new tab: no parent window, opening standalone");
+                let _ = win.show();
+            }
         }
-        let _ = win.show();
     }
 
     spawn_bridge(app.clone(), label.clone());
@@ -176,21 +201,26 @@ fn spawn_bridge(app: AppHandle, label: String) {
         let emit_app = app.clone();
         let emit_label = label.clone();
         async_runtime::spawn(async move {
-            while let Some(ev) = rx.recv().await {
-                let t = emit_label.as_str();
-                let r = match ev {
-                    BridgeEvent::Reset(p) => emit_app.emit_to(t, "gnv://reset", p),
-                    BridgeEvent::Lines(p) => emit_app.emit_to(t, "gnv://lines", p),
-                    BridgeEvent::Cursor(p) => emit_app.emit_to(t, "gnv://cursor", p),
-                    BridgeEvent::Cmdline(p) => emit_app.emit_to(t, "gnv://cmdline", p),
-                    BridgeEvent::CmdlineHide => emit_app.emit_to(t, "gnv://cmdline_hide", ()),
-                    BridgeEvent::Grid(ops) => emit_app.emit_to(t, "gnv://grid", ops),
-                    BridgeEvent::WinFt { win, buf, ft } => {
-                        emit_app.emit_to(t, "gnv://winft", serde_json::json!({"win":win,"buf":buf,"ft":ft}))
-                    }
+            // Per-window event names: emit_to() has proven to broadcast to every
+            // webview in this setup, so window A's nvim stream rendered in every
+            // window. A plain global emit with a label-qualified name is scoped
+            // by the name alone.
+            let ev = |kind: &str| format!("gnv://{emit_label}/{kind}");
+            while let Some(bev) = rx.recv().await {
+                let r = match bev {
+                    BridgeEvent::Reset(p) => emit_app.emit(&ev("reset"), p),
+                    BridgeEvent::Lines(p) => emit_app.emit(&ev("lines"), p),
+                    BridgeEvent::Cursor(p) => emit_app.emit(&ev("cursor"), p),
+                    BridgeEvent::Cmdline(p) => emit_app.emit(&ev("cmdline"), p),
+                    BridgeEvent::CmdlineHide => emit_app.emit(&ev("cmdline_hide"), ()),
+                    BridgeEvent::Grid(ops) => emit_app.emit(&ev("grid"), ops),
+                    BridgeEvent::WinFt { win, buf, ft } => emit_app.emit(
+                        &ev("winft"),
+                        serde_json::json!({"win":win,"buf":buf,"ft":ft}),
+                    ),
                 };
                 if let Err(e) = r {
-                    log::warn!("emit to {emit_label}: {e}");
+                    log::warn!("emit for {emit_label}: {e}");
                 }
             }
         });
@@ -410,10 +440,26 @@ pub fn run() {
                     state.windows.lock().unwrap().remove(window.label());
                     log::info!("window {} closed", window.label());
                 }
+                // Closing a tab can collapse a group's tab bar; AppKit then
+                // re-lays out the other windows' traffic lights.
+                #[cfg(target_os = "macos")]
+                for w in window.app_handle().webview_windows().into_values() {
+                    apply_traffic_light_inset_deferred(w);
+                }
             }
             WindowEvent::Focused(true) => {
                 if let Some(state) = window.try_state::<AppState>() {
                     *state.last_focused.lock().unwrap() = Some(window.label().to_string());
+                }
+                // Poke the webview over the same IPC path that gnv://.../grid
+                // uses (which is why V+move repaints a revealed tab).
+                let _ = window
+                    .app_handle()
+                    .emit(&format!("gnv://{}/focus", window.label()), ());
+                #[cfg(target_os = "macos")]
+                if let Some(win) = window.app_handle().get_webview_window(window.label()) {
+                    apply_traffic_light_inset(&win);
+                    apply_traffic_light_inset_deferred(win);
                 }
             }
             #[cfg(target_os = "macos")]
