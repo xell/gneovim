@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod config;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

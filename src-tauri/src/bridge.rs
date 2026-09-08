@@ -373,13 +373,23 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 /// `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), so `Command::new("nvim")` alone is
 /// not enough.
 async fn find_nvim() -> String {
-    // 1. explicit override
+    // 1. explicit env override (tests, CI, one-offs)
     if let Ok(p) = std::env::var("GNV_NVIM") {
         if !p.is_empty() {
             return p;
         }
     }
-    // 2. common absolute install locations
+    // 2. config file: [neovim] path
+    if let Some(p) = crate::config::get().neovim.path.as_deref() {
+        let expanded = crate::config::expand_tilde(p);
+        if std::path::Path::new(&expanded).is_file() {
+            return expanded;
+        }
+        log::warn!(
+            "config: neovim.path = {p:?} is not a file, falling back to auto-detection"
+        );
+    }
+    // 3. common absolute install locations
     let home = std::env::var("HOME").unwrap_or_default();
     let candidates = [
         "/opt/homebrew/bin/nvim".to_string(),
@@ -394,7 +404,7 @@ async fn find_nvim() -> String {
             return c;
         }
     }
-    // 3. ask a login shell, which sources the user's real PATH
+    // 4. ask a login shell, which sources the user's real PATH
     if let Ok(shell) = std::env::var("SHELL") {
         if let Ok(out) = Command::new(&shell)
             .args(["-lc", "command -v nvim"])
@@ -407,7 +417,7 @@ async fn find_nvim() -> String {
             }
         }
     }
-    // 4. last resort
+    // 5. last resort
     "nvim".to_string()
 }
 
