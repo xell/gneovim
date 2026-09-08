@@ -23,6 +23,11 @@ path = "~/.local/share/bob/nvim-bin/nvim"
 #   "user"              -> no -u flag; nvim loads ~/.config/nvim as normal
 #   "~/path/to/init.lua" -> nvim runs with -u <that path>
 config = "user"
+
+[input]
+# Treat macOS Option as Meta: Option+<key> reaches Neovim as <M-...> instead of
+# composing accented characters (é, •, …). Default true.
+option_is_meta = true
 ```
 
 ## Loading your Neovim config

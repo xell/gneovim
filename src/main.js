@@ -704,6 +704,14 @@ addEventListener("error", (e) => {
 });
 
 (async function boot() {
+  try {
+    const cfg = await invoke("gnv_config");
+    optionIsMeta = cfg?.input?.option_is_meta ?? true;
+    jlog(`config: option_is_meta=${optionIsMeta}`);
+  } catch (e) {
+    jlog("gnv_config failed: " + e);
+  }
+
   // measure the grid cell only once fonts + stylesheet are actually applied,
   // otherwise the probe reports the UA proportional default (~14x18)
   if (document.fonts && document.fonts.ready) await document.fonts.ready;
@@ -803,21 +811,96 @@ const NAMED = {
   PageDown: "PageDown",
   Insert: "Insert",
   " ": "Space",
+  Help: "Help",
+  Undo: "Undo",
 };
-function keyToNvim(e) {
-  if (e.metaKey) return null;
-  if (["Shift", "Control", "Alt", "Meta", "CapsLock", "Dead"].includes(e.key))
-    return null;
-  let key = NAMED[e.key];
-  const named = key !== undefined;
-  if (!named) {
-    if (e.key.length !== 1) return null;
-    key = e.key === "<" ? "lt" : e.key;
-  }
-  const mods = (e.ctrlKey ? "C-" : "") + (e.altKey ? "M-" : "");
-  if (mods || named || key === "lt") return `<${mods}${key}>`;
-  return key;
+const MOD_ONLY = new Set([
+  "Shift",
+  "Control",
+  "Alt",
+  "Meta",
+  "CapsLock",
+  "Dead",
+  "Unidentified",
+  "Process",
+  "AltGraph",
+  "Fn",
+  "FnLock",
+]);
+
+// from config [input] option_is_meta; Option+<key> -> <M-...> instead of é/•/…
+let optionIsMeta = true;
+
+// physical-key -> character, to recover the key when Option composed it away
+const CODE_CHAR = {
+  Minus: "-",
+  Equal: "=",
+  BracketLeft: "[",
+  BracketRight: "]",
+  Backslash: "\\",
+  Semicolon: ";",
+  Quote: "'",
+  Backquote: "`",
+  Comma: ",",
+  Period: ".",
+  Slash: "/",
+  Space: " ",
+};
+function baseFromCode(e) {
+  let m;
+  if ((m = /^Key([A-Z])$/.exec(e.code))) return m[1].toLowerCase();
+  if ((m = /^(?:Digit|Numpad)([0-9])$/.exec(e.code))) return m[1];
+  return CODE_CHAR[e.code] ?? null;
 }
+
+function keyToNvim(e) {
+  if (e.isComposing || e.keyCode === 229) return null; // mid-IME composition
+  const k = e.key;
+  const isF = /^F([1-9]|1\d|2[0-4])$/.test(k);
+
+  // Option-as-Meta: on macOS Option+<key> is a dead key at the OS level, so
+  // e.key is "Dead" or a composed glyph. Recover the real key from e.code.
+  if (optionIsMeta && e.altKey && !e.ctrlKey && !e.metaKey) {
+    if (e.code === "AltLeft" || e.code === "AltRight") return null;
+    const bc = baseFromCode(e);
+    let base =
+      NAMED[k] ??
+      (isF ? k : undefined) ??
+      NAMED[bc] ??
+      bc ??
+      (k.length === 1 && k.charCodeAt(0) < 0x80 ? k : undefined);
+    if (base == null) return null;
+    return `<M-${e.shiftKey ? "S-" : ""}${base === "<" ? "lt" : base}>`;
+  }
+
+  if (MOD_ONLY.has(k)) return null;
+
+  let base = NAMED[k];
+  let named = base !== undefined;
+  if (!named && isF) {
+    base = k;
+    named = true;
+  }
+  if (!named) {
+    if (k.length !== 1) return null;
+    // Option composed a character (option_is_meta off): send it literally
+    if (e.altKey && !e.ctrlKey && !e.metaKey && k.charCodeAt(0) > 0x7f) return k;
+    base = k === "<" ? "lt" : k;
+    if (/[A-Za-z]/.test(base) && (e.ctrlKey || e.metaKey || e.altKey)) {
+      base = base.toLowerCase();
+    }
+  }
+
+  let mods = "";
+  if (e.metaKey) mods += "D-";
+  if (e.ctrlKey) mods += "C-";
+  if (e.altKey) mods += "M-";
+  if (e.shiftKey && (named || mods)) mods += "S-";
+
+  if (mods || named || base === "lt") return `<${mods}${base}>`;
+  return base;
+}
+
 addEventListener("keydown", (e) => {
   const keys = keyToNvim(e);
   if (keys === null) return;

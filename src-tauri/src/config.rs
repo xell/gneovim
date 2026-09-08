@@ -7,15 +7,32 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     pub neovim: Neovim,
+    pub input: Input,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Input {
+    /// Treat the macOS Option key as Meta, so Option+<key> reaches Neovim as
+    /// `<M-...>` instead of composing a character (é, •, …). Default true.
+    pub option_is_meta: bool,
+}
+
+impl Default for Input {
+    fn default() -> Self {
+        Self {
+            option_is_meta: true,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Neovim {
     /// Explicit path to the `nvim` binary. A leading `~/` is expanded. If unset

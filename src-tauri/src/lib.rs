@@ -310,6 +310,12 @@ fn js_log(msg: String) {
     log::info!("[webview] {msg}");
 }
 
+/// The parsed user config, for the frontend (key handling, fonts, ...).
+#[tauri::command]
+fn gnv_config() -> &'static config::Config {
+    config::get()
+}
+
 #[tauri::command]
 async fn nvim_winfts(
     app: AppHandle,
@@ -383,6 +389,7 @@ pub fn run() {
             nvim_redraw,
             nvim_ui_start,
             js_log,
+            gnv_config,
             nvim_winfts,
             new_window,
             new_tab
