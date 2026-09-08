@@ -31,7 +31,7 @@ jlog("main.js loaded");
 // ---------------------------------------------------------------------------
 let cellW = 8.4;
 let cellH = 17;
-let originX = 12; // left margin in px; the grid is letterboxed, see screenMetrics
+let originX = 4; // left margin in px; the grid is letterboxed, see screenMetrics
 function measureCell() {
   const probe = document.createElement("div");
   // explicit font so we measure the natural line box, not whatever --cell-h is
@@ -652,7 +652,7 @@ function forceRepaint(el) {
 // ---------------------------------------------------------------------------
 // transport
 // ---------------------------------------------------------------------------
-const MIN_PAD_X = 12; // minimum left/right breathing room, px
+const MIN_PAD_X = 4; // minimum left/right breathing room, px
 // Fit an integer cell grid in the viewport and letterbox it: the sub-cell
 // horizontal remainder is split evenly so left and right margins match.
 // originX is the left margin; every grid is placed at scol*cellW + originX.
