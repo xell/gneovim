@@ -432,6 +432,8 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
     // black-on-white and renders the other hl groups (StatusLine, Visual, ...)
     // as sent.
     nvim.command("set background=light").await.ok();
+    // The GUI feeds mouse events via nvim_input_mouse; let nvim act on them.
+    nvim.command("set mouse=a").await.ok();
 
     // Autocmds in one augroup, targeted at our channel.
     let api = nvim.get_api_info().await.map_err(err)?;
@@ -473,6 +475,34 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
 impl Bridge {
     pub async fn input(&self, keys: &str) -> Result<(), String> {
         self.nvim.input(keys).await.map(|_| ()).map_err(err)
+    }
+
+    /// button: left|right|middle|wheel|move  action: press|release|drag (buttons)
+    /// or up|down|left|right (wheel).  `grid` 0 lets nvim hit-test global coords.
+    pub async fn input_mouse(
+        &self,
+        button: &str,
+        action: &str,
+        modifier: &str,
+        row: i64,
+        col: i64,
+    ) -> Result<(), String> {
+        self.nvim
+            .call(
+                "nvim_input_mouse",
+                vec![
+                    button.into(),
+                    action.into(),
+                    modifier.into(),
+                    0.into(),
+                    row.into(),
+                    col.into(),
+                ],
+            )
+            .await
+            .map_err(err)?
+            .map_err(|e| format!("{e:?}"))
+            .map(|_| ())
     }
 
     /// Focus `win` and move its cursor. Used when a click lands in an island.

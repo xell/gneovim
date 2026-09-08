@@ -1103,3 +1103,80 @@ addEventListener("keydown", (e) => {
   e.preventDefault();
   invoke("nvim_input", { keys });
 });
+
+// ---------------------------------------------------------------------------
+// mouse -> nvim_input_mouse. With `mouse=a`, nvim does all the hit-testing:
+// window focus, cursor placement, drag-select, split-resize on a border drag,
+// statusline %@ / fold / sign clicks, multi-click word/line select.
+// ---------------------------------------------------------------------------
+const MOUSE_BTN = ["left", "middle", "right"];
+const overIsland = (e) => e.target?.closest?.(".island, #ime");
+function mouseCell(e) {
+  return {
+    row: Math.max(0, Math.floor(e.clientY / cellH)),
+    col: Math.max(0, Math.floor((e.clientX - originX) / cellW)),
+  };
+}
+function mouseMods(e) {
+  return (
+    (e.ctrlKey ? "C-" : "") +
+    (e.shiftKey ? "S-" : "") +
+    (e.altKey ? "M-" : "") +
+    (e.metaKey ? "D-" : "")
+  );
+}
+const nvimMouse = (button, action, e, cell) =>
+  invoke("nvim_mouse", {
+    button,
+    action,
+    modifier: mouseMods(e),
+    row: cell.row,
+    col: cell.col,
+  }).catch(() => {});
+
+let drag = null; // { button, row, col }
+viewportEl.addEventListener("mousedown", (e) => {
+  const button = MOUSE_BTN[e.button];
+  if (!button || overIsland(e)) return;
+  e.preventDefault(); // keep DOM focus on #ime; no text selection on the grid
+  const cell = mouseCell(e);
+  drag = { button, ...cell };
+  nvimMouse(button, "press", e, cell);
+});
+addEventListener("mousemove", (e) => {
+  if (!drag) return;
+  const cell = mouseCell(e);
+  if (cell.row === drag.row && cell.col === drag.col) return;
+  drag.row = cell.row;
+  drag.col = cell.col;
+  nvimMouse(drag.button, "drag", e, cell);
+});
+addEventListener("mouseup", (e) => {
+  if (!drag) return;
+  nvimMouse(drag.button, "release", e, mouseCell(e));
+  drag = null;
+});
+viewportEl.addEventListener("contextmenu", (e) => {
+  if (!overIsland(e)) e.preventDefault();
+});
+
+let wheelY = 0;
+let wheelX = 0;
+const WHEEL_STEP = 40; // px of gesture per nvim wheel notch
+viewportEl.addEventListener(
+  "wheel",
+  (e) => {
+    if (overIsland(e)) return;
+    e.preventDefault();
+    const k =
+      e.deltaMode === 1 ? cellH * 3 : e.deltaMode === 2 ? viewportEl.clientHeight : 1;
+    wheelY += e.deltaY * k;
+    wheelX += e.deltaX * k;
+    const cell = mouseCell(e);
+    while (wheelY >= WHEEL_STEP) (wheelY -= WHEEL_STEP), nvimMouse("wheel", "down", e, cell);
+    while (wheelY <= -WHEEL_STEP) (wheelY += WHEEL_STEP), nvimMouse("wheel", "up", e, cell);
+    while (wheelX >= WHEEL_STEP) (wheelX -= WHEEL_STEP), nvimMouse("wheel", "right", e, cell);
+    while (wheelX <= -WHEEL_STEP) (wheelX += WHEEL_STEP), nvimMouse("wheel", "left", e, cell);
+  },
+  { passive: false },
+);

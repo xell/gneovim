@@ -289,6 +289,22 @@ async fn nvim_edit(
 }
 
 #[tauri::command]
+async fn nvim_mouse(
+    app: AppHandle,
+    window: tauri::Window,
+    button: String,
+    action: String,
+    modifier: String,
+    row: i64,
+    col: i64,
+) -> Result<(), String> {
+    bridge_for(&app, window.label())
+        .await?
+        .input_mouse(&button, &action, &modifier, row, col)
+        .await
+}
+
+#[tauri::command]
 async fn island_attach(
     app: AppHandle,
     window: tauri::Window,
@@ -413,6 +429,7 @@ pub fn run() {
             nvim_input,
             nvim_cursor_set,
             nvim_edit,
+            nvim_mouse,
             island_attach,
             island_detach,
             nvim_resize,
