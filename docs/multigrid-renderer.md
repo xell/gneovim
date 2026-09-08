@@ -72,3 +72,7 @@ Rules that work:
 ## General: events emitted before the client listens are gone
 
 Tauri does not buffer events for listeners that do not exist yet. Anything the bridge emits during `connect` (window filetypes from `BufWinEnter` and `WinEnter` autocmds, for instance) is lost. The client registers every `listen()` first, then triggers work, and back fills anything pushed too early with a pull: `nvim_winfts` reads `getwininfo()` on demand to learn window filetypes that arrived as events during connect.
+
+## Tauri: `emit_to(label, ...)` does not scope to one webview
+
+In this app (Tauri 2.11) `AppHandle::emit_to("main", event, payload)` was delivered to **every** webview, not just the one labelled `main`. With one nvim per gui-window that meant window B rendered window A's `grid_line` stream and never its own, which looked like a compositing bug (stale "ghost" content on a macOS tab switch, blank until a keystroke forced fresh frames). The fix: make the event name carry the window label (`gnv://<label>/grid`, ...) and emit it globally with `emit()`; the frontend derives its own label from `getCurrentWebviewWindow().label` and listens for that. Commands are unaffected because they already route by `window.label()`.
