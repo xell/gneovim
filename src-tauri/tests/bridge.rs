@@ -1,6 +1,6 @@
-//! Exercises the Tauri-free bridge core against a real spawned nvim.
-//! Mirrors the old `_wsprobe.mjs` checks: incremental diffs, reverse edit with
-//! echo suppression, active-buffer following.
+//! Buffer-sync round trip for the markdown island, against a real spawned nvim:
+//! attach a window's buffer, see incremental diffs, forward a reverse edit with
+//! echo suppression.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,100 +8,78 @@ use std::time::Duration;
 use app_lib::bridge::{self, BridgeEvent, Region};
 use tokio::sync::mpsc;
 
-fn tag(e: &BridgeEvent) -> String {
-    match e {
-        BridgeEvent::Reset(p) => format!(
-            "reset name={:?} l0={:?} n={}",
-            p.name,
-            p.lines.first(),
-            p.lines.len()
-        ),
-        BridgeEvent::Lines(p) => {
-            format!("lines f={} l={} {:?}", p.firstline, p.lastline, p.linedata)
-        }
-        BridgeEvent::Cursor(p) => format!("cursor {},{} {}", p.row, p.col, p.mode),
-        BridgeEvent::Cmdline(p) => {
-            format!("cmdline {:?} {:?} {}", p.ctype, p.content, p.pos)
-        }
-        BridgeEvent::CmdlineHide => "cmdline_hide".into(),
-        _ => "other".into(),
-    }
-}
-
 async fn settle() {
     tokio::time::sleep(Duration::from_millis(250)).await;
 }
 
-// The spike branch changes connect() to force a markdown-island + code-split
-// layout and drops the gnv_bufchanged autocmd, so this pre-spike round trip
-// no longer holds. See tests/spike.rs for the current flow.
-#[ignore = "superseded on spike/grid-plus-md-island by tests/spike.rs"]
 #[tokio::test]
-async fn bridge_round_trip() {
+async fn island_round_trip() {
     std::fs::write(
-        "/tmp/gnv-test.md",
+        "/tmp/gnv-island-test.md",
         "alpha line one\nbeta line two\ngamma line three\n",
     )
     .unwrap();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<BridgeEvent>();
-    let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let log2 = log.clone();
+    let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let lines2 = lines.clone();
     tokio::spawn(async move {
         while let Some(e) = rx.recv().await {
-            log2.lock().unwrap().push(tag(&e));
+            if let BridgeEvent::Lines(p) = e {
+                lines2
+                    .lock()
+                    .unwrap()
+                    .push(format!("buf={} f={} l={} {:?}", p.buf, p.firstline, p.lastline, p.linedata));
+            }
         }
     });
 
-    let (b, _child) = bridge::connect(tx).await.expect("connect to nvim");
+    let (b, _child) = bridge::connect(tx).await.expect("connect");
+    b.ui_start(120, 40).await.expect("ui_start");
+    b.input(":edit /tmp/gnv-island-test.md\r").await.unwrap();
     settle().await;
 
-    // 1. initial snapshot
-    let r0 = b.reset().await.expect("reset");
-    assert_eq!(r0.lines.len(), 9, "welcome buffer seeded");
-    assert!(r0.name.is_empty());
-    assert_eq!(r0.lines[0], "# hello from neovim");
+    // 1. attach the current window's buffer -> snapshot
+    let win = 1000; // first window id in a fresh nvim
+    let snap = b.island_attach(win).await.expect("island_attach");
+    assert!(snap.buf > 0);
+    assert_eq!(snap.lines.len(), 3);
+    assert_eq!(snap.lines[0], "alpha line one");
+    assert!(snap.name.ends_with("gnv-island-test.md"));
 
-    // 2. incremental insert: o<text><esc>
+    // 2. an nvim-side edit streams back as a Lines event for that buffer
     b.input("Goinserted from rust\u{1b}").await.unwrap();
     settle().await;
     {
-        let l = log.lock().unwrap();
+        let l = lines.lock().unwrap();
         assert!(
-            l.iter().any(|s| s.contains("inserted from rust")),
-            "insert produced a lines event: {l:?}"
+            l.iter().any(|s| s.contains("inserted from rust") && s.contains(&format!("buf={}", snap.buf))),
+            "insert produced a Lines event for the attached buffer: {l:?}"
         );
     }
 
-    // 3. reverse edit, single region: replace "#" with "%" on line 0
-    let before = log.lock().unwrap().iter().filter(|s| s.starts_with("lines ")).count();
-    b.edit(vec![Region {
-        start_row: 0,
-        start_col: 0,
-        end_row: 0,
-        end_col: 1,
-        replacement: vec!["%".into()],
-    }])
+    // 3. a reverse edit: our own change is echo-suppressed
+    let before = lines.lock().unwrap().len();
+    b.edit(
+        snap.buf,
+        vec![Region {
+            start_row: 0,
+            start_col: 0,
+            end_row: 0,
+            end_col: 5,
+            replacement: vec!["ALPHA".into()],
+        }],
+    )
     .await
     .unwrap();
     settle().await;
-    let after = log.lock().unwrap().iter().filter(|s| s.starts_with("lines ")).count();
-    assert_eq!(after, before, "echo of our own edit is suppressed");
-    let r1 = b.reset().await.unwrap();
-    assert!(r1.lines[0].starts_with("% hello"), "edit landed in nvim: {:?}", r1.lines[0]);
+    let after = lines.lock().unwrap().len();
+    assert_eq!(after, before, "echo of our own edit is suppressed: {:?}", lines.lock().unwrap());
 
-    // 4. active-buffer following: :e a real file
-    b.input(":e /tmp/gnv-test.md\r").await.unwrap();
-    settle().await;
-    settle().await;
-    {
-        let l = log.lock().unwrap();
-        assert!(
-            l.iter().any(|s| s.contains("gnv-test.md") && s.starts_with("reset ")),
-            "buffer switch pushed a fresh reset: {l:?}"
-        );
-    }
-    let r2 = b.reset().await.unwrap();
-    assert!(r2.name.ends_with("gnv-test.md"));
-    assert_eq!(r2.lines[0], "alpha line one");
+    let snap2 = b.island_attach(win).await.unwrap();
+    assert!(snap2.lines[0].starts_with("ALPHA"), "edit landed: {:?}", snap2.lines[0]);
+
+    // 4. detach: refcount from the two attach calls must both be released
+    b.island_detach(snap.buf).await.unwrap();
+    b.island_detach(snap.buf).await.unwrap();
 }

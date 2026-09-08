@@ -40,24 +40,24 @@ body {
 }
 
 /* the markdown island: CodeMirror, proportional serif */
-#island {
+.island {
   position: absolute;
   overflow: hidden;
   background: #ffffff;
   box-shadow: inset 0 0 0 1px #d0d0d8;
 }
-#island .cm-editor {
+.island .cm-editor {
   height: 100%;
 }
 /* CodeMirror's base theme sets font-family:monospace on .cm-scroller itself,
    which beats inheritance from .cm-editor; override the scroller directly. */
-#island .cm-scroller {
+.island .cm-scroller {
   font-family: Georgia, "Iowan Old Style", Palatino, serif;
   font-size: 16px;
   line-height: 1.6;
   overflow: auto;
 }
-#island .cm-content {
+.island .cm-content {
   caret-color: #1a56db;
   font-family: inherit;
   /* explicit so island text never depends on inherited body color */
@@ -87,6 +87,6 @@ body {
   display: inline-block;
   width: 0.5ch;
 }
-#island:not([data-mode^="i"]) .cm-cursor.cm-cursor-primary {
+.island:not([data-mode^="i"]) .cm-cursor.cm-cursor-primary {
   display: none;
 }

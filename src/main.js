@@ -184,9 +184,9 @@ const grids = new Map(); // gridId -> GridWin
 const winPos = new Map(); // gridId -> {srow,scol,w,h,float,zindex}
 const gridToWin = new Map(); // gridId -> winId
 const winFt = new Map(); // winId -> filetype
-let islandGrid = null;
-let islandWin = null; // window id whose buffer the CM island is synced to
-let islandBusy = false;
+const winBuf = new Map(); // winId -> bufnr
+const islands = new Map(); // winId -> Island (one CM instance per markdown window)
+let islandGridIds = new Set(); // gridIds currently rendered as an island
 let modeName_ = "n";
 
 function gw(id) {
@@ -199,34 +199,52 @@ function gw(id) {
   return g;
 }
 
-async function recomputeIsland() {
-  let found = null;
-  for (const [gid, wid] of gridToWin) {
-    if ((winFt.get(wid) || "").includes("markdown")) found = gid;
-  }
-  const foundWin = found == null ? null : (gridToWin.get(found) ?? null);
-  if (found !== islandGrid) {
-    islandGrid = found;
-    layout();
-  }
-  // point the buffer-sync stream at the markdown window's buffer (or detach)
-  if (foundWin !== islandWin && !islandBusy) {
-    islandBusy = true;
-    islandWin = foundWin;
-    try {
-      if (foundWin == null) {
-        await invoke("island_detach");
-        nvimTx({ changes: { from: 0, to: view.state.doc.length, insert: "" } });
-      } else {
-        applyReset(await invoke("island_attach", { win: foundWin }));
-      }
-    } catch (e) {
-      jlog("island toggle failed: " + e);
+const isMarkdown = (wid) => (winFt.get(wid) || "").includes("markdown");
+
+// Mount an Island over every markdown window, unmount the rest, re-point any
+// whose buffer changed. `force` re-attaches every island (desync recovery).
+function reconcileIslands(force = false) {
+  const desired = new Map(); // winId -> gridId
+  for (const [gid, wid] of gridToWin) if (isMarkdown(wid)) desired.set(wid, gid);
+
+  for (const [wid, isl] of [...islands]) {
+    if (!desired.has(wid)) {
+      islands.delete(wid);
+      const b = isl.bufnr;
+      isl.destroy();
+      if (b != null) invoke("island_detach", { buf: b }).catch(() => {});
     }
-    islandBusy = false;
-    recomputeIsland(); // state may have moved while we awaited
   }
+  for (const wid of desired.keys()) {
+    const cur = islands.get(wid);
+    const wantBuf = winBuf.get(wid);
+    if (!cur) {
+      const isl = new Island(wid);
+      islands.set(wid, isl);
+      attachIsland(isl);
+    } else if (force || (wantBuf != null && cur.bufnr !== wantBuf)) {
+      const old = cur.bufnr;
+      cur.bufnr = null;
+      if (old != null) invoke("island_detach", { buf: old }).catch(() => {});
+      attachIsland(cur);
+    }
+  }
+  islandGridIds = new Set(desired.values());
+  layout();
 }
+
+function attachIsland(isl) {
+  invoke("island_attach", { win: isl.winId })
+    .then((snap) => {
+      if (islands.get(isl.winId) !== isl) return; // unmounted while awaiting
+      isl.bufnr = snap.buf;
+      isl.applyReset(snap);
+      layout();
+    })
+    .catch((e) => jlog("island_attach failed: " + e));
+}
+
+const islandForGrid = (gid) => islands.get(gridToWin.get(gid));
 
 function place(el, p) {
   el.style.left = `${p.scol * cellW}px`;
@@ -246,14 +264,17 @@ function layout() {
       continue;
     }
     const p = winPos.get(gid);
-    if (gid === islandGrid) {
+    const isl = islandForGrid(gid);
+    if (isl) {
       g.el.hidden = true;
       if (p) {
-        place(islandEl, p);
-        islandEl.style.zIndex = 5;
-        const wasHidden = islandEl.hidden;
-        islandEl.hidden = false;
-        if (wasHidden) view.requestMeasure();
+        place(isl.el, p);
+        isl.el.style.zIndex = 5;
+        const wasHidden = isl.el.hidden;
+        isl.el.hidden = false;
+        if (wasHidden) isl.view.requestMeasure();
+      } else {
+        isl.el.hidden = true;
       }
       continue;
     }
@@ -266,16 +287,7 @@ function layout() {
     place(g.el, p);
     if (!p.float) g.el.style.zIndex = 1;
   }
-  if (islandGrid == null) islandEl.hidden = true;
 }
-
-// ---------------------------------------------------------------------------
-// the markdown island: CodeMirror + buffer-sync
-// ---------------------------------------------------------------------------
-const islandEl = document.createElement("div");
-islandEl.id = "island";
-islandEl.hidden = true;
-viewportEl.append(islandEl);
 
 // one block cursor for whichever grid window has focus
 const gridCursorEl = document.createElement("div");
@@ -289,7 +301,7 @@ let curMode = null; // modeInfo entry for the current mode
 function placeGridCursor() {
   const g = grids.get(cursorGrid);
   const p = winPos.get(cursorGrid);
-  if (!g || !g.cursor || !p || cursorGrid === islandGrid) {
+  if (!g || !g.cursor || !p || islandForGrid(cursorGrid)) {
     gridCursorEl.hidden = true;
     return;
   }
@@ -359,107 +371,129 @@ const nvimCursorField = StateField.define({
   provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
 });
 
-function forwardExternalEdit(u) {
-  if (!u.docChanged) return;
-  if (!u.transactions.some((tr) => !tr.annotation(fromNvim))) return;
-  const oldDoc = u.startState.doc;
-  const regions = [];
-  u.changes.iterChanges((fromA, toA, _b, _c, inserted) => {
-    const s = oldDoc.lineAt(fromA);
-    const e = oldDoc.lineAt(toA);
-    regions.push({
-      startRow: s.number - 1,
-      startCol: byteLen(s.text.slice(0, fromA - s.from)),
-      endRow: e.number - 1,
-      endCol: byteLen(e.text.slice(0, toA - e.from)),
-      replacement: inserted.toJSON(),
+// One CodeMirror instance bound to one markdown window and its buffer.
+class Island {
+  constructor(winId) {
+    this.winId = winId;
+    this.bufnr = null;
+    this.mode = "n";
+    this.el = document.createElement("div");
+    this.el.className = "island";
+    this.el.hidden = true;
+    viewportEl.append(this.el);
+    this.view = new EditorView({
+      doc: "",
+      extensions: [
+        basicSetup,
+        markdown(),
+        EditorView.lineWrapping,
+        nvimCursorField,
+        EditorView.updateListener.of((u) => this.onUpdate(u)),
+        EditorView.domEventHandlers({
+          mousedown: (ev, v) => this.onMousedown(ev, v),
+        }),
+      ],
+      parent: this.el,
     });
-  });
-  regions.reverse();
-  invoke("nvim_edit", { regions });
-}
-
-const view = new EditorView({
-  doc: "",
-  extensions: [
-    basicSetup,
-    markdown(),
-    EditorView.lineWrapping,
-    nvimCursorField,
-    EditorView.updateListener.of(forwardExternalEdit),
-    EditorView.domEventHandlers({
-      mousedown(ev, v) {
-        const pos = v.posAtCoords({ x: ev.clientX, y: ev.clientY });
-        if (pos == null) return false;
-        const line = v.state.doc.lineAt(pos);
-        invoke("nvim_input", { keys: "<LeftMouse>" }).catch(() => {});
-        invoke("nvim_cursor_set", {
-          row: line.number - 1,
-          col: byteLen(line.text.slice(0, pos - line.from)),
-        });
-        return false;
-      },
-    }),
-  ],
-  parent: islandEl,
-});
-const nvimTx = (spec) =>
-  view.dispatch({ ...spec, annotations: fromNvim.of(true) });
-
-function applyBufLines(a, lastline, linedata) {
-  const doc = view.state.doc;
-  const L = doc.lines;
-  const b = lastline < 0 ? L : lastline;
-  let from;
-  let to;
-  let insert;
-  if (a >= L) {
-    from = doc.length;
-    to = doc.length;
-    insert = linedata.map((l) => "\n" + l).join("");
-  } else if (b >= L) {
-    if (a === 0) {
-      from = 0;
+  }
+  tx(spec) {
+    this.view.dispatch({ ...spec, annotations: fromNvim.of(true) });
+  }
+  destroy() {
+    this.view.destroy();
+    this.el.remove();
+  }
+  onUpdate(u) {
+    if (!u.docChanged) return;
+    if (!u.transactions.some((tr) => !tr.annotation(fromNvim))) return;
+    const oldDoc = u.startState.doc;
+    const regions = [];
+    u.changes.iterChanges((fromA, toA, _b, _c, inserted) => {
+      const s = oldDoc.lineAt(fromA);
+      const e = oldDoc.lineAt(toA);
+      regions.push({
+        startRow: s.number - 1,
+        startCol: byteLen(s.text.slice(0, fromA - s.from)),
+        endRow: e.number - 1,
+        endCol: byteLen(e.text.slice(0, toA - e.from)),
+        replacement: inserted.toJSON(),
+      });
+    });
+    regions.reverse();
+    if (this.bufnr != null) invoke("nvim_edit", { buf: this.bufnr, regions });
+  }
+  onMousedown(ev, v) {
+    const pos = v.posAtCoords({ x: ev.clientX, y: ev.clientY });
+    if (pos == null) return false;
+    const line = v.state.doc.lineAt(pos);
+    invoke("nvim_cursor_set", {
+      win: this.winId,
+      row: line.number - 1,
+      col: byteLen(line.text.slice(0, pos - line.from)),
+    }).catch(() => {});
+    return false;
+  }
+  applyBufLines(a, lastline, linedata) {
+    const doc = this.view.state.doc;
+    const L = doc.lines;
+    const b = lastline < 0 ? L : lastline;
+    let from;
+    let to;
+    let insert;
+    if (a >= L) {
+      from = doc.length;
       to = doc.length;
-      insert = linedata.join("\n");
+      insert = linedata.map((l) => "\n" + l).join("");
+    } else if (b >= L) {
+      if (a === 0) {
+        from = 0;
+        to = doc.length;
+        insert = linedata.join("\n");
+      } else {
+        from = doc.line(a).to;
+        to = doc.length;
+        insert = linedata.length ? "\n" + linedata.join("\n") : "";
+      }
     } else {
-      from = doc.line(a).to;
-      to = doc.length;
-      insert = linedata.length ? "\n" + linedata.join("\n") : "";
+      from = doc.line(a + 1).from;
+      to = doc.line(b + 1).from;
+      insert = linedata.map((l) => l + "\n").join("");
     }
-  } else {
-    from = doc.line(a + 1).from;
-    to = doc.line(b + 1).from;
-    insert = linedata.map((l) => l + "\n").join("");
+    try {
+      this.tx({ changes: { from, to, insert } });
+    } catch (err) {
+      jlog("island desync " + err);
+      reconcileIslands(true);
+    }
   }
-  try {
-    nvimTx({ changes: { from, to, insert } });
-  } catch (err) {
-    console.warn("[applyBufLines] resync", err);
-    invoke("nvim_resync").then(applyReset).catch(() => {});
+  applyCursor(row, col, mode) {
+    this.mode = mode;
+    const doc = this.view.state.doc;
+    const line = doc.line(Math.min(row + 1, doc.lines));
+    const pos = Math.min(line.from + col, line.to);
+    this.tx({
+      selection: { anchor: pos },
+      effects: setNvimCursor.of({ row, col, mode }),
+    });
+    this.el.dataset.mode = mode;
   }
-}
-function applyCursor(row, col, mode) {
-  modeName_ = mode;
-  const doc = view.state.doc;
-  const line = doc.line(Math.min(row + 1, doc.lines));
-  const pos = Math.min(line.from + col, line.to);
-  nvimTx({ selection: { anchor: pos }, effects: setNvimCursor.of({ row, col, mode }) });
-  islandEl.dataset.mode = mode;
-}
-function applyReset(m) {
-  nvimTx({
-    changes: { from: 0, to: view.state.doc.length, insert: m.lines.join("\n") },
-  });
-  applyCursor(m.row, m.col, m.mode);
-}
-function islandScrollTo(topline) {
-  const doc = view.state.doc;
-  const l = Math.min(Math.max(topline, 0), doc.lines - 1);
-  view.dispatch({
-    effects: EditorView.scrollIntoView(doc.line(l + 1).from, { y: "start" }),
-    annotations: fromNvim.of(true),
-  });
+  clearCursor() {
+    this.tx({ effects: setNvimCursor.of(null) });
+  }
+  applyReset(m) {
+    this.tx({
+      changes: { from: 0, to: this.view.state.doc.length, insert: m.lines.join("\n") },
+    });
+    this.applyCursor(m.row, m.col, m.mode);
+  }
+  scrollTo(topline) {
+    const doc = this.view.state.doc;
+    const l = Math.min(Math.max(topline, 0), doc.lines - 1);
+    this.view.dispatch({
+      effects: EditorView.scrollIntoView(doc.line(l + 1).from, { y: "start" }),
+      annotations: fromNvim.of(true),
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -498,13 +532,10 @@ function applyGridBatch(ops) {
       case "cursor":
         gw(o.grid).cursor = { row: o.row, col: o.col };
         if (o.grid !== cursorGrid) {
+          const prev = islandForGrid(cursorGrid);
           cursorGrid = o.grid;
-          // focus left the island: drop its now-stale block cursor decoration
-          if (islandGrid != null && cursorGrid !== islandGrid)
-            view.dispatch({
-              effects: setNvimCursor.of(null),
-              annotations: fromNvim.of(true),
-            });
+          // focus left an island: drop its now-stale block cursor decoration
+          if (prev && prev !== islandForGrid(o.grid)) prev.clearCursor();
         }
         break;
       case "win_pos":
@@ -556,14 +587,16 @@ function applyGridBatch(ops) {
         layoutDirty = true;
         break;
       }
-      case "viewport":
-        if (o.grid === islandGrid) {
-          islandScrollTo(o.topline);
+      case "viewport": {
+        const isl = islandForGrid(o.grid);
+        if (isl) {
+          isl.scrollTo(o.topline);
           // re-seat the island cursor after a bare window switch (no CursorMoved)
-          if (cursorGrid === islandGrid && o.curline != null)
-            applyCursor(o.curline, o.curcol ?? 0, modeName_);
+          if (cursorGrid === o.grid && o.curline != null)
+            isl.applyCursor(o.curline, o.curcol ?? 0, isl.mode);
         }
         break;
+      }
       case "colors":
         // Neovim's built-in default colorscheme sends a themed Normal
         // (NvimLightGrey / NvimDarkGrey) via default_colors_set. For this
@@ -572,7 +605,7 @@ function applyGridBatch(ops) {
         defColors = { fg: "#000000", bg: "#ffffff", sp: hex(o.sp) ?? defColors.sp };
         document.body.style.background = defColors.bg;
         document.body.style.color = defColors.fg;
-        islandEl.style.background = defColors.bg;
+        for (const isl of islands.values()) isl.el.style.background = defColors.bg;
         dirty = new Set(grids.keys());
         break;
       case "hl":
@@ -590,10 +623,10 @@ function applyGridBatch(ops) {
         break;
     }
   }
-  if (layoutDirty) recomputeIsland(), layout();
+  if (layoutDirty) reconcileIslands();
   for (const id of dirty) {
     const g = grids.get(id);
-    if (g && id !== islandGrid) {
+    if (g && !islandGridIds.has(id)) {
       g.repaint();
       // WKWebView will not composite a freshly rebuilt absolutely-positioned
       // subtree until an unrelated event (scroll/resize). Force a reflow.
@@ -653,17 +686,23 @@ addEventListener("error", (e) => {
     listen("gnv://grid", (e) => applyGridBatch(e.payload)),
     listen("gnv://winft", (e) => {
       winFt.set(e.payload.win, e.payload.ft || "");
-      recomputeIsland();
+      if (e.payload.buf != null) winBuf.set(e.payload.win, e.payload.buf);
+      reconcileIslands();
     }),
-    listen("gnv://reset", (e) => applyReset(e.payload)),
-    listen("gnv://lines", (e) =>
-      applyBufLines(e.payload.firstline, e.payload.lastline, e.payload.linedata),
-    ),
+    listen("gnv://reset", (e) => {
+      for (const isl of islands.values())
+        if (isl.bufnr === e.payload.buf) isl.applyReset(e.payload);
+    }),
+    listen("gnv://lines", (e) => {
+      const { buf, firstline, lastline, linedata } = e.payload;
+      for (const isl of islands.values())
+        if (isl.bufnr === buf) isl.applyBufLines(firstline, lastline, linedata);
+    }),
     listen("gnv://cursor", (e) => {
-      // CursorMoved reports the *global* cursor wherever focus is; only mirror
-      // it into the island when the island window actually has focus.
-      if (islandGrid != null && cursorGrid === islandGrid)
-        applyCursor(e.payload.row, e.payload.col, e.payload.mode);
+      // CursorMoved reports the *global* cursor wherever focus is; route it to
+      // the island that owns the focused grid, if any.
+      const isl = islandForGrid(cursorGrid);
+      if (isl) isl.applyCursor(e.payload.row, e.payload.col, e.payload.mode);
     }),
     listen("gnv://cmdline", () => {}),
     listen("gnv://cmdline_hide", () => {}),
@@ -685,14 +724,15 @@ addEventListener("error", (e) => {
     }
   }
 
-  // winft events fired before we were listening; replay them. recomputeIsland()
-  // then attaches the island to a markdown window's buffer if one exists.
+  // winft events fired before we were listening; replay them. reconcileIslands()
+  // then mounts an island on every markdown window that exists.
   try {
-    for (const [win, , ft] of await invoke("nvim_winfts")) {
+    for (const [win, buf, ft] of await invoke("nvim_winfts")) {
       winFt.set(win, ft || "");
+      if (buf != null) winBuf.set(win, buf);
     }
-    recomputeIsland();
-    jlog(`winfts replayed: ${JSON.stringify([...winFt])} island=${islandGrid}`);
+    reconcileIslands();
+    jlog(`winfts replayed: ${JSON.stringify([...winFt])}`);
   } catch (e) {
     jlog("winfts failed: " + e);
   }
@@ -702,8 +742,8 @@ addEventListener("error", (e) => {
   setTimeout(
     () =>
       jlog(
-        `state: grids=${grids.size} winPos=${winPos.size} island=${islandGrid} ` +
-          `winFt=${JSON.stringify([...winFt])}`,
+        `state: grids=${grids.size} winPos=${winPos.size} ` +
+          `islands=${islands.size} winFt=${JSON.stringify([...winFt])}`,
       ),
     800,
   );

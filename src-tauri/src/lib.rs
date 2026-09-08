@@ -238,12 +238,13 @@ async fn nvim_input(app: AppHandle, window: tauri::Window, keys: String) -> Resu
 async fn nvim_cursor_set(
     app: AppHandle,
     window: tauri::Window,
+    win: i64,
     row: i64,
     col: i64,
 ) -> Result<(), String> {
     bridge_for(&app, window.label())
         .await?
-        .cursor_set(row, col)
+        .cursor_set(win, row, col)
         .await
 }
 
@@ -251,14 +252,10 @@ async fn nvim_cursor_set(
 async fn nvim_edit(
     app: AppHandle,
     window: tauri::Window,
+    buf: i64,
     regions: Vec<Region>,
 ) -> Result<(), String> {
-    bridge_for(&app, window.label()).await?.edit(regions).await
-}
-
-#[tauri::command]
-async fn nvim_resync(app: AppHandle, window: tauri::Window) -> Result<ResetPayload, String> {
-    bridge_for(&app, window.label()).await?.reset().await
+    bridge_for(&app, window.label()).await?.edit(buf, regions).await
 }
 
 #[tauri::command]
@@ -271,8 +268,12 @@ async fn island_attach(
 }
 
 #[tauri::command]
-async fn island_detach(app: AppHandle, window: tauri::Window) -> Result<(), String> {
-    bridge_for(&app, window.label()).await?.island_detach().await
+async fn island_detach(
+    app: AppHandle,
+    window: tauri::Window,
+    buf: i64,
+) -> Result<(), String> {
+    bridge_for(&app, window.label()).await?.island_detach(buf).await
 }
 
 #[tauri::command]
@@ -376,7 +377,6 @@ pub fn run() {
             nvim_input,
             nvim_cursor_set,
             nvim_edit,
-            nvim_resync,
             island_attach,
             island_detach,
             nvim_resize,

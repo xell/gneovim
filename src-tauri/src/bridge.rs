@@ -6,8 +6,9 @@
 //! forwards those to the webview and calls the `Bridge` methods for the reverse
 //! direction.
 
+use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI64, Ordering},
     Arc,
 };
 use std::time::Duration;
@@ -40,6 +41,8 @@ const LUA_APPLY_EDIT: &str = r#"
 
 #[derive(Clone, Serialize)]
 pub struct ResetPayload {
+    /// bufnr this snapshot is for, so the client can route it to the right island
+    pub buf: i64,
     pub lines: Vec<String>,
     pub row: i64,
     pub col: i64,
@@ -49,6 +52,8 @@ pub struct ResetPayload {
 
 #[derive(Clone, Serialize)]
 pub struct LinesPayload {
+    /// bufnr this diff is for; several islands may share one buffer
+    pub buf: i64,
     pub firstline: i64,
     pub lastline: i64,
     pub linedata: Vec<String>,
@@ -99,11 +104,7 @@ struct Shared {
     tx: UnboundedSender<BridgeEvent>,
     /// > 0 while we apply a CM6-originated edit; its echo lines events are dropped.
     suppress: Arc<AtomicI64>,
-    /// Drop the one full snapshot `nvim_buf_attach` sends; we send our own reset.
-    skip_snapshot: Arc<AtomicBool>,
-    /// Debounce generation for the BufEnter/WinEnter burst from one `:e`.
-    buf_epoch: Arc<AtomicU64>,
-    /// Grid ops accumulated since the last `flush` (spike multigrid renderer).
+    /// Grid ops accumulated since the last `flush` (multigrid renderer).
     grid_batch: Arc<std::sync::Mutex<Vec<Json>>>,
     /// Set once `ui_attach` has run, so a webview reload does not attach twice.
     ui_attached: Arc<AtomicBool>,
@@ -186,8 +187,12 @@ fn grid_op(ev: &str, a: &[Value]) -> Option<Json> {
 
 struct BufState {
     buf: Buffer<NWriter>,
-    id: i64,
+    /// how many islands are currently showing this buffer
+    refs: u32,
 }
+
+/// bufnr -> attached buffer, shared by every island showing that buffer.
+type Bufs = Arc<Mutex<HashMap<i64, BufState>>>;
 
 // ---------------------------------------------------------------------------
 // Notification handler
@@ -196,28 +201,22 @@ struct BufState {
 #[derive(Clone)]
 struct NvHandler {
     shared: Shared,
-    bufstate: Arc<Mutex<Option<BufState>>>,
 }
 
 #[async_trait]
 impl Handler for NvHandler {
     type Writer = NWriter;
 
-    async fn handle_notify(&self, name: String, args: Vec<Value>, nvim: Nvim) {
+    async fn handle_notify(&self, name: String, args: Vec<Value>, _nvim: Nvim) {
         match name.as_str() {
             // [buf, changedtick, firstline, lastline, linedata, more]
             "nvim_buf_lines_event" => {
-                let firstline = args.get(2).and_then(Value::as_i64).unwrap_or(0);
-                let lastline = args.get(3).and_then(Value::as_i64).unwrap_or(-1);
-                if firstline == 0
-                    && lastline == -1
-                    && self.shared.skip_snapshot.swap(false, Ordering::SeqCst)
-                {
-                    return;
-                }
                 if self.shared.suppress.load(Ordering::SeqCst) > 0 {
                     return;
                 }
+                let buf = args.first().and_then(ext_id).unwrap_or(-1);
+                let firstline = args.get(2).and_then(Value::as_i64).unwrap_or(0);
+                let lastline = args.get(3).and_then(Value::as_i64).unwrap_or(-1);
                 let linedata = args
                     .get(4)
                     .and_then(Value::as_array)
@@ -228,6 +227,7 @@ impl Handler for NvHandler {
                     })
                     .unwrap_or_default();
                 let _ = self.shared.tx.send(BridgeEvent::Lines(LinesPayload {
+                    buf,
                     firstline,
                     lastline,
                     linedata,
@@ -254,10 +254,6 @@ impl Handler for NvHandler {
             }
             "gnv_cmdline_hide" => {
                 let _ = self.shared.tx.send(BridgeEvent::CmdlineHide);
-            }
-            "gnv_bufchanged" => {
-                let this = self.clone();
-                tokio::spawn(async move { this.sync_buffer(nvim).await });
             }
             "gnv_winft" => {
                 let win = args.first().and_then(Value::as_i64).unwrap_or(0);
@@ -291,64 +287,25 @@ impl Handler for NvHandler {
     }
 }
 
-impl NvHandler {
-    async fn sync_buffer(&self, nvim: Nvim) {
-        // Debounce: only the last event in a burst does the work.
-        let epoch = self.shared.buf_epoch.fetch_add(1, Ordering::SeqCst) + 1;
-        tokio::time::sleep(Duration::from_millis(15)).await;
-        if self.shared.buf_epoch.load(Ordering::SeqCst) != epoch {
-            return;
-        }
-
-        let new_buf = match nvim.get_current_buf().await {
-            Ok(b) => b,
-            Err(_) => return,
-        };
-        let new_id = new_buf.get_number().await.unwrap_or(-1);
-
-        {
-            let mut st = self.bufstate.lock().await;
-            if st.as_ref().map(|s| s.id) == Some(new_id) {
-                return;
-            }
-            if let Some(old) = st.as_ref() {
-                let _ = old.buf.detach().await;
-            }
-            self.shared.skip_snapshot.store(true, Ordering::SeqCst);
-            let _ = new_buf.attach(true, vec![]).await;
-            *st = Some(BufState {
-                buf: new_buf,
-                id: new_id,
-            });
-        }
-
-        if let Ok(p) = build_reset(&nvim, &self.bufstate).await {
-            let _ = self.shared.tx.send(BridgeEvent::Reset(p));
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Reset snapshot
+// Island snapshot
 // ---------------------------------------------------------------------------
 
-async fn build_reset(
-    nvim: &Nvim,
-    bufstate: &Mutex<Option<BufState>>,
-) -> Result<ResetPayload, String> {
-    let buf = bufstate
-        .lock()
-        .await
-        .as_ref()
-        .map(|s| s.buf.clone())
-        .ok_or("no current buffer")?;
-
+/// A fresh snapshot of `win`'s buffer for the client to load into an island's
+/// CodeMirror. Cursor is read from `win` specifically (not the current window),
+/// as char positions to match the `gnv_cursor` autocmd feed.
+async fn island_snapshot(nvim: &Nvim, win: i64, id: i64) -> Result<ResetPayload, String> {
+    let buf = Buffer::new(Value::from(id), nvim.clone());
     let lines = buf.get_lines(0, -1, false).await.map_err(err)?;
     let cur = nvim
-        .eval("[line(\".\"), charcol(\".\")]")
+        .exec_lua(
+            "local w = ...; return vim.api.nvim_win_call(w, function() \
+             return { vim.fn.line('.'), vim.fn.charcol('.') } end)",
+            vec![Value::from(win)],
+        )
         .await
         .map_err(err)?;
-    let arr = cur.as_array().ok_or("cursor eval shape")?;
+    let arr = cur.as_array().ok_or("cursor lua shape")?;
     let row = arr.first().and_then(Value::as_i64).unwrap_or(1) - 1;
     let col = arr.get(1).and_then(Value::as_i64).unwrap_or(1) - 1;
     let mode = nvim
@@ -361,6 +318,7 @@ async fn build_reset(
     let name = buf.get_name().await.unwrap_or_default();
 
     Ok(ResetPayload {
+        buf: id,
         lines,
         row,
         col,
@@ -433,7 +391,7 @@ async fn find_nvim() -> String {
 pub struct Bridge {
     nvim: Nvim,
     shared: Shared,
-    bufstate: Arc<Mutex<Option<BufState>>>,
+    bufs: Bufs,
 }
 
 /// Spawn `nvim --embed` and wire the bridge. Returns the bridge plus the child
@@ -451,16 +409,13 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
     let shared = Shared {
         tx,
         suppress: Arc::new(AtomicI64::new(0)),
-        skip_snapshot: Arc::new(AtomicBool::new(false)),
-        buf_epoch: Arc::new(AtomicU64::new(0)),
         grid_batch: Arc::new(std::sync::Mutex::new(Vec::new())),
         ui_attached: Arc::new(AtomicBool::new(false)),
     };
-    let bufstate: Arc<Mutex<Option<BufState>>> = Arc::new(Mutex::new(None));
+    let bufs: Bufs = Arc::new(Mutex::new(HashMap::new()));
 
     let handler = NvHandler {
         shared: shared.clone(),
-        bufstate: bufstate.clone(),
     };
 
     let (nvim, _io, child) = create::new_child_cmd(&mut cmd, handler)
@@ -502,17 +457,9 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
         nvim.command(&spec).await.map_err(err)?;
     }
 
-    // Attach the current buffer for buffer-sync. The markdown island consumes
-    // this stream; a session with no markdown window simply never shows it.
-    // Dynamic per-window attach is a later step.
-    let buf = nvim.get_current_buf().await.map_err(err)?;
-    let bufnr = buf.get_number().await.map_err(err)?;
-    *bufstate.lock().await = Some(BufState {
-        buf: buf.clone(),
-        id: bufnr,
-    });
-    shared.skip_snapshot.store(true, Ordering::SeqCst);
-    buf.attach(true, vec![]).await.map_err(err)?;
+    // No buffer is attached here. Islands attach their window's buffer on
+    // demand via `island_attach`; a session with no markdown window never
+    // attaches anything.
 
     // NOTE: the UI is *not* attached here. `nvim_ui_attach` immediately emits a
     // full redraw, and the webview has not registered its `listen()` handlers
@@ -520,14 +467,7 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
     // no way to make nvim resend it. The client calls `ui_start` once its
     // listeners are live; see `Bridge::ui_start`.
 
-    Ok((
-        Bridge {
-            nvim,
-            shared,
-            bufstate,
-        },
-        child,
-    ))
+    Ok((Bridge { nvim, shared, bufs }, child))
 }
 
 impl Bridge {
@@ -535,16 +475,29 @@ impl Bridge {
         self.nvim.input(keys).await.map(|_| ()).map_err(err)
     }
 
-    pub async fn cursor_set(&self, row: i64, col: i64) -> Result<(), String> {
-        let win = self.nvim.get_current_win().await.map_err(err)?;
-        win.set_cursor((row + 1, col)).await.map_err(err)
+    /// Focus `win` and move its cursor. Used when a click lands in an island.
+    pub async fn cursor_set(&self, win: i64, row: i64, col: i64) -> Result<(), String> {
+        let w = Value::from(win);
+        self.nvim
+            .call("nvim_set_current_win", vec![w.clone()])
+            .await
+            .map_err(err)?
+            .map_err(|e| format!("{e:?}"))?;
+        self.nvim
+            .call(
+                "nvim_win_set_cursor",
+                vec![w, Value::Array(vec![Value::from(row + 1), Value::from(col)])],
+            )
+            .await
+            .map_err(err)?
+            .map_err(|e| format!("{e:?}"))
+            .map(|_| ())
     }
 
-    pub async fn edit(&self, regions: Vec<Region>) -> Result<(), String> {
-        let bufnr = match self.bufstate.lock().await.as_ref() {
-            Some(s) => s.id,
-            None => return Ok(()), // no island attached, nothing to forward
-        };
+    pub async fn edit(&self, buf: i64, regions: Vec<Region>) -> Result<(), String> {
+        if !self.bufs.lock().await.contains_key(&buf) {
+            return Ok(()); // island for this buffer is gone
+        }
         let lua_regions: Vec<Value> = regions
             .iter()
             .map(|r| {
@@ -568,7 +521,7 @@ impl Bridge {
             .nvim
             .exec_lua(
                 LUA_APPLY_EDIT,
-                vec![Value::from(bufnr), Value::Array(lua_regions)],
+                vec![Value::from(buf), Value::Array(lua_regions)],
             )
             .await;
         // Let trailing lines events for this edit drain, then reopen.
@@ -580,13 +533,9 @@ impl Bridge {
         res.map(|_| ()).map_err(err)
     }
 
-    pub async fn reset(&self) -> Result<ResetPayload, String> {
-        build_reset(&self.nvim, &self.bufstate).await
-    }
-
-    /// Point the buffer-sync stream (the markdown island) at `win`'s buffer,
-    /// detaching whatever was attached before. Returns a fresh snapshot for the
-    /// client to load into the island's CodeMirror. `win` is a raw window id.
+    /// Attach `win`'s buffer for buffer-sync and return a fresh snapshot. If the
+    /// buffer is already attached (another island shows it) this just bumps the
+    /// refcount. `win` is a raw window id.
     pub async fn island_attach(&self, win: i64) -> Result<ResetPayload, String> {
         let buf_val = self
             .nvim
@@ -594,29 +543,37 @@ impl Bridge {
             .await
             .map_err(err)?
             .map_err(|e| format!("nvim_win_get_buf: {e:?}"))?;
-        let new_id = ext_id(&buf_val).ok_or("nvim_win_get_buf returned no id")?;
+        let id = ext_id(&buf_val).ok_or("nvim_win_get_buf returned no id")?;
 
-        let mut st = self.bufstate.lock().await;
-        if st.as_ref().map(|s| s.id) != Some(new_id) {
-            if let Some(old) = st.as_ref() {
-                let _ = old.buf.detach().await;
+        {
+            let mut bufs = self.bufs.lock().await;
+            if let Some(st) = bufs.get_mut(&id) {
+                st.refs += 1;
+            } else {
+                let buf = Buffer::new(Value::from(id), self.nvim.clone());
+                // send_buffer = false: no initial snapshot event; we return one
+                buf.attach(false, vec![]).await.map_err(err)?;
+                bufs.insert(id, BufState { buf, refs: 1 });
             }
-            let new_buf = Buffer::new(Value::from(new_id), self.nvim.clone());
-            self.shared.skip_snapshot.store(true, Ordering::SeqCst);
-            new_buf.attach(true, vec![]).await.map_err(err)?;
-            *st = Some(BufState {
-                buf: new_buf,
-                id: new_id,
-            });
         }
-        drop(st);
-        build_reset(&self.nvim, &self.bufstate).await
+        island_snapshot(&self.nvim, win, id).await
     }
 
-    /// Detach the buffer-sync stream. Called when no markdown window is visible.
-    pub async fn island_detach(&self) -> Result<(), String> {
-        if let Some(old) = self.bufstate.lock().await.take() {
-            let _ = old.buf.detach().await;
+    /// Drop one island's hold on `buf`; detach when the last island goes.
+    pub async fn island_detach(&self, buf: i64) -> Result<(), String> {
+        let gone = {
+            let mut bufs = self.bufs.lock().await;
+            match bufs.get_mut(&buf) {
+                Some(st) if st.refs <= 1 => bufs.remove(&buf),
+                Some(st) => {
+                    st.refs -= 1;
+                    None
+                }
+                None => None,
+            }
+        };
+        if let Some(st) = gone {
+            let _ = st.buf.detach().await;
         }
         Ok(())
     }
