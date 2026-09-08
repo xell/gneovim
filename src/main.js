@@ -60,6 +60,21 @@ let defColors = { fg: "#000000", bg: "#ffffff", sp: "#d40000" };
 const hex = (n) =>
   n == null || n < 0 ? null : "#" + n.toString(16).padStart(6, "0");
 
+function luma(hex6) {
+  const n = parseInt(hex6.slice(1), 16);
+  return 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255);
+}
+
+// Push Neovim's Normal colours into CSS custom properties so every surface
+// (body, grid backgrounds, islands, cursors) tracks :colorscheme / :set bg.
+function applyTheme() {
+  const s = document.documentElement.style;
+  s.setProperty("--fg", defColors.fg);
+  s.setProperty("--bg", defColors.bg);
+  s.setProperty("--sp", defColors.sp);
+  s.colorScheme = luma(defColors.bg) < 128 ? "dark" : "light";
+}
+
 function hlCss(id) {
   const a = hlAttrs.get(id) || {};
   let fg = hex(a.foreground) ?? defColors.fg;
@@ -336,10 +351,11 @@ function placeGridCursor() {
     gridCursorEl.style.width = `${cellW}px`;
     gridCursorEl.style.height = `${cellH}px`;
   }
-  // block cursor uses CSS blend-difference; bars get a solid Cursor-hl colour
+  // block cursor uses the CSS white+difference invert; bars get the Cursor
+  // highlight's colour, or the theme foreground
   const attr = m && m.attr_id != null ? hlAttrs.get(m.attr_id) : null;
   gridCursorEl.style.background =
-    shape === "block" ? "" : (attr && hex(attr.background)) || "#1a56db";
+    shape === "block" ? "" : (attr && hex(attr.background)) || "var(--fg)";
 }
 
 const fromNvim = Annotation.define();
@@ -604,14 +620,15 @@ function applyGridBatch(ops) {
         break;
       }
       case "colors":
-        // Neovim's built-in default colorscheme sends a themed Normal
-        // (NvimLightGrey / NvimDarkGrey) via default_colors_set. For this
-        // prose spike, pin the editing surface to black-on-white; keep only
-        // nvim's `sp` (spell/undercurl color).
-        defColors = { fg: "#000000", bg: "#ffffff", sp: hex(o.sp) ?? defColors.sp };
-        document.body.style.background = defColors.bg;
-        document.body.style.color = defColors.fg;
-        for (const isl of islands.values()) isl.el.style.background = defColors.bg;
+        // default_colors_set carries the Normal group's fg/bg/sp; it re-fires on
+        // every :colorscheme and :set background. Honor it. The hardcoded values
+        // are only a fallback for when nvim sends -1 (no Normal colors).
+        defColors = {
+          fg: hex(o.fg) ?? defColors.fg,
+          bg: hex(o.bg) ?? defColors.bg,
+          sp: hex(o.sp) ?? defColors.sp,
+        };
+        applyTheme();
         dirty = new Set(grids.keys());
         break;
       case "hl":
