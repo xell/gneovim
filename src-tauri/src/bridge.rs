@@ -116,6 +116,8 @@ struct Shared {
     buf_epoch: Arc<AtomicU64>,
     /// Grid ops accumulated since the last `flush` (spike multigrid renderer).
     grid_batch: Arc<std::sync::Mutex<Vec<Json>>>,
+    /// Set once `ui_attach` has run, so a webview reload does not attach twice.
+    ui_attached: Arc<AtomicBool>,
 }
 
 /// Decode a Neovim ext handle (window/buffer/tabpage) to its integer id.
@@ -446,6 +448,7 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
         skip_snapshot: Arc::new(AtomicBool::new(false)),
         buf_epoch: Arc::new(AtomicU64::new(0)),
         grid_batch: Arc::new(std::sync::Mutex::new(Vec::new())),
+        ui_attached: Arc::new(AtomicBool::new(false)),
     };
     let bufstate: Arc<Mutex<Option<BufState>>> = Arc::new(Mutex::new(None));
 
@@ -463,6 +466,11 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
 
     // ---- spike layout: a markdown island window + a code grid window ----
     nvim.command("filetype on").await.ok();
+    // Neovim 0.10+ has a built-in default colorscheme; its default background is
+    // dark (Normal = NvimLightGrey on NvimDarkGrey). This is a prose editor, so
+    // switch to the light palette; the client pins Normal to pure black-on-white
+    // and renders the remaining hl groups (StatusLine, Visual, ...) as sent.
+    nvim.command("set background=light").await.ok();
     buf.set_lines(0, -1, false, INITIAL.iter().map(|s| s.to_string()).collect())
         .await
         .map_err(err)?;
@@ -517,16 +525,11 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
     md_buf.attach(true, vec![]).await.map_err(err)?;
     let _ = id;
 
-    // Attach the UI last so we get the layout events for the split we just made.
-    let mut opts = UiAttachOptions::new();
-    opts.set_linegrid_external(true).set_multigrid_external(true);
-    nvim.ui_attach(220, 60, &opts).await.map_err(err)?;
-    // fire an initial winft sweep so the client learns both windows
-    nvim.command(&format!(
-        "call rpcnotify({chan}, 'gnv_winft', win_getid(), bufnr(), &filetype)"
-    ))
-    .await
-    .ok();
+    // NOTE: the UI is *not* attached here. `nvim_ui_attach` immediately emits a
+    // full redraw, and the webview has not registered its `listen()` handlers
+    // yet, so that first frame (every window's `grid_line`) would be lost with
+    // no way to make nvim resend it. The client calls `ui_start` once its
+    // listeners are live; see `Bridge::ui_start`.
 
     Ok((
         Bridge {
@@ -583,6 +586,23 @@ impl Bridge {
 
     pub async fn reset(&self) -> Result<ResetPayload, String> {
         build_reset(&self.nvim, &self.bufstate).await
+    }
+
+    /// Attach the Neovim UI (multigrid) at `cols`x`rows`. Called by the client
+    /// once its event listeners are live, so no redraw frame is lost. Safe to
+    /// call again after a webview reload: it just resizes.
+    pub async fn ui_start(&self, cols: i64, rows: i64) -> Result<(), String> {
+        let cols = cols.max(20);
+        let rows = rows.max(4);
+        if self.shared.ui_attached.swap(true, Ordering::SeqCst) {
+            return self.resize(cols, rows).await;
+        }
+        let mut opts = UiAttachOptions::new();
+        opts.set_linegrid_external(true).set_multigrid_external(true);
+        self.nvim
+            .ui_attach(cols, rows, &opts)
+            .await
+            .map_err(err)
     }
 
     pub async fn resize(&self, cols: i64, rows: i64) -> Result<(), String> {

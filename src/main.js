@@ -1,6 +1,7 @@
 // Spike: ext_multigrid grid renderer for non-markdown windows, CodeMirror
 // island for the markdown window, one nvim driving both.
 
+import "../styles.css";
 import { EditorView, basicSetup } from "codemirror";
 import { Decoration, WidgetType } from "@codemirror/view";
 import { Annotation, StateEffect, StateField } from "@codemirror/state";
@@ -46,7 +47,7 @@ function measureCell() {
 // highlight table
 // ---------------------------------------------------------------------------
 const hlAttrs = new Map(); // id -> {fg,bg,bold,italic,underline,reverse}
-let defColors = { fg: "#e0e0ea", bg: "#14141b", sp: "#ff5555" };
+let defColors = { fg: "#000000", bg: "#ffffff", sp: "#d40000" };
 const hex = (n) =>
   n == null || n < 0 ? null : "#" + n.toString(16).padStart(6, "0");
 
@@ -82,14 +83,19 @@ class GridWin {
     this.cursor = null;
   }
   resize(w, h) {
+    // grid_resize does NOT imply a clear: Neovim keeps the overlapping cells and
+    // only sends grid_line for what changed. Blanking here leaves stale rows
+    // empty forever after a window shrinks and grows back (q:, devtools, ...).
+    const old = this.cells;
+    this.cells = Array.from({ length: h }, (_, r) =>
+      Array.from({ length: w }, (_, c) =>
+        old[r] && old[r][c] ? old[r][c] : [" ", 0],
+      ),
+    );
     this.cols = w;
     this.rows = h;
-    this.cells = Array.from({ length: h }, () =>
-      Array.from({ length: w }, () => [" ", 0]),
-    );
   }
   clear() {
-    for (const row of this.cells) row.fill(0).forEach; // noop guard
     this.cells = Array.from({ length: this.rows }, () =>
       Array.from({ length: this.cols }, () => [" ", 0]),
     );
@@ -419,7 +425,15 @@ function applyGridBatch(ops) {
         break;
       case "cursor":
         gw(o.grid).cursor = { row: o.row, col: o.col };
-        cursorGrid = o.grid;
+        if (o.grid !== cursorGrid) {
+          cursorGrid = o.grid;
+          // focus left the island: drop its now-stale block cursor decoration
+          if (islandGrid != null && cursorGrid !== islandGrid)
+            view.dispatch({
+              effects: setNvimCursor.of(null),
+              annotations: fromNvim.of(true),
+            });
+        }
         break;
       case "win_pos":
         winPos.set(o.grid, { srow: o.srow, scol: o.scol, w: o.w, h: o.h });
@@ -457,16 +471,22 @@ function applyGridBatch(ops) {
         layoutDirty = true;
         break;
       case "viewport":
-        if (o.grid === islandGrid) islandScrollTo(o.topline);
+        if (o.grid === islandGrid) {
+          islandScrollTo(o.topline);
+          // re-seat the island cursor after a bare window switch (no CursorMoved)
+          if (cursorGrid === islandGrid && o.curline != null)
+            applyCursor(o.curline, o.curcol ?? 0, modeName_);
+        }
         break;
       case "colors":
-        defColors = {
-          fg: hex(o.fg) ?? defColors.fg,
-          bg: hex(o.bg) ?? defColors.bg,
-          sp: hex(o.sp) ?? defColors.sp,
-        };
+        // Neovim's built-in default colorscheme sends a themed Normal
+        // (NvimLightGrey / NvimDarkGrey) via default_colors_set. For this
+        // prose spike, pin the editing surface to black-on-white; keep only
+        // nvim's `sp` (spell/undercurl color).
+        defColors = { fg: "#000000", bg: "#ffffff", sp: hex(o.sp) ?? defColors.sp };
         document.body.style.background = defColors.bg;
         document.body.style.color = defColors.fg;
+        islandEl.style.background = defColors.bg;
         dirty = new Set(grids.keys());
         break;
       case "hl":
@@ -482,19 +502,39 @@ function applyGridBatch(ops) {
   if (layoutDirty) recomputeIsland(), layout();
   for (const id of dirty) {
     const g = grids.get(id);
-    if (g && id !== islandGrid) g.repaint();
+    if (g && id !== islandGrid) {
+      g.repaint();
+      // WKWebView will not composite a freshly rebuilt absolutely-positioned
+      // subtree until an unrelated event (scroll/resize). Force a reflow.
+      forceRepaint(g.el);
+    }
   }
   placeGridCursor();
+}
+
+function forceRepaint(el) {
+  const prev = el.style.display;
+  el.style.display = "none";
+  void el.offsetHeight; // reflow
+  el.style.display = prev;
 }
 
 // ---------------------------------------------------------------------------
 // transport
 // ---------------------------------------------------------------------------
-function pushSize() {
+function computeSize() {
   const r = viewportEl.getBoundingClientRect();
-  const cols = Math.max(20, Math.floor(r.width / cellW));
-  const rows = Math.max(4, Math.floor(r.height / cellH));
-  invoke("nvim_resize", { cols, rows }).catch(() => {});
+  return {
+    cols: Math.max(20, Math.floor(r.width / cellW)),
+    rows: Math.max(4, Math.floor(r.height / cellH)),
+  };
+}
+let lastSize = { cols: 0, rows: 0 };
+function pushSize() {
+  const s = computeSize();
+  if (s.cols === lastSize.cols && s.rows === lastSize.rows) return;
+  lastSize = s;
+  invoke("nvim_resize", s).catch(() => {});
 }
 
 // surface any uncaught error as visible text (webview has no visible console)
@@ -506,9 +546,17 @@ addEventListener("error", (e) => {
   document.body.append(pre);
 });
 
-measureCell();
-
 (async function boot() {
+  // measure the grid cell only once fonts + stylesheet are actually applied,
+  // otherwise the probe reports the UA proportional default (~14x18)
+  if (document.fonts && document.fonts.ready) await document.fonts.ready;
+  measureCell();
+  if (cellW > 11) {
+    // still looks proportional; give styles one more frame and retry
+    await new Promise((r) => requestAnimationFrame(r));
+    measureCell();
+  }
+
   // register every listener BEFORE anything can trigger a redraw
   await Promise.all([
     listen("gnv://grid", (e) => applyGridBatch(e.payload)),
@@ -521,7 +569,9 @@ measureCell();
       applyBufLines(e.payload.firstline, e.payload.lastline, e.payload.linedata),
     ),
     listen("gnv://cursor", (e) => {
-      if (islandGrid != null)
+      // CursorMoved reports the *global* cursor wherever focus is; only mirror
+      // it into the island when the island window actually has focus.
+      if (islandGrid != null && cursorGrid === islandGrid)
         applyCursor(e.payload.row, e.payload.col, e.payload.mode);
     }),
     listen("gnv://cmdline", () => {}),
@@ -529,6 +579,20 @@ measureCell();
   ]);
 
   jlog(`listeners ready; cellW=${cellW.toFixed(2)} cellH=${cellH.toFixed(2)}`);
+
+  // Now that grid/winft listeners are live, attach the Neovim UI. The first
+  // redraw (every window's grid_line) is emitted only after this point, so
+  // nothing is lost and no redraw-replay hack is needed.
+  for (let i = 0; i < 100; i++) {
+    try {
+      await invoke("nvim_ui_start", computeSize());
+      jlog(`ui_start ok ${JSON.stringify(computeSize())}`);
+      break;
+    } catch (e) {
+      if (i === 20) jlog("ui_start still failing: " + e);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
 
   for (let i = 0; i < 100; i++) {
     try {
@@ -552,12 +616,8 @@ measureCell();
     jlog("winfts failed: " + e);
   }
 
+  lastSize = computeSize();
   new ResizeObserver(() => pushSize()).observe(viewportEl);
-  pushSize();
-  // the first frames from ui_attach were emitted before we were listening;
-  // force a full repaint now that the listeners are live.
-  await new Promise((r) => setTimeout(r, 60));
-  invoke("nvim_redraw").catch(() => {});
   setTimeout(
     () =>
       jlog(

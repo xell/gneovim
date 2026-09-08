@@ -1,7 +1,7 @@
 @import "modern-normalize";
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 html,
@@ -10,8 +10,8 @@ body {
   height: 100%;
   margin: 0;
   overflow: hidden;
-  background: #14141b;
-  color: #e0e0ea;
+  background: #ffffff;
+  color: #000000;
 }
 
 #viewport {
@@ -29,7 +29,9 @@ body {
 
 .gridwin {
   position: absolute;
-  contain: strict;
+  /* opaque bg: a transparent absolutely-positioned layer over a transparent
+     viewport is what WKWebView fails to composite until an unrelated event */
+  background: #ffffff;
 }
 
 .grid-row {
@@ -41,32 +43,39 @@ body {
 #island {
   position: absolute;
   overflow: hidden;
-  background: #191922;
-  box-shadow: inset 0 0 0 1px #33334a;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px #d0d0d8;
 }
 #island .cm-editor {
   height: 100%;
-  font: 16px / 1.6 Georgia, "Iowan Old Style", Palatino, serif;
+}
+/* CodeMirror's base theme sets font-family:monospace on .cm-scroller itself,
+   which beats inheritance from .cm-editor; override the scroller directly. */
+#island .cm-scroller {
+  font-family: Georgia, "Iowan Old Style", Palatino, serif;
+  font-size: 16px;
+  line-height: 1.6;
+  overflow: auto;
 }
 #island .cm-content {
-  caret-color: #7aa2f7;
-}
-#island .cm-scroller {
-  overflow: auto;
+  caret-color: #1a56db;
+  font-family: inherit;
+  /* explicit so island text never depends on inherited body color */
+  color: #000000;
 }
 
 #grid-cursor {
   position: absolute;
   z-index: 3;
-  background: #7aa2f7;
+  background: #1a56db;
   mix-blend-mode: difference;
   pointer-events: none;
 }
 
 /* nvim block cursor inside the island */
 .nvim-cursor-block {
-  background: #7aa2f7;
-  color: #14141b;
+  background: #1a56db;
+  color: #ffffff;
   border-radius: 1px;
 }
 .nvim-cursor-eol {

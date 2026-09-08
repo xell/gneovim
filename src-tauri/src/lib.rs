@@ -275,6 +275,19 @@ async fn nvim_redraw(app: AppHandle, window: tauri::Window) -> Result<(), String
     bridge_for(&app, window.label()).await?.redraw().await
 }
 
+#[tauri::command]
+async fn nvim_ui_start(
+    app: AppHandle,
+    window: tauri::Window,
+    cols: i64,
+    rows: i64,
+) -> Result<(), String> {
+    bridge_for(&app, window.label())
+        .await?
+        .ui_start(cols, rows)
+        .await
+}
+
 /// Bridge the webview console into the app log (spike debugging aid).
 #[tauri::command]
 fn js_log(msg: String) {
@@ -351,6 +364,7 @@ pub fn run() {
             nvim_resync,
             nvim_resize,
             nvim_redraw,
+            nvim_ui_start,
             js_log,
             nvim_winfts,
             new_window,
