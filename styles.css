@@ -49,6 +49,12 @@ body {
   height: var(--cell-h, 17px);
   white-space: pre;
 }
+/* a double-width glyph pinned to exactly two cells */
+.grid-row .wide {
+  display: inline-block;
+  overflow: hidden;
+  height: var(--cell-h, 17px);
+}
 
 /* the markdown island: CodeMirror, proportional serif */
 .island {
@@ -77,6 +83,29 @@ body {
   font-family: inherit;
   /* explicit so island text never depends on inherited body color */
   color: var(--fg);
+}
+
+/* hidden IME/keyboard sink for grid windows: a real <textarea> at the cursor so
+   the OS IME candidate window anchors correctly. Text is transparent; the IME
+   draws its own preview. */
+#ime {
+  position: absolute;
+  z-index: 2;
+  width: 2px;
+  height: var(--cell-h, 16px);
+  padding: 0;
+  border: 0;
+  margin: 0;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  line-height: var(--cell-h, 16px);
+  color: transparent;
+  background: transparent;
+  caret-color: transparent;
 }
 
 #grid-cursor {
