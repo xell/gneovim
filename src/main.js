@@ -33,14 +33,19 @@ let cellW = 8.4;
 let cellH = 17;
 function measureCell() {
   const probe = document.createElement("div");
-  probe.className = "grid";
-  probe.style.cssText = "position:absolute;visibility:hidden;left:-9999px";
+  // explicit font so we measure the natural line box, not whatever --cell-h is
+  probe.style.cssText =
+    "position:absolute;visibility:hidden;left:-9999px;white-space:pre;" +
+    'font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:13px;line-height:1.3';
   probe.textContent = "M".repeat(50);
   viewportEl.append(probe);
   const r = probe.getBoundingClientRect();
   cellW = r.width / 50;
-  cellH = probe.offsetHeight || 17;
+  // one integer cell height, used for every row's DOM height AND the pixel math
+  cellH = Math.max(1, Math.round(r.height));
   probe.remove();
+  viewportEl.style.setProperty("--cell-w", cellW + "px");
+  viewportEl.style.setProperty("--cell-h", cellH + "px");
 }
 
 // ---------------------------------------------------------------------------

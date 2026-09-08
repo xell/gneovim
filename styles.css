@@ -20,9 +20,14 @@ body {
   overflow: hidden;
 }
 
-/* monospace grid windows (non-markdown, verbatim Neovim) */
+/* monospace grid windows (non-markdown, verbatim Neovim).
+   --cell-w / --cell-h are set by measureCell() in main.js and are the single
+   source of truth: each DOM row is exactly one cell tall so it lines up with
+   the pixel math that positions windows, statuslines, and the cursor. */
 .grid {
-  font: 13px / 1.3 ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  line-height: var(--cell-h, 17px);
   white-space: pre;
   overflow: hidden;
 }
@@ -35,7 +40,7 @@ body {
 }
 
 .grid-row {
-  height: 1.3em;
+  height: var(--cell-h, 17px);
   white-space: pre;
 }
 
