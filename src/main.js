@@ -337,18 +337,20 @@ let curMode = null; // modeInfo entry for the current mode
 // committed text to nvim via nvim_input, which inserts it and moves the cursor.
 // ---------------------------------------------------------------------------
 let imeComposing = false;
-// A hidden always-editable <textarea> is the keyboard/IME sink for grid windows
-// (the standard pattern: Monaco, ace, CodeMirror 5). It stays focused so macOS
-// keeps the user's input source; it is never toggled readOnly (that churns the
-// input context and makes macOS re-pick the default source). The IME is kept
-// out of normal mode by the keydown handler forwarding every key with
-// preventDefault, which stops a textarea composition before it starts.
+// A hidden <textarea> is the keyboard/IME sink for grid windows (the standard
+// pattern: Monaco, ace, CodeMirror 5). It stays focused so macOS keeps the
+// user's input source, and is readOnly outside insert mode so the OS IME has
+// nothing to compose into (preventDefault alone does not reliably stop a
+// textarea composition in a production WebKit build). If macOS still re-picks
+// the default input source on the readonly->editable flip, disable "Keyboard >
+// Automatically switch to a document's input source".
 const imeEl = document.createElement("textarea");
 imeEl.id = "ime";
 imeEl.rows = 1;
 imeEl.spellcheck = false;
 imeEl.autocapitalize = "off";
 imeEl.setAttribute("autocorrect", "off");
+imeEl.readOnly = true;
 viewportEl.append(imeEl);
 
 function imeFlush() {
@@ -378,9 +380,15 @@ function gridInsertActive() {
 function updateImeFocus() {
   if (islandForGrid(cursorGrid)) {
     if (document.activeElement === imeEl) imeEl.blur();
-  } else if (document.activeElement !== imeEl) {
-    imeEl.focus({ preventScroll: true });
+    return;
   }
+  const ro = !gridInsertActive();
+  if (imeEl.readOnly !== ro) imeEl.readOnly = ro;
+  if (ro && imeComposing) {
+    imeComposing = false; // left insert mid-composition: drop it
+    imeEl.value = "";
+  }
+  if (document.activeElement !== imeEl) imeEl.focus({ preventScroll: true });
 }
 addEventListener("focus", updateImeFocus); // regain focus after cmd-tab
 function placeGridCursor() {
@@ -1067,25 +1075,7 @@ function keyToNvim(e) {
 addEventListener("keydown", (e) => {
   if (imeComposing) return; // IME is mid-composition; let #ime + the OS handle it
   const keys = keyToNvim(e);
-  if (keys === null) {
-    // Outside insert mode, a Process / keyCode-229 keydown is the OS IME trying
-    // to grab a command key from the always-editable #ime. Recover the physical
-    // key and force it through before composition can start.
-    if (
-      !gridInsertActive() &&
-      (e.key === "Process" || e.keyCode === 229) &&
-      !e.metaKey &&
-      !e.ctrlKey &&
-      !e.altKey
-    ) {
-      const ch = baseFromCode(e);
-      if (ch != null) {
-        e.preventDefault();
-        invoke("nvim_input", { keys: NAMED[ch] ? `<${NAMED[ch]}>` : ch });
-      }
-    }
-    return;
-  }
+  if (keys === null) return; // mid-composition / lone modifier
   // grid window in insert mode: plain text goes into the #ime textarea for the
   // OS IME; its input / compositionend forward to nvim. Control keys pass here.
   if (
