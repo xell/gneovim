@@ -3,29 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>nvim &harr; codemirror</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <title>gneovim spike: grid + markdown island</title>
   </head>
   <body>
-    <main>
-      <header>
-        <h1>nvim &harr; codemirror</h1>
-        <p class="note">
-          A real headless <code>nvim</code>, driven from the Tauri (Rust) shell
-          via <code>nvim-rs</code>. Keystrokes go to <code>nvim_input()</code> over
-          Tauri IPC; nvim's changes come back as minimal diffs. CodeMirror stays
-          editable, so edits made in it (Grammarly, paste) are forwarded via
-          <code>nvim_buf_set_text</code>.
-        </p>
-        <div id="status" class="down">
-          <span id="conn">connecting…</span>
-          <span id="mode">—</span>
-          <span id="file">—</span>
-        </div>
-      </header>
-      <div id="editor"></div>
-    </main>
-    <div id="cmdline" hidden></div>
+    <div id="viewport"></div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

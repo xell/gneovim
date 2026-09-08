@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod config;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -183,6 +184,10 @@ fn spawn_bridge(app: AppHandle, label: String) {
                     BridgeEvent::Cursor(p) => emit_app.emit_to(t, "gnv://cursor", p),
                     BridgeEvent::Cmdline(p) => emit_app.emit_to(t, "gnv://cmdline", p),
                     BridgeEvent::CmdlineHide => emit_app.emit_to(t, "gnv://cmdline_hide", ()),
+                    BridgeEvent::Grid(ops) => emit_app.emit_to(t, "gnv://grid", ops),
+                    BridgeEvent::WinFt { win, buf, ft } => {
+                        emit_app.emit_to(t, "gnv://winft", serde_json::json!({"win":win,"buf":buf,"ft":ft}))
+                    }
                 };
                 if let Err(e) = r {
                     log::warn!("emit to {emit_label}: {e}");
@@ -233,12 +238,13 @@ async fn nvim_input(app: AppHandle, window: tauri::Window, keys: String) -> Resu
 async fn nvim_cursor_set(
     app: AppHandle,
     window: tauri::Window,
+    win: i64,
     row: i64,
     col: i64,
 ) -> Result<(), String> {
     bridge_for(&app, window.label())
         .await?
-        .cursor_set(row, col)
+        .cursor_set(win, row, col)
         .await
 }
 
@@ -246,14 +252,70 @@ async fn nvim_cursor_set(
 async fn nvim_edit(
     app: AppHandle,
     window: tauri::Window,
+    buf: i64,
     regions: Vec<Region>,
 ) -> Result<(), String> {
-    bridge_for(&app, window.label()).await?.edit(regions).await
+    bridge_for(&app, window.label()).await?.edit(buf, regions).await
 }
 
 #[tauri::command]
-async fn nvim_resync(app: AppHandle, window: tauri::Window) -> Result<ResetPayload, String> {
-    bridge_for(&app, window.label()).await?.reset().await
+async fn island_attach(
+    app: AppHandle,
+    window: tauri::Window,
+    win: i64,
+) -> Result<ResetPayload, String> {
+    bridge_for(&app, window.label()).await?.island_attach(win).await
+}
+
+#[tauri::command]
+async fn island_detach(
+    app: AppHandle,
+    window: tauri::Window,
+    buf: i64,
+) -> Result<(), String> {
+    bridge_for(&app, window.label()).await?.island_detach(buf).await
+}
+
+#[tauri::command]
+async fn nvim_resize(
+    app: AppHandle,
+    window: tauri::Window,
+    cols: i64,
+    rows: i64,
+) -> Result<(), String> {
+    bridge_for(&app, window.label()).await?.resize(cols, rows).await
+}
+
+#[tauri::command]
+async fn nvim_redraw(app: AppHandle, window: tauri::Window) -> Result<(), String> {
+    bridge_for(&app, window.label()).await?.redraw().await
+}
+
+#[tauri::command]
+async fn nvim_ui_start(
+    app: AppHandle,
+    window: tauri::Window,
+    cols: i64,
+    rows: i64,
+) -> Result<(), String> {
+    bridge_for(&app, window.label())
+        .await?
+        .ui_start(cols, rows)
+        .await
+}
+
+/// Bridge the webview console into the app log (spike debugging aid).
+#[tauri::command]
+fn js_log(msg: String) {
+    log::info!("[webview] {msg}");
+}
+
+#[tauri::command]
+async fn nvim_winfts(
+    app: AppHandle,
+    window: tauri::Window,
+) -> Result<Vec<(i64, i64, String)>, String> {
+    bridge_for(&app, window.label()).await?.win_fts().await
 }
 
 #[tauri::command]
@@ -315,7 +377,13 @@ pub fn run() {
             nvim_input,
             nvim_cursor_set,
             nvim_edit,
-            nvim_resync,
+            island_attach,
+            island_detach,
+            nvim_resize,
+            nvim_redraw,
+            nvim_ui_start,
+            js_log,
+            nvim_winfts,
             new_window,
             new_tab
         ])

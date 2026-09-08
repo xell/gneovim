@@ -80,6 +80,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-log",
  "tokio",
+ "toml 0.8.2",
  "url",
 ]
 

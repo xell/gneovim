@@ -1,3 +1,7 @@
+// Spike: ext_multigrid grid renderer for non-markdown windows, CodeMirror
+// island for the markdown window, one nvim driving both.
+
+import "../styles.css";
 import { EditorView, basicSetup } from "codemirror";
 import { Decoration, WidgetType } from "@codemirror/view";
 import { Annotation, StateEffect, StateField } from "@codemirror/state";
@@ -5,270 +9,749 @@ import { markdown } from "@codemirror/lang-markdown";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-const editorEl = document.getElementById("editor");
+const viewportEl = document.getElementById("viewport");
 const te = new TextEncoder();
 const byteLen = (s) => te.encode(s).length;
 
-// Transactions that come FROM nvim, so the updateListener can skip them.
-const fromNvim = Annotation.define();
+// mirror the webview console into the app log (spike debugging)
+const jlog = (m) => invoke("js_log", { msg: String(m) }).catch(() => {});
+addEventListener("error", (e) =>
+  jlog(`ERROR ${e.message} @ ${e.filename}:${e.lineno}\n${e.error?.stack || ""}`),
+);
+addEventListener("unhandledrejection", (e) => jlog(`REJECT ${e.reason}`));
+const _origErr = console.error.bind(console);
+console.error = (...a) => {
+  jlog("console.error " + a.map(String).join(" "));
+  _origErr(...a);
+};
+jlog("main.js loaded");
 
-// --- nvim cursor as a decoration -------------------------------------------
+// ---------------------------------------------------------------------------
+// cell metrics (monospace grid)
+// ---------------------------------------------------------------------------
+let cellW = 8.4;
+let cellH = 17;
+function measureCell() {
+  const probe = document.createElement("div");
+  probe.className = "grid";
+  probe.style.cssText = "position:absolute;visibility:hidden;left:-9999px";
+  probe.textContent = "M".repeat(50);
+  viewportEl.append(probe);
+  const r = probe.getBoundingClientRect();
+  cellW = r.width / 50;
+  cellH = probe.offsetHeight || 17;
+  probe.remove();
+}
+
+// ---------------------------------------------------------------------------
+// highlight table
+// ---------------------------------------------------------------------------
+// id -> the rgb_attr map from hl_attr_define, verbatim: foreground, background,
+// special, reverse, bold, italic, strikethrough, underline, undercurl,
+// underdouble, underdotted, underdashed, blend, ...
+const hlAttrs = new Map();
+let defColors = { fg: "#000000", bg: "#ffffff", sp: "#d40000" };
+const hex = (n) =>
+  n == null || n < 0 ? null : "#" + n.toString(16).padStart(6, "0");
+
+function hlCss(id) {
+  const a = hlAttrs.get(id) || {};
+  let fg = hex(a.foreground) ?? defColors.fg;
+  let bg = hex(a.background) ?? null;
+  const sp = hex(a.special) ?? defColors.sp;
+  if (a.reverse || a.standout) {
+    const t = fg;
+    fg = bg ?? defColors.bg;
+    bg = t;
+  }
+  let s = `color:${fg};`;
+  if (bg) s += `background:${bg};`;
+  if (a.bold) s += "font-weight:700;";
+  if (a.italic) s += "font-style:italic;";
+
+  const anyUnderline =
+    a.underline || a.undercurl || a.underdouble || a.underdotted || a.underdashed;
+  const lines = [];
+  if (anyUnderline) lines.push("underline");
+  if (a.strikethrough) lines.push("line-through");
+  if (lines.length) s += `text-decoration-line:${lines.join(" ")};`;
+  if (anyUnderline) {
+    const style = a.undercurl
+      ? "wavy"
+      : a.underdouble
+        ? "double"
+        : a.underdotted
+          ? "dotted"
+          : a.underdashed
+            ? "dashed"
+            : "solid";
+    s += `text-decoration-style:${style};text-decoration-color:${sp};`;
+  }
+  return s;
+}
+
+// ---------------------------------------------------------------------------
+// GridWin: a Neovim grid rendered as DOM cell rows
+// ---------------------------------------------------------------------------
+class GridWin {
+  constructor(id) {
+    this.id = id;
+    this.cols = 0;
+    this.rows = 0;
+    this.cells = []; // rows of [char, hlId]
+    this.el = document.createElement("div");
+    this.el.className = "grid gridwin";
+    this.el.dataset.grid = id;
+    this.cursor = null;
+  }
+  resize(w, h) {
+    // grid_resize does NOT imply a clear: Neovim keeps the overlapping cells and
+    // only sends grid_line for what changed. Blanking here leaves stale rows
+    // empty forever after a window shrinks and grows back (q:, devtools, ...).
+    const old = this.cells;
+    this.cells = Array.from({ length: h }, (_, r) =>
+      Array.from({ length: w }, (_, c) =>
+        old[r] && old[r][c] ? old[r][c] : [" ", 0],
+      ),
+    );
+    this.cols = w;
+    this.rows = h;
+  }
+  clear() {
+    this.cells = Array.from({ length: this.rows }, () =>
+      Array.from({ length: this.cols }, () => [" ", 0]),
+    );
+  }
+  line(row, col, cells) {
+    const r = this.cells[row];
+    if (!r) return;
+    let hl = 0;
+    let c = col;
+    for (const [text, cellHl, repeat] of cells) {
+      if (cellHl != null) hl = cellHl;
+      const n = repeat ?? 1;
+      for (let k = 0; k < n && c < this.cols; k++) r[c++] = [text, hl];
+    }
+  }
+  scroll({ top, bot, left, right, rows }) {
+    const move = (from, to) => {
+      for (let c = left; c < right; c++) this.cells[to][c] = this.cells[from][c];
+    };
+    if (rows > 0) {
+      for (let r = top + rows; r < bot; r++) move(r, r - rows);
+    } else if (rows < 0) {
+      for (let r = bot - 1 + rows; r >= top; r--) move(r, r - rows);
+    }
+  }
+  repaint() {
+    const frag = document.createDocumentFragment();
+    for (let r = 0; r < this.rows; r++) {
+      const rowEl = document.createElement("div");
+      rowEl.className = "grid-row";
+      const row = this.cells[r];
+      let run = "";
+      let runHl = row.length ? row[0][1] : 0;
+      const flush = () => {
+        if (!run) return;
+        const sp = document.createElement("span");
+        sp.style.cssText = hlCss(runHl);
+        sp.textContent = run;
+        rowEl.append(sp);
+        run = "";
+      };
+      for (let c = 0; c < this.cols; c++) {
+        const [ch, hl] = row[c];
+        if (hl !== runHl) {
+          flush();
+          runHl = hl;
+        }
+        // "" is the right half of a preceding double-width (CJK) cell; the wide
+        // glyph already covers this column, so emit nothing for it
+        if (ch === "") continue;
+        run += ch;
+      }
+      flush();
+      if (this.cursor && this.cursor.row === r) {
+        rowEl.dataset.cursorCol = this.cursor.col;
+      }
+      frag.append(rowEl);
+    }
+    this.el.replaceChildren(frag);
+  }
+}
+
+const grids = new Map(); // gridId -> GridWin
+const winPos = new Map(); // gridId -> {srow,scol,w,h,float,zindex}
+const gridToWin = new Map(); // gridId -> winId
+const winFt = new Map(); // winId -> filetype
+const winBuf = new Map(); // winId -> bufnr
+const islands = new Map(); // winId -> Island (one CM instance per markdown window)
+let islandGridIds = new Set(); // gridIds currently rendered as an island
+let modeName_ = "n";
+
+function gw(id) {
+  let g = grids.get(id);
+  if (!g) {
+    g = new GridWin(id);
+    grids.set(id, g);
+    viewportEl.append(g.el);
+  }
+  return g;
+}
+
+const isMarkdown = (wid) => (winFt.get(wid) || "").includes("markdown");
+
+// Mount an Island over every markdown window, unmount the rest, re-point any
+// whose buffer changed. `force` re-attaches every island (desync recovery).
+function reconcileIslands(force = false) {
+  const desired = new Map(); // winId -> gridId
+  for (const [gid, wid] of gridToWin) if (isMarkdown(wid)) desired.set(wid, gid);
+
+  for (const [wid, isl] of [...islands]) {
+    if (!desired.has(wid)) {
+      islands.delete(wid);
+      const b = isl.bufnr;
+      isl.destroy();
+      if (b != null) invoke("island_detach", { buf: b }).catch(() => {});
+    }
+  }
+  for (const wid of desired.keys()) {
+    const cur = islands.get(wid);
+    const wantBuf = winBuf.get(wid);
+    if (!cur) {
+      const isl = new Island(wid);
+      islands.set(wid, isl);
+      attachIsland(isl);
+    } else if (force || (wantBuf != null && cur.bufnr !== wantBuf)) {
+      const old = cur.bufnr;
+      cur.bufnr = null;
+      if (old != null) invoke("island_detach", { buf: old }).catch(() => {});
+      attachIsland(cur);
+    }
+  }
+  islandGridIds = new Set(desired.values());
+  layout();
+}
+
+function attachIsland(isl) {
+  invoke("island_attach", { win: isl.winId })
+    .then((snap) => {
+      if (islands.get(isl.winId) !== isl) return; // unmounted while awaiting
+      isl.bufnr = snap.buf;
+      isl.applyReset(snap);
+      layout();
+    })
+    .catch((e) => jlog("island_attach failed: " + e));
+}
+
+const islandForGrid = (gid) => islands.get(gridToWin.get(gid));
+
+function place(el, p) {
+  el.style.left = `${p.scol * cellW}px`;
+  el.style.top = `${p.srow * cellH}px`;
+  el.style.width = `${p.w * cellW}px`;
+  el.style.height = `${p.h * cellH}px`;
+  if (p.zindex != null) el.style.zIndex = p.zindex;
+}
+
+function layout() {
+  for (const [gid, g] of grids) {
+    if (gid === 1) {
+      // outer grid: statuslines, separators, tabline, fills the viewport
+      g.el.style.cssText =
+        "position:absolute;left:0;top:0;right:0;bottom:0;z-index:0";
+      g.el.hidden = false;
+      continue;
+    }
+    const p = winPos.get(gid);
+    const isl = islandForGrid(gid);
+    if (isl) {
+      g.el.hidden = true;
+      if (p) {
+        place(isl.el, p);
+        isl.el.style.zIndex = 5;
+        const wasHidden = isl.el.hidden;
+        isl.el.hidden = false;
+        if (wasHidden) isl.view.requestMeasure();
+      } else {
+        isl.el.hidden = true;
+      }
+      continue;
+    }
+    if (!p) {
+      g.el.hidden = true;
+      continue;
+    }
+    g.el.hidden = false;
+    g.el.style.position = "absolute";
+    place(g.el, p);
+    if (!p.float) g.el.style.zIndex = 1;
+  }
+}
+
+// one block cursor for whichever grid window has focus
+const gridCursorEl = document.createElement("div");
+gridCursorEl.id = "grid-cursor";
+gridCursorEl.hidden = true;
+viewportEl.append(gridCursorEl);
+let cursorGrid = 1;
+let modeInfo = []; // from mode_info_set, indexed by mode_change idx
+let cursorStyleEnabled = false;
+let curMode = null; // modeInfo entry for the current mode
+function placeGridCursor() {
+  const g = grids.get(cursorGrid);
+  const p = winPos.get(cursorGrid);
+  if (!g || !g.cursor || !p || islandForGrid(cursorGrid)) {
+    gridCursorEl.hidden = true;
+    return;
+  }
+  const x = (p.scol + g.cursor.col) * cellW;
+  const y = (p.srow + g.cursor.row) * cellH;
+  const m = cursorStyleEnabled ? curMode : null;
+  const shape = (m && m.cursor_shape) || "block";
+  const pct = m && m.cell_percentage ? m.cell_percentage / 100 : 1;
+  gridCursorEl.hidden = false;
+  gridCursorEl.dataset.shape = shape;
+  gridCursorEl.style.zIndex = (p.zindex ?? 1) + 1; // ride above the focused float
+  if (shape === "vertical") {
+    gridCursorEl.style.left = `${x}px`;
+    gridCursorEl.style.top = `${y}px`;
+    gridCursorEl.style.width = `${Math.max(1, cellW * pct)}px`;
+    gridCursorEl.style.height = `${cellH}px`;
+  } else if (shape === "horizontal") {
+    const h = Math.max(1, cellH * pct);
+    gridCursorEl.style.left = `${x}px`;
+    gridCursorEl.style.top = `${y + cellH - h}px`;
+    gridCursorEl.style.width = `${cellW}px`;
+    gridCursorEl.style.height = `${h}px`;
+  } else {
+    gridCursorEl.style.left = `${x}px`;
+    gridCursorEl.style.top = `${y}px`;
+    gridCursorEl.style.width = `${cellW}px`;
+    gridCursorEl.style.height = `${cellH}px`;
+  }
+  // block cursor uses CSS blend-difference; bars get a solid Cursor-hl colour
+  const attr = m && m.attr_id != null ? hlAttrs.get(m.attr_id) : null;
+  gridCursorEl.style.background =
+    shape === "block" ? "" : (attr && hex(attr.background)) || "#1a56db";
+}
+
+const fromNvim = Annotation.define();
 const setNvimCursor = StateEffect.define();
 
 class BlockCursor extends WidgetType {
-  constructor(cls) {
-    super();
-    this.cls = cls;
-  }
-  eq(other) {
-    return other.cls === this.cls;
-  }
   toDOM() {
     const s = document.createElement("span");
-    s.className = this.cls + " nvim-cursor-eol";
+    s.className = "nvim-cursor nvim-cursor-block nvim-cursor-eol";
     s.textContent = " ";
     return s;
   }
 }
-
 function cursorDeco(state, pos) {
-  if (!pos) return Decoration.none;
-  const { row, col, mode } = pos;
-  const kind = mode[0] === "i" ? "insert" : mode[0] === "R" ? "replace" : "normal";
-  if (kind === "insert") return Decoration.none; // native caret is shown instead
-
+  if (!pos || pos.mode[0] === "i") return Decoration.none;
   const doc = state.doc;
-  const line = doc.line(Math.min(row + 1, doc.lines));
-  const from = Math.min(line.from + col, line.to);
+  const line = doc.line(Math.min(pos.row + 1, doc.lines));
+  const from = Math.min(line.from + pos.col, line.to);
   const to = Math.min(from + 1, line.to);
-  const cls =
-    kind === "replace"
-      ? "nvim-cursor nvim-cursor-underline"
-      : "nvim-cursor nvim-cursor-block";
-
   return from === to
     ? Decoration.set([
-        Decoration.widget({ widget: new BlockCursor(cls), side: 1 }).range(from),
+        Decoration.widget({ widget: new BlockCursor(), side: 1 }).range(from),
       ])
-    : Decoration.set([Decoration.mark({ class: cls }).range(from, to)]);
+    : Decoration.set([
+        Decoration.mark({ class: "nvim-cursor nvim-cursor-block" }).range(from, to),
+      ]);
 }
-
 const nvimCursorField = StateField.define({
   create: () => ({ deco: Decoration.none, pos: null }),
-  update(value, tr) {
-    let pos = value.pos;
+  update(v, tr) {
+    let pos = v.pos;
     for (const e of tr.effects) if (e.is(setNvimCursor)) pos = e.value;
     return { deco: cursorDeco(tr.state, pos), pos };
   },
   provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
 });
 
-// --- forward CM6-originated edits to nvim ------------------------------------
-function forwardExternalEdit(u) {
-  if (!u.docChanged) return;
-  if (!u.transactions.some((tr) => !tr.annotation(fromNvim))) return; // ours
-
-  const oldDoc = u.startState.doc;
-  const regions = [];
-  u.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-    const s = oldDoc.lineAt(fromA);
-    const e = oldDoc.lineAt(toA);
-    regions.push({
-      startRow: s.number - 1,
-      startCol: byteLen(s.text.slice(0, fromA - s.from)),
-      endRow: e.number - 1,
-      endCol: byteLen(e.text.slice(0, toA - e.from)),
-      replacement: inserted.toJSON(),
+// One CodeMirror instance bound to one markdown window and its buffer.
+class Island {
+  constructor(winId) {
+    this.winId = winId;
+    this.bufnr = null;
+    this.mode = "n";
+    this.el = document.createElement("div");
+    this.el.className = "island";
+    this.el.hidden = true;
+    viewportEl.append(this.el);
+    this.view = new EditorView({
+      doc: "",
+      extensions: [
+        basicSetup,
+        markdown(),
+        EditorView.lineWrapping,
+        nvimCursorField,
+        EditorView.updateListener.of((u) => this.onUpdate(u)),
+        EditorView.domEventHandlers({
+          mousedown: (ev, v) => this.onMousedown(ev, v),
+        }),
+      ],
+      parent: this.el,
     });
-  });
-  regions.reverse(); // nvim_buf_set_text applied bottom-up keeps offsets valid
-  send({ type: "edit", regions });
-}
-
-// --- forward clicks to nvim ------------------------------------------------------
-const clickHandler = EditorView.domEventHandlers({
-  mousedown(event, view) {
-    const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+  }
+  tx(spec) {
+    this.view.dispatch({ ...spec, annotations: fromNvim.of(true) });
+  }
+  destroy() {
+    this.view.destroy();
+    this.el.remove();
+  }
+  onUpdate(u) {
+    if (!u.docChanged) return;
+    if (!u.transactions.some((tr) => !tr.annotation(fromNvim))) return;
+    const oldDoc = u.startState.doc;
+    const regions = [];
+    u.changes.iterChanges((fromA, toA, _b, _c, inserted) => {
+      const s = oldDoc.lineAt(fromA);
+      const e = oldDoc.lineAt(toA);
+      regions.push({
+        startRow: s.number - 1,
+        startCol: byteLen(s.text.slice(0, fromA - s.from)),
+        endRow: e.number - 1,
+        endCol: byteLen(e.text.slice(0, toA - e.from)),
+        replacement: inserted.toJSON(),
+      });
+    });
+    regions.reverse();
+    if (this.bufnr != null) invoke("nvim_edit", { buf: this.bufnr, regions });
+  }
+  onMousedown(ev, v) {
+    const pos = v.posAtCoords({ x: ev.clientX, y: ev.clientY });
     if (pos == null) return false;
-    const line = view.state.doc.lineAt(pos);
-    send({
-      type: "cursor-set",
+    const line = v.state.doc.lineAt(pos);
+    invoke("nvim_cursor_set", {
+      win: this.winId,
       row: line.number - 1,
       col: byteLen(line.text.slice(0, pos - line.from)),
-    });
-    return false; // let CM place its selection too; nvim echo re-affirms it
-  },
-});
-
-// --- the editor -----------------------------------------------------------------
-const view = new EditorView({
-  doc: "",
-  extensions: [
-    basicSetup,
-    markdown(),
-    EditorView.lineWrapping,
-    nvimCursorField,
-    clickHandler,
-    EditorView.updateListener.of(forwardExternalEdit),
-  ],
-  parent: editorEl,
-});
-
-// --- apply nvim -> CM6 --------------------------------------------------------
-function nvimTx(spec) {
-  view.dispatch({ ...spec, annotations: fromNvim.of(true) });
-}
-
-// nvim_buf_lines_event(firstline, lastline, linedata) -> minimal CM6 change.
-function applyBufLines(firstline, lastline, linedata) {
-  const doc = view.state.doc;
-  const L = doc.lines;
-  const a = firstline;
-  const b = lastline < 0 ? L : lastline;
-
-  let from;
-  let to;
-  let insert;
-
-  if (a >= L) {
-    from = doc.length;
-    to = doc.length;
-    insert = linedata.map((l) => "\n" + l).join("");
-  } else if (b >= L) {
-    if (a === 0) {
-      from = 0;
+    }).catch(() => {});
+    return false;
+  }
+  applyBufLines(a, lastline, linedata) {
+    const doc = this.view.state.doc;
+    const L = doc.lines;
+    const b = lastline < 0 ? L : lastline;
+    let from;
+    let to;
+    let insert;
+    if (a >= L) {
+      from = doc.length;
       to = doc.length;
-      insert = linedata.join("\n");
+      insert = linedata.map((l) => "\n" + l).join("");
+    } else if (b >= L) {
+      if (a === 0) {
+        from = 0;
+        to = doc.length;
+        insert = linedata.join("\n");
+      } else {
+        from = doc.line(a).to;
+        to = doc.length;
+        insert = linedata.length ? "\n" + linedata.join("\n") : "";
+      }
     } else {
-      from = doc.line(a).to; // end of line a-1, before its "\n"
-      to = doc.length;
-      insert = linedata.length ? "\n" + linedata.join("\n") : "";
+      from = doc.line(a + 1).from;
+      to = doc.line(b + 1).from;
+      insert = linedata.map((l) => l + "\n").join("");
     }
-  } else {
-    from = doc.line(a + 1).from;
-    to = doc.line(b + 1).from;
-    insert = linedata.map((l) => l + "\n").join("");
+    try {
+      this.tx({ changes: { from, to, insert } });
+    } catch (err) {
+      jlog("island desync " + err);
+      reconcileIslands(true);
+    }
   }
-
-  try {
-    nvimTx({ changes: { from, to, insert } });
-  } catch (err) {
-    console.warn("[applyBufLines] failed — resyncing", err);
-    send({ type: "resync" });
+  applyCursor(row, col, mode) {
+    this.mode = mode;
+    const doc = this.view.state.doc;
+    const line = doc.line(Math.min(row + 1, doc.lines));
+    const pos = Math.min(line.from + col, line.to);
+    this.tx({
+      selection: { anchor: pos },
+      effects: setNvimCursor.of({ row, col, mode }),
+    });
+    this.el.dataset.mode = mode;
   }
-}
-
-function applyCursor(row, col, mode) {
-  const doc = view.state.doc;
-  const line = doc.line(Math.min(row + 1, doc.lines));
-  const pos = Math.min(line.from + col, line.to);
-  nvimTx({
-    selection: { anchor: pos },
-    effects: setNvimCursor.of({ row, col, mode }),
-    scrollIntoView: true,
-  });
-  editorEl.dataset.mode = mode;
-}
-
-// --- transport: Tauri IPC --------------------------------------------------------
-const statusEl = document.getElementById("status");
-const connEl = document.getElementById("conn");
-const modeEl = document.getElementById("mode");
-const fileEl = document.getElementById("file");
-const cmdlineEl = document.getElementById("cmdline");
-
-const basename = (p) => (p && p.split("/").pop()) || "[No Name]";
-
-function renderCmdline(ctype, content, pos) {
-  const i = Math.max(0, Math.min(pos - 1, content.length));
-  const prefix = document.createElement("span");
-  prefix.className = "cmdline-prefix";
-  prefix.textContent = ctype || ":";
-  const caret = document.createElement("span");
-  caret.className = "cmdline-caret";
-  caret.textContent = content.slice(i, i + 1) || " ";
-  cmdlineEl.replaceChildren(
-    prefix,
-    content.slice(0, i),
-    caret,
-    content.slice(i + 1),
-  );
-  cmdlineEl.hidden = false;
-}
-
-function hideCmdline() {
-  cmdlineEl.hidden = true;
-  cmdlineEl.replaceChildren();
-}
-
-const MODE_NAMES = {
-  n: "NORMAL",
-  no: "OP-PENDING",
-  v: "VISUAL",
-  V: "V-LINE",
-  "\x16": "V-BLOCK",
-  s: "SELECT",
-  i: "INSERT",
-  R: "REPLACE",
-  c: "COMMAND",
-  t: "TERMINAL",
-};
-const modeName = (m) => MODE_NAMES[m] ?? MODE_NAMES[m?.[0]] ?? m ?? "—";
-
-function applyReset(m) {
-  nvimTx({
-    changes: { from: 0, to: view.state.doc.length, insert: m.lines.join("\n") },
-  });
-  applyCursor(m.row, m.col, m.mode);
-  modeEl.textContent = modeName(m.mode);
-  if (m.name !== undefined) fileEl.textContent = basename(m.name);
-  hideCmdline();
-  statusEl.className = "ok";
-  connEl.textContent = "connected";
-}
-
-// Outbound: dispatch the same {type, ...} shape the rest of the file produces
-// to the matching Tauri command.
-function send(obj) {
-  if (obj.type === "input") {
-    invoke("nvim_input", { keys: obj.keys });
-  } else if (obj.type === "cursor-set") {
-    invoke("nvim_cursor_set", { row: obj.row, col: obj.col });
-  } else if (obj.type === "edit") {
-    invoke("nvim_edit", { regions: obj.regions });
-  } else if (obj.type === "resync") {
-    invoke("nvim_resync").then(applyReset).catch(() => {});
+  clearCursor() {
+    this.tx({ effects: setNvimCursor.of(null) });
+  }
+  applyReset(m) {
+    this.tx({
+      changes: { from: 0, to: this.view.state.doc.length, insert: m.lines.join("\n") },
+    });
+    this.applyCursor(m.row, m.col, m.mode);
+  }
+  scrollTo(topline) {
+    const doc = this.view.state.doc;
+    const l = Math.min(Math.max(topline, 0), doc.lines - 1);
+    this.view.dispatch({
+      effects: EditorView.scrollIntoView(doc.line(l + 1).from, { y: "start" }),
+      annotations: fromNvim.of(true),
+    });
   }
 }
 
-// Inbound: nvim -> Rust -> webview events.
-listen("gnv://reset", (e) => applyReset(e.payload));
-listen("gnv://lines", (e) =>
-  applyBufLines(e.payload.firstline, e.payload.lastline, e.payload.linedata),
-);
-listen("gnv://cursor", (e) => {
-  applyCursor(e.payload.row, e.payload.col, e.payload.mode);
-  modeEl.textContent = modeName(e.payload.mode);
+// ---------------------------------------------------------------------------
+// grid op stream
+// ---------------------------------------------------------------------------
+function applyGridBatch(ops) {
+  let dirty = new Set();
+  let layoutDirty = false;
+  for (const o of ops) {
+    switch (o.op) {
+      case "resize":
+        gw(o.grid).resize(o.w, o.h);
+        dirty.add(o.grid);
+        break;
+      case "clear":
+        gw(o.grid).clear();
+        dirty.add(o.grid);
+        break;
+      case "destroy": {
+        const g = grids.get(o.grid);
+        if (g) g.el.remove();
+        grids.delete(o.grid);
+        winPos.delete(o.grid);
+        gridToWin.delete(o.grid);
+        layoutDirty = true;
+        break;
+      }
+      case "line":
+        gw(o.grid).line(o.row, o.col, o.cells);
+        dirty.add(o.grid);
+        break;
+      case "scroll":
+        gw(o.grid).scroll(o);
+        dirty.add(o.grid);
+        break;
+      case "cursor":
+        gw(o.grid).cursor = { row: o.row, col: o.col };
+        if (o.grid !== cursorGrid) {
+          const prev = islandForGrid(cursorGrid);
+          cursorGrid = o.grid;
+          // focus left an island: drop its now-stale block cursor decoration
+          if (prev && prev !== islandForGrid(o.grid)) prev.clearCursor();
+        }
+        break;
+      case "win_pos":
+        winPos.set(o.grid, { srow: o.srow, scol: o.scol, w: o.w, h: o.h });
+        if (o.win != null) gridToWin.set(o.grid, o.win);
+        layoutDirty = true;
+        break;
+      case "win_float": {
+        const fg = grids.get(o.grid) || {};
+        const w = fg.cols || 20;
+        const h = fg.rows || 5;
+        // position is relative to anchor_grid (grid 1 = whole screen, at 0,0)
+        const ap =
+          o.agrid != null && o.agrid !== 1 ? winPos.get(o.agrid) : null;
+        let srow = (ap ? ap.srow : 0) + (o.arow ?? 0);
+        let scol = (ap ? ap.scol : 0) + (o.acol ?? 0);
+        const anchor = o.anchor || "NW"; // which float corner sits at (row,col)
+        if (anchor[0] === "S") srow -= h;
+        if (anchor[1] === "E") scol -= w;
+        winPos.set(o.grid, {
+          srow: Math.round(srow),
+          scol: Math.round(scol),
+          w,
+          h,
+          float: true,
+          zindex: o.zindex ?? 50,
+        });
+        if (o.win != null) gridToWin.set(o.grid, o.win);
+        layoutDirty = true;
+        break;
+      }
+      case "win_hide":
+      case "win_close": {
+        const g = grids.get(o.grid);
+        if (g) g.el.hidden = true;
+        winPos.delete(o.grid);
+        layoutDirty = true;
+        break;
+      }
+      case "msg_pos": {
+        const mg = grids.get(o.grid) || {};
+        winPos.set(o.grid, {
+          srow: o.row,
+          scol: 0,
+          w: mg.cols || (grids.get(1) || {}).cols || 200,
+          h: mg.rows || 1,
+          zindex: 250, // messages ride above floats
+        });
+        layoutDirty = true;
+        break;
+      }
+      case "viewport": {
+        const isl = islandForGrid(o.grid);
+        if (isl) {
+          isl.scrollTo(o.topline);
+          // re-seat the island cursor after a bare window switch (no CursorMoved)
+          if (cursorGrid === o.grid && o.curline != null)
+            isl.applyCursor(o.curline, o.curcol ?? 0, isl.mode);
+        }
+        break;
+      }
+      case "colors":
+        // Neovim's built-in default colorscheme sends a themed Normal
+        // (NvimLightGrey / NvimDarkGrey) via default_colors_set. For this
+        // prose spike, pin the editing surface to black-on-white; keep only
+        // nvim's `sp` (spell/undercurl color).
+        defColors = { fg: "#000000", bg: "#ffffff", sp: hex(o.sp) ?? defColors.sp };
+        document.body.style.background = defColors.bg;
+        document.body.style.color = defColors.fg;
+        for (const isl of islands.values()) isl.el.style.background = defColors.bg;
+        dirty = new Set(grids.keys());
+        break;
+      case "hl":
+        hlAttrs.set(o.id, o.attr || {});
+        break;
+      case "mode":
+        modeName_ = o.name || modeName_;
+        curMode = o.idx != null ? modeInfo[o.idx] ?? null : curMode;
+        break;
+      case "mode_info":
+        cursorStyleEnabled = !!o.enabled;
+        modeInfo = o.modes || [];
+        break;
+      case "flush":
+        break;
+    }
+  }
+  if (layoutDirty) reconcileIslands();
+  for (const id of dirty) {
+    const g = grids.get(id);
+    if (g && !islandGridIds.has(id)) {
+      g.repaint();
+      // WKWebView will not composite a freshly rebuilt absolutely-positioned
+      // subtree until an unrelated event (scroll/resize). Force a reflow.
+      forceRepaint(g.el);
+    }
+  }
+  placeGridCursor();
+}
+
+function forceRepaint(el) {
+  const prev = el.style.display;
+  el.style.display = "none";
+  void el.offsetHeight; // reflow
+  el.style.display = prev;
+}
+
+// ---------------------------------------------------------------------------
+// transport
+// ---------------------------------------------------------------------------
+function computeSize() {
+  const r = viewportEl.getBoundingClientRect();
+  return {
+    cols: Math.max(20, Math.floor(r.width / cellW)),
+    rows: Math.max(4, Math.floor(r.height / cellH)),
+  };
+}
+let lastSize = { cols: 0, rows: 0 };
+function pushSize() {
+  const s = computeSize();
+  if (s.cols === lastSize.cols && s.rows === lastSize.rows) return;
+  lastSize = s;
+  invoke("nvim_resize", s).catch(() => {});
+}
+
+// surface any uncaught error as visible text (webview has no visible console)
+addEventListener("error", (e) => {
+  const pre = document.createElement("pre");
+  pre.style.cssText =
+    "position:fixed;inset:0;margin:0;padding:1rem;background:#300;color:#fdd;white-space:pre-wrap;z-index:999;font:12px monospace";
+  pre.textContent = `${e.message}\n${e.filename}:${e.lineno}\n${e.error?.stack || ""}`;
+  document.body.append(pre);
 });
-listen("gnv://cmdline", (e) =>
-  renderCmdline(e.payload.ctype, e.payload.content, e.payload.pos),
-);
-listen("gnv://cmdline_hide", () => hideCmdline());
 
-// Initial snapshot, retried until the bridge has finished connecting to nvim.
-(async function initialSync() {
+(async function boot() {
+  // measure the grid cell only once fonts + stylesheet are actually applied,
+  // otherwise the probe reports the UA proportional default (~14x18)
+  if (document.fonts && document.fonts.ready) await document.fonts.ready;
+  measureCell();
+  if (cellW > 11) {
+    // still looks proportional; give styles one more frame and retry
+    await new Promise((r) => requestAnimationFrame(r));
+    measureCell();
+  }
+
+  // register every listener BEFORE anything can trigger a redraw
+  await Promise.all([
+    listen("gnv://grid", (e) => applyGridBatch(e.payload)),
+    listen("gnv://winft", (e) => {
+      winFt.set(e.payload.win, e.payload.ft || "");
+      if (e.payload.buf != null) winBuf.set(e.payload.win, e.payload.buf);
+      reconcileIslands();
+    }),
+    listen("gnv://reset", (e) => {
+      for (const isl of islands.values())
+        if (isl.bufnr === e.payload.buf) isl.applyReset(e.payload);
+    }),
+    listen("gnv://lines", (e) => {
+      const { buf, firstline, lastline, linedata } = e.payload;
+      for (const isl of islands.values())
+        if (isl.bufnr === buf) isl.applyBufLines(firstline, lastline, linedata);
+    }),
+    listen("gnv://cursor", (e) => {
+      // CursorMoved reports the *global* cursor wherever focus is; route it to
+      // the island that owns the focused grid, if any.
+      const isl = islandForGrid(cursorGrid);
+      if (isl) isl.applyCursor(e.payload.row, e.payload.col, e.payload.mode);
+    }),
+    listen("gnv://cmdline", () => {}),
+    listen("gnv://cmdline_hide", () => {}),
+  ]);
+
+  jlog(`listeners ready; cellW=${cellW.toFixed(2)} cellH=${cellH.toFixed(2)}`);
+
+  // Now that grid/winft listeners are live, attach the Neovim UI. The first
+  // redraw (every window's grid_line) is emitted only after this point, so
+  // nothing is lost and no redraw-replay hack is needed.
   for (let i = 0; i < 100; i++) {
     try {
-      applyReset(await invoke("nvim_resync"));
-      return;
-    } catch {
+      await invoke("nvim_ui_start", computeSize());
+      jlog(`ui_start ok ${JSON.stringify(computeSize())}`);
+      break;
+    } catch (e) {
+      if (i === 20) jlog("ui_start still failing: " + e);
       await new Promise((r) => setTimeout(r, 100));
     }
   }
-  connEl.textContent = "nvim unavailable";
+
+  // winft events fired before we were listening; replay them. reconcileIslands()
+  // then mounts an island on every markdown window that exists.
+  try {
+    for (const [win, buf, ft] of await invoke("nvim_winfts")) {
+      winFt.set(win, ft || "");
+      if (buf != null) winBuf.set(win, buf);
+    }
+    reconcileIslands();
+    jlog(`winfts replayed: ${JSON.stringify([...winFt])}`);
+  } catch (e) {
+    jlog("winfts failed: " + e);
+  }
+
+  lastSize = computeSize();
+  new ResizeObserver(() => pushSize()).observe(viewportEl);
+  setTimeout(
+    () =>
+      jlog(
+        `state: grids=${grids.size} winPos=${winPos.size} ` +
+          `islands=${islands.size} winFt=${JSON.stringify([...winFt])}`,
+      ),
+    800,
+  );
 })();
 
-// --- keyboard -> nvim_input ------------------------------------------------------
+// ---------------------------------------------------------------------------
+// keyboard -> nvim_input
+// ---------------------------------------------------------------------------
 const NAMED = {
   Enter: "CR",
   Backspace: "BS",
@@ -286,29 +769,23 @@ const NAMED = {
   Insert: "Insert",
   " ": "Space",
 };
-
 function keyToNvim(e) {
-  if (e.metaKey) return null; // leave Cmd shortcuts to the OS
-  if (["Shift", "Control", "Alt", "Meta", "CapsLock", "Dead"].includes(e.key)) {
+  if (e.metaKey) return null;
+  if (["Shift", "Control", "Alt", "Meta", "CapsLock", "Dead"].includes(e.key))
     return null;
-  }
-
   let key = NAMED[e.key];
-  const isNamed = key !== undefined;
-  if (!isNamed) {
-    if (e.key.length !== 1) return null; // F-keys etc. — out of scope
+  const named = key !== undefined;
+  if (!named) {
+    if (e.key.length !== 1) return null;
     key = e.key === "<" ? "lt" : e.key;
   }
-
   const mods = (e.ctrlKey ? "C-" : "") + (e.altKey ? "M-" : "");
-  if (mods || isNamed || key === "lt") return `<${mods}${key}>`;
+  if (mods || named || key === "lt") return `<${mods}${key}>`;
   return key;
 }
-
 addEventListener("keydown", (e) => {
-  // Cmd+N / Cmd+T (New Window / New Tab) are handled by the native menu.
   const keys = keyToNvim(e);
   if (keys === null) return;
   e.preventDefault();
-  send({ type: "input", keys });
+  invoke("nvim_input", { keys });
 });
