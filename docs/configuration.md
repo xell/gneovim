@@ -28,6 +28,11 @@ config = "user"
 # Treat macOS Option as Meta: Option+<key> reaches Neovim as <M-...> instead of
 # composing accented characters (é, •, …). Default true.
 option_is_meta = true
+
+# Make a markdown island non-editable outside insert/replace mode, so an input
+# method cannot hijack normal-mode keys (a CJK IME turning `j` into a syllable).
+# Neovim's own edits still render. Default true.
+block_ime_in_normal_mode = true
 ```
 
 ## Loading your Neovim config

@@ -60,6 +60,10 @@ body {
 .island .cm-editor {
   height: 100%;
 }
+/* the active island's content is always DOM-focused (for the IME); no ring */
+.island .cm-editor.cm-focused {
+  outline: none;
+}
 /* CodeMirror's base theme sets font-family:monospace on .cm-scroller itself,
    which beats inheritance from .cm-editor; override the scroller directly. */
 .island .cm-scroller {

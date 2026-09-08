@@ -4,7 +4,7 @@
 import "../styles.css";
 import { EditorView, basicSetup } from "codemirror";
 import { Decoration, WidgetType } from "@codemirror/view";
-import { Annotation, StateEffect, StateField } from "@codemirror/state";
+import { Annotation, StateEffect, StateField, Compartment } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -393,16 +393,41 @@ const nvimCursorField = StateField.define({
   provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
 });
 
+// The run of text present in `b` but not `a` (common prefix + suffix removed).
+function diffInserted(a, b) {
+  let p = 0;
+  while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let s = 0;
+  while (
+    s < a.length - p &&
+    s < b.length - p &&
+    a[a.length - 1 - s] === b[b.length - 1 - s]
+  )
+    s++;
+  return b.slice(p, b.length - s);
+}
+
+// Non-editable content is not focusable on its own; the tabindex keeps it the
+// keyboard's target so keydown still reaches the global nvim_input path.
+const EDITABLE_ON = EditorView.editable.of(true);
+const EDITABLE_OFF = [
+  EditorView.editable.of(false),
+  EditorView.contentAttributes.of({ tabindex: "0" }),
+];
+
 // One CodeMirror instance bound to one markdown window and its buffer.
 class Island {
   constructor(winId) {
     this.winId = winId;
     this.bufnr = null;
     this.mode = "n";
+    this.editableComp = new Compartment();
+    this.editable = true;
     this.el = document.createElement("div");
     this.el.className = "island";
     this.el.hidden = true;
     viewportEl.append(this.el);
+    this.compose = null; // { text, sel } snapshot while an IME composition runs
     this.view = new EditorView({
       doc: "",
       extensions: [
@@ -410,6 +435,7 @@ class Island {
         markdown(),
         EditorView.lineWrapping,
         nvimCursorField,
+        this.editableComp.of(EDITABLE_ON),
         EditorView.updateListener.of((u) => this.onUpdate(u)),
         EditorView.domEventHandlers({
           mousedown: (ev, v) => this.onMousedown(ev, v),
@@ -417,9 +443,35 @@ class Island {
       ],
       parent: this.el,
     });
+    // The OS IME composes into .cm-content; on commit we hand the text to nvim
+    // via nvim_input (so nvim inserts it AND moves the cursor), then revert the
+    // local composition so nvim's buffer echo is the single source of truth.
+    const cd = this.view.contentDOM;
+    cd.addEventListener("compositionstart", () => {
+      this.compose = {
+        text: this.view.state.doc.toString(),
+        sel: this.view.state.selection.main.head,
+      };
+    });
+    cd.addEventListener("compositionend", (e) => this.onComposeEnd(e));
   }
   tx(spec) {
     this.view.dispatch({ ...spec, annotations: fromNvim.of(true) });
+  }
+  // Keep the OS input method off the island outside insert/replace mode: an IME
+  // only engages on a contenteditable surface, so a keypress in normal mode
+  // (e.g. `j` with a CJK IME) reaches nvim as a key instead of composing a
+  // glyph into the buffer. readOnly is untouched, so nvim's own edits still
+  // render. See ZenNotes ca2e18d.
+  setEditable(on) {
+    if (on === this.editable) return;
+    this.editable = on;
+    this.view.dispatch({
+      effects: this.editableComp.reconfigure(on ? EDITABLE_ON : EDITABLE_OFF),
+    });
+    // Insert mode needs the .cm-content focused so the OS IME composes into it;
+    // in normal mode we do not (keys are global), so leave focus alone.
+    if (on) this.view.focus();
   }
   destroy() {
     this.view.destroy();
@@ -428,6 +480,13 @@ class Island {
   onUpdate(u) {
     if (!u.docChanged) return;
     if (!u.transactions.some((tr) => !tr.annotation(fromNvim))) return;
+    // leave IME composition alone: forwarding it (and the buffer echo bouncing
+    // back) aborts the composition. onComposeEnd handles the committed text.
+    if (
+      this.compose ||
+      u.transactions.some((tr) => tr.isUserEvent("input.type.compose"))
+    )
+      return;
     const oldDoc = u.startState.doc;
     const regions = [];
     u.changes.iterChanges((fromA, toA, _b, _c, inserted) => {
@@ -443,6 +502,21 @@ class Island {
     });
     regions.reverse();
     if (this.bufnr != null) invoke("nvim_edit", { buf: this.bufnr, regions });
+  }
+  onComposeEnd(e) {
+    const snap = this.compose;
+    this.compose = null;
+    if (!snap) return;
+    const now = this.view.state.doc.toString();
+    const text = e.data || diffInserted(snap.text, now);
+    // revert the local composition; nvim's echo of nvim_input will re-add it
+    if (now !== snap.text) {
+      this.tx({
+        changes: { from: 0, to: now.length, insert: snap.text },
+        selection: { anchor: Math.min(snap.sel, snap.text.length) },
+      });
+    }
+    if (text) invoke("nvim_input", { keys: text.replace(/</g, "<lt>") });
   }
   onMousedown(ev, v) {
     const pos = v.posAtCoords({ x: ev.clientX, y: ev.clientY });
@@ -490,6 +564,12 @@ class Island {
   }
   applyCursor(row, col, mode) {
     this.mode = mode;
+    // if this island holds the cursor, keep its .cm-content focused so hasFocus
+    // is reliable (needed for the insert-mode IME carve-out), in every mode
+    if (gridToWin.get(cursorGrid) === this.winId && !this.view.hasFocus)
+      this.view.focus();
+    // editable only in insert / replace / select mode, unless the guard is off
+    this.setEditable(!blockImeInNormalMode || /^[iRsS\x13]/.test(mode));
     const doc = this.view.state.doc;
     const line = doc.line(Math.min(row + 1, doc.lines));
     const pos = Math.min(line.from + col, line.to);
@@ -501,6 +581,8 @@ class Island {
   }
   clearCursor() {
     this.tx({ effects: setNvimCursor.of(null) });
+    // cursor left this island; drop focus so keys go to the global path
+    if (this.view.hasFocus) this.view.contentDOM.blur();
   }
   applyReset(m) {
     this.tx({
@@ -707,7 +789,11 @@ addEventListener("error", (e) => {
   try {
     const cfg = await invoke("gnv_config");
     optionIsMeta = cfg?.input?.option_is_meta ?? true;
-    jlog(`config: option_is_meta=${optionIsMeta}`);
+    blockImeInNormalMode = cfg?.input?.block_ime_in_normal_mode ?? true;
+    if (matchMedia?.("(pointer: coarse)")?.matches) blockImeInNormalMode = false;
+    jlog(
+      `config: option_is_meta=${optionIsMeta} block_ime=${blockImeInNormalMode}`,
+    );
   } catch (e) {
     jlog("gnv_config failed: " + e);
   }
@@ -830,6 +916,9 @@ const MOD_ONLY = new Set([
 
 // from config [input] option_is_meta; Option+<key> -> <M-...> instead of é/•/…
 let optionIsMeta = true;
+// from config [input] block_ime_in_normal_mode; islands go non-editable outside
+// insert mode so a CJK IME cannot hijack normal-mode keys
+let blockImeInNormalMode = true;
 
 // physical-key -> character, to recover the key when Option composed it away
 const CODE_CHAR = {
@@ -903,6 +992,8 @@ function keyToNvim(e) {
 
 addEventListener("keydown", (e) => {
   const keys = keyToNvim(e);
+  // null == mid-composition or a lone modifier: leave the event alone so it can
+  // land in the focused island's contenteditable and the OS IME can compose.
   if (keys === null) return;
   e.preventDefault();
   invoke("nvim_input", { keys });

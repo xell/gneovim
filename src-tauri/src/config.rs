@@ -22,12 +22,18 @@ pub struct Input {
     /// Treat the macOS Option key as Meta, so Option+<key> reaches Neovim as
     /// `<M-...>` instead of composing a character (é, •, …). Default true.
     pub option_is_meta: bool,
+
+    /// Make a markdown island non-editable outside insert/replace mode so an
+    /// input method cannot hijack normal-mode keys (a CJK IME turning `j` into
+    /// a syllable). Default true.
+    pub block_ime_in_normal_mode: bool,
 }
 
 impl Default for Input {
     fn default() -> Self {
         Self {
             option_is_meta: true,
+            block_ime_in_normal_mode: true,
         }
     }
 }
