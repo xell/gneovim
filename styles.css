@@ -71,6 +71,11 @@ body {
   mix-blend-mode: difference;
   pointer-events: none;
 }
+/* bar cursors (insert, replace) are solid, not blended */
+#grid-cursor[data-shape="vertical"],
+#grid-cursor[data-shape="horizontal"] {
+  mix-blend-mode: normal;
+}
 
 /* nvim block cursor inside the island */
 .nvim-cursor-block {

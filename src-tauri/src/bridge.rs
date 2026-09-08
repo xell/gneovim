@@ -175,6 +175,10 @@ fn grid_op(ev: &str, a: &[Value]) -> Option<Json> {
         "default_colors_set" => json!({"op":"colors","fg":i(0),"bg":i(1),"sp":i(2)}),
         "hl_attr_define" => json!({"op":"hl","id":i(0),"attr":attr_map(a.get(1).unwrap_or(&Value::Nil))}),
         "mode_change" => json!({"op":"mode","name":a.first().and_then(Value::as_str),"idx":i(1)}),
+        "mode_info_set" => json!({"op":"mode_info",
+            "enabled": a.first().and_then(Value::as_bool),
+            "modes": a.get(1).and_then(Value::as_array)
+                .map(|m| m.iter().map(attr_map).collect::<Vec<_>>()).unwrap_or_default()}),
         "flush" => json!({"op":"flush"}),
         _ => return None,
     })

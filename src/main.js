@@ -46,7 +46,10 @@ function measureCell() {
 // ---------------------------------------------------------------------------
 // highlight table
 // ---------------------------------------------------------------------------
-const hlAttrs = new Map(); // id -> {fg,bg,bold,italic,underline,reverse}
+// id -> the rgb_attr map from hl_attr_define, verbatim: foreground, background,
+// special, reverse, bold, italic, strikethrough, underline, undercurl,
+// underdouble, underdotted, underdashed, blend, ...
+const hlAttrs = new Map();
 let defColors = { fg: "#000000", bg: "#ffffff", sp: "#d40000" };
 const hex = (n) =>
   n == null || n < 0 ? null : "#" + n.toString(16).padStart(6, "0");
@@ -55,7 +58,8 @@ function hlCss(id) {
   const a = hlAttrs.get(id) || {};
   let fg = hex(a.foreground) ?? defColors.fg;
   let bg = hex(a.background) ?? null;
-  if (a.reverse) {
+  const sp = hex(a.special) ?? defColors.sp;
+  if (a.reverse || a.standout) {
     const t = fg;
     fg = bg ?? defColors.bg;
     bg = t;
@@ -64,7 +68,25 @@ function hlCss(id) {
   if (bg) s += `background:${bg};`;
   if (a.bold) s += "font-weight:700;";
   if (a.italic) s += "font-style:italic;";
-  if (a.underline || a.undercurl) s += "text-decoration:underline;";
+
+  const anyUnderline =
+    a.underline || a.undercurl || a.underdouble || a.underdotted || a.underdashed;
+  const lines = [];
+  if (anyUnderline) lines.push("underline");
+  if (a.strikethrough) lines.push("line-through");
+  if (lines.length) s += `text-decoration-line:${lines.join(" ")};`;
+  if (anyUnderline) {
+    const style = a.undercurl
+      ? "wavy"
+      : a.underdouble
+        ? "double"
+        : a.underdotted
+          ? "dotted"
+          : a.underdashed
+            ? "dashed"
+            : "solid";
+    s += `text-decoration-style:${style};text-decoration-color:${sp};`;
+  }
   return s;
 }
 
@@ -258,6 +280,9 @@ gridCursorEl.id = "grid-cursor";
 gridCursorEl.hidden = true;
 viewportEl.append(gridCursorEl);
 let cursorGrid = 1;
+let modeInfo = []; // from mode_info_set, indexed by mode_change idx
+let cursorStyleEnabled = false;
+let curMode = null; // modeInfo entry for the current mode
 function placeGridCursor() {
   const g = grids.get(cursorGrid);
   const p = winPos.get(cursorGrid);
@@ -265,11 +290,34 @@ function placeGridCursor() {
     gridCursorEl.hidden = true;
     return;
   }
+  const x = (p.scol + g.cursor.col) * cellW;
+  const y = (p.srow + g.cursor.row) * cellH;
+  const m = cursorStyleEnabled ? curMode : null;
+  const shape = (m && m.cursor_shape) || "block";
+  const pct = m && m.cell_percentage ? m.cell_percentage / 100 : 1;
   gridCursorEl.hidden = false;
-  gridCursorEl.style.left = `${(p.scol + g.cursor.col) * cellW}px`;
-  gridCursorEl.style.top = `${(p.srow + g.cursor.row) * cellH}px`;
-  gridCursorEl.style.width = `${cellW}px`;
-  gridCursorEl.style.height = `${cellH}px`;
+  gridCursorEl.dataset.shape = shape;
+  if (shape === "vertical") {
+    gridCursorEl.style.left = `${x}px`;
+    gridCursorEl.style.top = `${y}px`;
+    gridCursorEl.style.width = `${Math.max(1, cellW * pct)}px`;
+    gridCursorEl.style.height = `${cellH}px`;
+  } else if (shape === "horizontal") {
+    const h = Math.max(1, cellH * pct);
+    gridCursorEl.style.left = `${x}px`;
+    gridCursorEl.style.top = `${y + cellH - h}px`;
+    gridCursorEl.style.width = `${cellW}px`;
+    gridCursorEl.style.height = `${h}px`;
+  } else {
+    gridCursorEl.style.left = `${x}px`;
+    gridCursorEl.style.top = `${y}px`;
+    gridCursorEl.style.width = `${cellW}px`;
+    gridCursorEl.style.height = `${cellH}px`;
+  }
+  // block cursor uses CSS blend-difference; bars get a solid Cursor-hl colour
+  const attr = m && m.attr_id != null ? hlAttrs.get(m.attr_id) : null;
+  gridCursorEl.style.background =
+    shape === "block" ? "" : (attr && hex(attr.background)) || "#1a56db";
 }
 
 const fromNvim = Annotation.define();
@@ -514,6 +562,11 @@ function applyGridBatch(ops) {
         break;
       case "mode":
         modeName_ = o.name || modeName_;
+        curMode = o.idx != null ? modeInfo[o.idx] ?? null : curMode;
+        break;
+      case "mode_info":
+        cursorStyleEnabled = !!o.enabled;
+        modeInfo = o.modes || [];
         break;
       case "flush":
         break;
