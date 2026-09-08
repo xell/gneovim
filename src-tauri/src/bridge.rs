@@ -25,18 +25,6 @@ use tokio::sync::{mpsc::UnboundedSender, Mutex};
 pub type NWriter = Compat<ChildStdin>;
 pub type Nvim = Neovim<NWriter>;
 
-const INITIAL: &[&str] = &[
-    "# hello from neovim",
-    "",
-    "This buffer lives in a real headless `nvim`, driven from Rust via nvim-rs.",
-    "Keystrokes go to nvim_input(); nvim's changes stream back as minimal diffs.",
-    "Edits made in CodeMirror (Grammarly, paste) are forwarded via nvim_buf_set_text.",
-    "",
-    "The bridge follows the active buffer, so `:e somefile` works.",
-    "",
-    "try:   i ... <Esc>    o    dd    u    :%s/hello/HELLO/g    :e /tmp/notes.md",
-];
-
 // Apply edit regions (already sorted bottom-up so earlier offsets stay valid).
 const LUA_APPLY_EDIT: &str = r#"
   local regions = ...
@@ -461,34 +449,16 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
         .await
         .map_err(|e| format!("spawn nvim ({bin}): {e}"))?;
 
-    let buf = nvim.get_current_buf().await.map_err(err)?;
-    let id = buf.get_number().await.map_err(err)?;
-
-    // ---- spike layout: a markdown island window + a code grid window ----
+    // filetype detection on, and a light background for the prose surface. No
+    // scene is staged here: the renderer draws whatever windows and buffers the
+    // launch args (or the user) produce.
     nvim.command("filetype on").await.ok();
-    // Neovim 0.10+ has a built-in default colorscheme; its default background is
-    // dark (Normal = NvimLightGrey on NvimDarkGrey). This is a prose editor, so
-    // switch to the light palette; the client pins Normal to pure black-on-white
-    // and renders the remaining hl groups (StatusLine, Visual, ...) as sent.
+    // Neovim 0.10+ ships a built-in default colorscheme and defaults to
+    // background=dark (Normal = NvimLightGrey on NvimDarkGrey). This is a prose
+    // editor, so switch to the light palette. The client pins Normal to pure
+    // black-on-white and renders the other hl groups (StatusLine, Visual, ...)
+    // as sent.
     nvim.command("set background=light").await.ok();
-    buf.set_lines(0, -1, false, INITIAL.iter().map(|s| s.to_string()).collect())
-        .await
-        .map_err(err)?;
-    nvim.command("setlocal buftype=nofile noswapfile filetype=markdown")
-        .await
-        .map_err(err)?;
-    std::fs::write(
-        "/tmp/gnv-spike-code.txt",
-        (1..=200)
-            .map(|n| format!("line {n:>3}: the quick brown fox jumps over the lazy dog"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
-    .ok();
-    nvim.command("belowright vsplit /tmp/gnv-spike-code.txt")
-        .await
-        .map_err(err)?;
-    nvim.command("wincmd h").await.map_err(err)?; // back to the markdown window
 
     // Autocmds in one augroup, targeted at our channel.
     let api = nvim.get_api_info().await.map_err(err)?;
@@ -514,16 +484,17 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
         nvim.command(&spec).await.map_err(err)?;
     }
 
-    // Attach the markdown buffer (current window after `wincmd h`) for buffer-sync.
-    let md_buf = nvim.get_current_buf().await.map_err(err)?;
-    let md_id = md_buf.get_number().await.map_err(err)?;
+    // Attach the current buffer for buffer-sync. The markdown island consumes
+    // this stream; a session with no markdown window simply never shows it.
+    // Dynamic per-window attach is a later step.
+    let buf = nvim.get_current_buf().await.map_err(err)?;
+    let bufnr = buf.get_number().await.map_err(err)?;
     *bufstate.lock().await = Some(BufState {
-        buf: md_buf.clone(),
-        id: md_id,
+        buf: buf.clone(),
+        id: bufnr,
     });
     shared.skip_snapshot.store(true, Ordering::SeqCst);
-    md_buf.attach(true, vec![]).await.map_err(err)?;
-    let _ = id;
+    buf.attach(true, vec![]).await.map_err(err)?;
 
     // NOTE: the UI is *not* attached here. `nvim_ui_attach` immediately emits a
     // full redraw, and the webview has not registered its `listen()` handlers

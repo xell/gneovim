@@ -1,4 +1,7 @@
-//! Spike: verify the multigrid + markdown-island event flow reaches the channel.
+//! Grid-renderer smoke test: connect, attach the UI, stage a small scene
+//! (a file in a vsplit, one window switched to filetype=markdown), and check
+//! the multigrid event stream reaches the channel. The bridge stages nothing
+//! itself, so the test drives the scene.
 //! cargo test --test spike -- --nocapture
 
 use std::collections::HashSet;
@@ -8,14 +11,27 @@ use app_lib::bridge::{self, BridgeEvent};
 use tokio::sync::mpsc;
 
 #[tokio::test]
-async fn multigrid_island_flow() {
+async fn multigrid_renderer_flow() {
+    let file = std::env::temp_dir().join("gnv-grid-test.txt");
+    std::fs::write(
+        &file,
+        (1..=120)
+            .map(|n| format!("line {n}: the quick brown fox"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+
     let (tx, mut rx) = mpsc::unbounded_channel::<BridgeEvent>();
     let (b, _child) = bridge::connect(tx).await.expect("connect");
+    b.ui_start(160, 48).await.expect("ui_start");
+    b.input(&format!(":edit {}\r", file.display())).await.unwrap();
+    b.input(":vsplit\r").await.unwrap();
+    b.input(":set filetype=markdown\r").await.unwrap();
 
     let mut md_winft = false;
-    // the frontend gets the island's content via the nvim_resync command
-    let reset_lines = b.reset().await.map(|p| p.lines.len()).unwrap_or(0);
     let mut win_pos_grids: HashSet<i64> = HashSet::new();
+    let mut resize_grids: HashSet<i64> = HashSet::new();
     let mut line_ops = 0usize;
     let mut viewport_seen = false;
     let mut colors_seen = false;
@@ -37,9 +53,15 @@ async fn multigrid_island_flow() {
             BridgeEvent::Grid(ops) => {
                 frames += 1;
                 for o in &ops {
+                    let grid = o.get("grid").and_then(|v| v.as_i64());
                     match o.get("op").and_then(|v| v.as_str()) {
+                        Some("resize") => {
+                            if let Some(g) = grid {
+                                resize_grids.insert(g);
+                            }
+                        }
                         Some("win_pos") => {
-                            if let Some(g) = o.get("grid").and_then(|v| v.as_i64()) {
+                            if let Some(g) = grid {
                                 win_pos_grids.insert(g);
                             }
                         }
@@ -54,15 +76,16 @@ async fn multigrid_island_flow() {
         }
     }
 
-    println!("md_winft={md_winft} reset_lines={reset_lines} frames={frames}");
+    println!("md_winft={md_winft} frames={frames}");
     println!(
-        "win_pos_grids={win_pos_grids:?} line_ops={line_ops} viewport={viewport_seen} colors={colors_seen}"
+        "resize_grids={resize_grids:?} win_pos_grids={win_pos_grids:?} line_ops={line_ops} viewport={viewport_seen} colors={colors_seen}"
     );
 
+    assert!(frames > 0, "grid frames arrived after ui_start");
     assert!(md_winft, "a window reported filetype markdown");
-    assert_eq!(reset_lines, 9, "island buffer is the 9-line welcome text");
-    assert!(win_pos_grids.len() >= 2, "at least two window grids placed");
-    assert!(line_ops > 20, "grid_line ops arrived for the code window");
+    assert!(resize_grids.len() >= 2, "outer grid plus at least one window grid");
+    assert!(win_pos_grids.len() >= 2, "at least two window grids placed by the vsplit");
+    assert!(line_ops > 20, "grid_line ops arrived for the file content");
     assert!(colors_seen, "default_colors_set arrived");
-    assert!(viewport_seen, "win_viewport arrived (island scroll feed)");
+    assert!(viewport_seen, "win_viewport arrived");
 }
