@@ -33,6 +33,11 @@ option_is_meta = true
 # method cannot hijack normal-mode keys (a CJK IME turning `j` into a syllable).
 # Neovim's own edits still render. Default true.
 block_ime_in_normal_mode = true
+
+# Forward Cmd+<key> to Neovim as <D-...>. Default false: on macOS Cmd is the
+# app/menu modifier, and forwarding it collides with menu shortcuts (Cmd+N, ...).
+# Enable if you have <D-...> mappings.
+forward_cmd_keys = false
 ```
 
 ## Loading your Neovim config

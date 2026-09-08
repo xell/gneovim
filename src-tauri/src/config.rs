@@ -27,6 +27,11 @@ pub struct Input {
     /// input method cannot hijack normal-mode keys (a CJK IME turning `j` into
     /// a syllable). Default true.
     pub block_ime_in_normal_mode: bool,
+
+    /// Forward Cmd+<key> to Neovim as `<D-...>`. Default false: on macOS Cmd is
+    /// the app/menu modifier, and forwarding it collides with menu shortcuts.
+    /// Enable if you have `<D-...>` mappings.
+    pub forward_cmd_keys: bool,
 }
 
 impl Default for Input {
@@ -34,6 +39,7 @@ impl Default for Input {
         Self {
             option_is_meta: true,
             block_ime_in_normal_mode: true,
+            forward_cmd_keys: false,
         }
     }
 }

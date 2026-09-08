@@ -790,9 +790,11 @@ addEventListener("error", (e) => {
     const cfg = await invoke("gnv_config");
     optionIsMeta = cfg?.input?.option_is_meta ?? true;
     blockImeInNormalMode = cfg?.input?.block_ime_in_normal_mode ?? true;
+    forwardCmdKeys = cfg?.input?.forward_cmd_keys ?? false;
     if (matchMedia?.("(pointer: coarse)")?.matches) blockImeInNormalMode = false;
     jlog(
-      `config: option_is_meta=${optionIsMeta} block_ime=${blockImeInNormalMode}`,
+      `config: option_is_meta=${optionIsMeta} block_ime=${blockImeInNormalMode} ` +
+        `forward_cmd=${forwardCmdKeys}`,
     );
   } catch (e) {
     jlog("gnv_config failed: " + e);
@@ -919,6 +921,8 @@ let optionIsMeta = true;
 // from config [input] block_ime_in_normal_mode; islands go non-editable outside
 // insert mode so a CJK IME cannot hijack normal-mode keys
 let blockImeInNormalMode = true;
+// from config [input] forward_cmd_keys; send Cmd+<key> to nvim as <D-...>
+let forwardCmdKeys = false;
 
 // physical-key -> character, to recover the key when Option composed it away
 const CODE_CHAR = {
@@ -944,6 +948,8 @@ function baseFromCode(e) {
 
 function keyToNvim(e) {
   if (e.isComposing || e.keyCode === 229) return null; // mid-IME composition
+  // Cmd is the macOS app/menu modifier; only forward it if asked.
+  if (e.metaKey && !forwardCmdKeys) return null;
   const k = e.key;
   const isF = /^F([1-9]|1\d|2[0-4])$/.test(k);
 
