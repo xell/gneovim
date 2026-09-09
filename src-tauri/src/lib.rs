@@ -131,6 +131,181 @@ fn apply_traffic_light_inset_deferred(win: tauri::WebviewWindow) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Unsaved-changes guard for Cmd+W / Cmd+Q
+// ---------------------------------------------------------------------------
+
+/// Truncated, comma-joined list for a dialog body.
+#[cfg(target_os = "macos")]
+fn summarize(items: &[String]) -> String {
+    const MAX: usize = 8;
+    if items.len() <= MAX {
+        items.join(", ")
+    } else {
+        format!("{}, and {} more", items[..MAX].join(", "), items.len() - MAX)
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnsavedChoice {
+    Cancel,
+    Review,
+    Discard,
+}
+
+/// Native modal warning. `buttons[0]` is the default (Return); if it is titled
+/// "Cancel" it also answers Escape. Awaited off the main thread; the alert runs
+/// on it. Returns which button was pressed (index 0 -> Cancel, index 1 of a
+/// 3-button alert -> Review, otherwise -> Discard).
+#[cfg(target_os = "macos")]
+async fn warn_unsaved(
+    app: &AppHandle,
+    message: String,
+    informative: String,
+    buttons: &'static [&'static str],
+) -> UnsavedChoice {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSAlert, NSAlertStyle};
+    use objc2_foundation::NSString;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let queued = app.run_on_main_thread(move || {
+        let mtm = MainThreadMarker::new().expect("run_on_main_thread is the main thread");
+        let alert = NSAlert::new(mtm);
+        alert.setAlertStyle(NSAlertStyle::Warning);
+        alert.setMessageText(&NSString::from_str(&message));
+        alert.setInformativeText(&NSString::from_str(&informative));
+        for title in buttons {
+            alert.addButtonWithTitle(&NSString::from_str(title));
+        }
+        let resp = alert.runModal(); // NSAlertFirstButtonReturn == 1000
+        let idx = (resp - 1000).max(0) as usize;
+        let choice = match (buttons.len(), idx) {
+            (_, 0) => UnsavedChoice::Cancel,
+            (3, 1) => UnsavedChoice::Review,
+            _ => UnsavedChoice::Discard,
+        };
+        let _ = tx.send(choice);
+    });
+    if queued.is_err() {
+        return UnsavedChoice::Cancel;
+    }
+    rx.await.unwrap_or(UnsavedChoice::Cancel)
+}
+
+/// Cmd+W: warn before killing a window whose nvim has unsaved buffers or a live
+/// `:terminal`. Called after `api.prevent_close()`.
+#[cfg(target_os = "macos")]
+fn guard_close(window: &tauri::Window) {
+    let window = window.clone();
+    let app = window.app_handle().clone();
+    async_runtime::spawn(async move {
+        let label = window.label().to_string();
+        let Ok(bridge) = bridge_for(&app, &label).await else {
+            let _ = window.destroy();
+            return;
+        };
+        let blockers = match bridge.unsaved_blockers().await {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = window.destroy();
+                return;
+            }
+        };
+        if blockers.is_empty() {
+            // clean quit so nvim writes shada and runs VimLeave; force after 3s
+            let _ = tokio::time::timeout(Duration::from_secs(3), bridge.quit_all(false)).await;
+            let _ = window.destroy();
+            return;
+        }
+        let title = window.title().unwrap_or_else(|_| "This window".into());
+        let choice = warn_unsaved(
+            &app,
+            format!("\u{201c}{title}\u{201d} has unsaved changes"),
+            format!("{}\n\nClosing now discards them.", summarize(&blockers)),
+            &["Cancel", "Discard & Close"],
+        )
+        .await;
+        if choice == UnsavedChoice::Discard {
+            let _ = bridge.quit_all(true).await;
+            let _ = window.destroy();
+        }
+    });
+}
+
+/// Set once we have decided to quit, so our own `app.exit(0)` does not re-enter
+/// the guard.
+#[cfg(target_os = "macos")]
+static QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Cmd+Q: scan every gui-window's nvim, warn if any has unsaved changes. Called
+/// after `api.prevent_exit()`.
+#[cfg(target_os = "macos")]
+fn guard_exit(app: &AppHandle) {
+    let app = app.clone();
+    async_runtime::spawn(async move {
+        let entries: Vec<(String, Bridge)> = {
+            let st = app.state::<AppState>();
+            let g = st.windows.lock().unwrap();
+            g.iter().map(|(l, w)| (l.clone(), w.bridge.clone())).collect()
+        };
+        let mut offenders: Vec<(String, Vec<String>)> = Vec::new();
+        for (label, b) in &entries {
+            if let Ok(v) = b.unsaved_blockers().await {
+                if !v.is_empty() {
+                    offenders.push((label.clone(), v));
+                }
+            }
+        }
+        if offenders.is_empty() {
+            for (_, b) in &entries {
+                let _ = tokio::time::timeout(Duration::from_secs(3), b.quit_all(false)).await;
+            }
+            QUITTING.store(true, Ordering::Relaxed);
+            app.exit(0);
+            return;
+        }
+        let mut info = String::new();
+        for (label, v) in &offenders {
+            let title = app
+                .get_webview_window(label)
+                .and_then(|w| w.title().ok())
+                .unwrap_or_else(|| label.clone());
+            info.push_str(&format!("\u{2022} {title}: {}\n", summarize(v)));
+        }
+        let plural = offenders.len() != 1;
+        let choice = warn_unsaved(
+            &app,
+            format!(
+                "{} window{} ha{} unsaved changes",
+                offenders.len(),
+                if plural { "s" } else { "" },
+                if plural { "ve" } else { "s" }
+            ),
+            info,
+            &["Cancel", "Review", "Discard All & Quit"],
+        )
+        .await;
+        match choice {
+            UnsavedChoice::Review => {
+                if let Some(w) = app.get_webview_window(&offenders[0].0) {
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                }
+            }
+            UnsavedChoice::Discard => {
+                for (_, b) in &entries {
+                    let _ = b.quit_all(true).await;
+                }
+                QUITTING.store(true, Ordering::Relaxed);
+                app.exit(0);
+            }
+            UnsavedChoice::Cancel => {}
+        }
+    });
+}
+
 /// Create a gui-window with its own nvim. `as_tab` adds it to the focused
 /// window's tab group (macOS); otherwise it is a standalone window.
 fn spawn_window(app: &AppHandle, as_tab: bool) -> Option<String> {
@@ -222,9 +397,11 @@ fn spawn_bridge(app: AppHandle, label: String) {
                         .emit(&ev("guiopt"), serde_json::json!({"name":name,"value":value})),
                     BridgeEvent::Gone(reason) => {
                         log::info!("{emit_label}: {reason}");
-                        // :q / :qa is the common case; close the gui-window too.
+                        // :q / :qa is the common case; drop the gui-window too.
+                        // destroy(), not close(): nvim is already gone, so the
+                        // Cmd+W CloseRequested guard has nothing to check.
                         if let Some(w) = emit_app.get_webview_window(&emit_label) {
-                            let _ = w.close();
+                            let _ = w.destroy();
                         }
                         emit_app.emit(&ev("gone"), reason)
                     }
@@ -555,6 +732,13 @@ pub fn run() {
             _ => {}
         })
         .on_window_event(|window, event| match event {
+            #[cfg(target_os = "macos")]
+            WindowEvent::CloseRequested { api, .. } => {
+                // Cmd+W. Stop the kill, then check nvim for unsaved buffers /
+                // live terminals and warn, or quit it cleanly.
+                api.prevent_close();
+                guard_close(window);
+            }
             WindowEvent::Destroyed => {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.windows.lock().unwrap().remove(window.label());
@@ -602,6 +786,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::ExitRequested { api, .. } = &_event {
+                // Cmd+Q. Hold the quit until every nvim confirms it can exit.
+                if !QUITTING.load(Ordering::Relaxed) {
+                    api.prevent_exit();
+                    guard_exit(_app);
+                }
+            }
             #[cfg(any(target_os = "macos", target_os = "ios"))]
             if let tauri::RunEvent::Opened { urls } = &_event {
                 let paths: Vec<String> = urls

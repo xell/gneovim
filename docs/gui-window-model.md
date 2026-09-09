@@ -34,6 +34,10 @@ In dev, the Vite plugin (`vite.config.js`, `provisionNvim`) plays that shell rol
 
 The webview is never nvim's parent in any wrapper, so a webview reload or crash never kills nvim. That is the tmux style property (detach and reattach the view, the session lives), and it needs no special handling.
 
+### Unsaved-changes guard
+
+Because `nvim` is `kill_on_drop`, a bare Cmd+W / Cmd+Q would SIGKILL it and leave swap files behind. So `WindowEvent::CloseRequested` (Cmd+W) and `RunEvent::ExitRequested` (Cmd+Q) are intercepted: the guard asks each window's nvim `unsaved_blockers()` (a Lua scan for modified file buffers, `E37`, and `:terminal` buffers with a live job, `E947`). If a window is clean it is quit with `:qall` so shada and `VimLeave` run, then destroyed. If anything blocks, a native `NSAlert` (`lib.rs::warn_unsaved`) offers Cancel / (for Cmd+Q) Review, which focuses the first offending window / Discard, which runs `:qall!`. The `QUITTING` flag lets the guard's own `app.exit(0)` through without re-entering.
+
 ### Dev only: crash recovery
 
 If the dev server is killed ungracefully (`kill -9`, a hard crash), `stop()` cannot run, so nvim is orphaned and keeps listening on the socket. The next `npm run dev` probes the socket, finds it alive, and **attaches instead of spawning**, so the editing session survives the crash. A nvim reused this way is no longer a child of anything, so it will not be killed by a later graceful stop; it lingers until `npm run nvim:stop` (or `:qa`).

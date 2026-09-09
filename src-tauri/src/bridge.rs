@@ -917,4 +917,45 @@ impl Bridge {
             .map(|_| ())
             .map_err(err)
     }
+
+    /// Short descriptions of every buffer that would make `:qall` fail without a
+    /// bang: a modified file buffer (`E37`) or a `:terminal` with a live job
+    /// (`E947`). Empty result means this nvim can quit cleanly.
+    pub async fn unsaved_blockers(&self) -> Result<Vec<String>, String> {
+        const LUA: &str = r#"
+            local out = {}
+            for _, b in ipairs(vim.api.nvim_list_bufs()) do
+              if vim.api.nvim_buf_is_loaded(b) then
+                local bo = vim.bo[b]
+                local tail = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(b), ':t')
+                local label = (tail ~= '' and tail) or ('[No Name] (buffer ' .. b .. ')')
+                if bo.modified and bo.modifiable and not bo.readonly
+                   and (bo.buftype == '' or bo.buftype == 'acwrite') then
+                  out[#out + 1] = label
+                elseif bo.buftype == 'terminal' then
+                  local job = vim.b[b].terminal_job_id
+                  if job and vim.fn.jobwait({ job }, 0)[1] == -1 then
+                    out[#out + 1] = 'terminal: ' .. label
+                  end
+                end
+              end
+            end
+            return out
+        "#;
+        let v = self.nvim.exec_lua(LUA, vec![]).await.map_err(err)?;
+        Ok(v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// `:qall` (`force` false) or `:qall!` (`force` true). On a clean quit nvim
+    /// exits and the io task emits `BridgeEvent::Gone`, which closes the window.
+    pub async fn quit_all(&self, force: bool) -> Result<(), String> {
+        let cmd = if force { "qall!" } else { "qall" };
+        self.nvim.command(cmd).await.map_err(err)
+    }
 }
