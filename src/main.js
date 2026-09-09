@@ -895,8 +895,21 @@ class Island {
     });
     this.applyCursor(m.row, m.col, m.mode);
   }
-  scrollTo(topline) {
+  scrollTo(topline, botline, linecount) {
     const doc = this.view.state.doc;
+    // Neovim scrolled for a monospace window `p.h` rows tall, but our box is
+    // that many *monospace cells* tall and CM lines are taller, so it fits
+    // fewer lines. When Neovim is already showing the end of the buffer,
+    // pinning `topline` to the top clips the trailing lines with no way to
+    // reach them (Neovim will not scroll further). Sit the last line on the
+    // box bottom instead and show as many trailing lines as fit.
+    if (linecount != null && botline != null && botline >= linecount) {
+      this.view.dispatch({
+        effects: EditorView.scrollIntoView(doc.length, { y: "end" }),
+        annotations: fromNvim.of(true),
+      });
+      return;
+    }
     const l = Math.min(Math.max(topline, 0), doc.lines - 1);
     this.view.dispatch({
       effects: EditorView.scrollIntoView(doc.line(l + 1).from, { y: "start" }),
@@ -1034,7 +1047,7 @@ function renderGridOps(ops) {
       case "viewport": {
         const isl = islandForGrid(o.grid);
         if (isl) {
-          isl.scrollTo(o.topline);
+          isl.scrollTo(o.topline, o.botline, o.linecount);
           // re-seat the island cursor after a bare window switch (no CursorMoved)
           if (cursorGrid === o.grid && o.curline != null)
             isl.applyCursor(o.curline, o.curcol ?? 0, isl.mode);
