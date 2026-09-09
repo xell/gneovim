@@ -38,21 +38,66 @@ jlog("main.js loaded");
 let cellW = 8.4;
 let cellH = 17;
 let originX = 4; // left margin in px; the grid is letterboxed, see screenMetrics
+let gridLinespace = 0; // from :set linespace, added to the natural line box
+const GRID_FONT_FALLBACK = 'ui-monospace, "SF Mono", Menlo, monospace';
+const GRID_SIZE_FALLBACK = "13px";
 function measureCell() {
+  const cs = getComputedStyle(document.documentElement);
+  const fam = cs.getPropertyValue("--grid-font-family").trim() || GRID_FONT_FALLBACK;
+  const size = cs.getPropertyValue("--grid-font-size").trim() || GRID_SIZE_FALLBACK;
   const probe = document.createElement("div");
-  // explicit font so we measure the natural line box, not whatever --cell-h is
   probe.style.cssText =
     "position:absolute;visibility:hidden;left:-9999px;white-space:pre;" +
-    'font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:13px;line-height:1.3';
+    `font-family:${fam};font-size:${size};line-height:1.3`;
   probe.textContent = "M".repeat(50);
   viewportEl.append(probe);
   const r = probe.getBoundingClientRect();
   cellW = r.width / 50;
   // one integer cell height, used for every row's DOM height AND the pixel math
-  cellH = Math.max(1, Math.round(r.height));
+  cellH = Math.max(1, Math.round(r.height) + gridLinespace);
   probe.remove();
   viewportEl.style.setProperty("--cell-w", cellW + "px");
   viewportEl.style.setProperty("--cell-h", cellH + "px");
+}
+
+// Parse `guifont` ("Family:h14,Fallback:h13" ...) -> { family, size } from the
+// first entry. Neovim does not validate it (no built-in GUI), so anything goes.
+function parseGuifont(s) {
+  const first = (s || "").split(",")[0].trim();
+  if (!first) return null;
+  const parts = first.split(":");
+  const family = parts[0].replace(/\\ /g, " ").replace(/_/g, " ").trim();
+  let size = null;
+  for (const p of parts.slice(1)) {
+    const m = /^h([\d.]+)$/.exec(p);
+    if (m) size = parseFloat(m[1]);
+  }
+  return { family, size };
+}
+function applyGuiOptRaw(name, value) {
+  const root = document.documentElement.style;
+  if (name === "guifont") {
+    const f = parseGuifont(value);
+    if (f && f.family) {
+      const fam = /[^\w-]/.test(f.family) ? `"${f.family}"` : f.family;
+      root.setProperty("--grid-font-family", `${fam}, ${GRID_FONT_FALLBACK}`);
+    } else root.removeProperty("--grid-font-family");
+    if (f && f.size) root.setProperty("--grid-font-size", `${f.size}px`);
+    else root.removeProperty("--grid-font-size");
+  } else if (name === "linespace") {
+    gridLinespace = Math.max(0, parseInt(value, 10) || 0);
+  }
+}
+function relayoutForFont() {
+  measureCell();
+  applyScreen(screenMetrics());
+  lastSize = { cols: 0, rows: 0 }; // force a resize down to nvim
+  pushSize();
+  repaintNow();
+}
+function applyGuiOpt(name, value) {
+  applyGuiOptRaw(name, value);
+  relayoutForFont();
 }
 
 // ---------------------------------------------------------------------------
@@ -397,11 +442,34 @@ function updateImeFocus() {
   if (document.activeElement !== imeEl) imeEl.focus({ preventScroll: true });
 }
 addEventListener("focus", updateImeFocus); // regain focus after cmd-tab
+let blinkTimer = 0;
+function stopBlink() {
+  clearTimeout(blinkTimer);
+  blinkTimer = 0;
+  gridCursorEl.style.opacity = "";
+}
+// blink per guicursor (blinkwait / blinkon / blinkoff, ms); restarts on move.
+function startBlink() {
+  stopBlink();
+  const m = cursorStyleEnabled ? curMode : null;
+  const on = (m && m.blinkon) | 0;
+  const off = (m && m.blinkoff) | 0;
+  if (!on || !off) return; // 0 in either -> steady cursor
+  let visible = true;
+  const step = () => {
+    visible = !visible;
+    gridCursorEl.style.opacity = visible ? "" : "0";
+    blinkTimer = setTimeout(step, visible ? on : off);
+  };
+  blinkTimer = setTimeout(step, ((m && m.blinkwait) | 0) || on);
+}
+
 function placeGridCursor() {
   const g = grids.get(cursorGrid);
   const p = winPos.get(cursorGrid);
   if (!g || !g.cursor || !p || islandForGrid(cursorGrid)) {
     gridCursorEl.hidden = true;
+    stopBlink();
     return;
   }
   const x = (p.scol + g.cursor.col) * cellW + originX;
@@ -436,6 +504,7 @@ function placeGridCursor() {
   const attr = m && m.attr_id != null ? hlAttrs.get(m.attr_id) : null;
   gridCursorEl.style.background =
     shape === "block" ? "" : (attr && hex(attr.background)) || "var(--fg)";
+  startBlink();
 }
 
 const fromNvim = Annotation.define();
@@ -927,6 +996,7 @@ addEventListener("error", (e) => {
     listen(ev("cmdline"), () => {}),
     listen(ev("cmdline_hide"), () => {}),
     listen(ev("focus"), () => repaintNow()),
+    listen(ev("guiopt"), (e) => applyGuiOpt(e.payload.name, e.payload.value)),
   ]);
 
   jlog(`listeners ready; cellW=${cellW.toFixed(2)} cellH=${cellH.toFixed(2)}`);
@@ -958,6 +1028,18 @@ addEventListener("error", (e) => {
     jlog(`winfts replayed: ${JSON.stringify([...winFt])}`);
   } catch (e) {
     jlog("winfts failed: " + e);
+  }
+
+  // GUI options (guifont / linespace) set before we were listening
+  try {
+    let changed = false;
+    for (const [name, value] of await invoke("nvim_guiopts")) {
+      applyGuiOptRaw(name, value);
+      if (value) changed = true;
+    }
+    if (changed) relayoutForFont();
+  } catch (e) {
+    jlog("guiopts failed: " + e);
   }
 
   lastSize = { cols: m0.cols, rows: m0.rows };

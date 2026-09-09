@@ -31,8 +31,8 @@ body {
    source of truth: each DOM row is exactly one cell tall so it lines up with
    the pixel math that positions windows, statuslines, and the cursor. */
 .grid {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 13px;
+  font-family: var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace);
+  font-size: var(--grid-font-size, 13px);
   line-height: var(--cell-h, 17px);
   white-space: pre;
   overflow: hidden;
@@ -100,8 +100,8 @@ body {
   resize: none;
   overflow: hidden;
   white-space: pre;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 13px;
+  font-family: var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace);
+  font-size: var(--grid-font-size, 13px);
   line-height: var(--cell-h, 16px);
   color: transparent;
   background: transparent;

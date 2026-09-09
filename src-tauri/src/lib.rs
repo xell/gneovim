@@ -218,6 +218,8 @@ fn spawn_bridge(app: AppHandle, label: String) {
                         &ev("winft"),
                         serde_json::json!({"win":win,"buf":buf,"ft":ft}),
                     ),
+                    BridgeEvent::GuiOpt { name, value } => emit_app
+                        .emit(&ev("guiopt"), serde_json::json!({"name":name,"value":value})),
                 };
                 if let Err(e) = r {
                     log::warn!("emit for {emit_label}: {e}");
@@ -384,6 +386,14 @@ async fn nvim_winfts(
 }
 
 #[tauri::command]
+async fn nvim_guiopts(
+    app: AppHandle,
+    window: tauri::Window,
+) -> Result<Vec<(String, String)>, String> {
+    bridge_for(&app, window.label()).await?.gui_opts().await
+}
+
+#[tauri::command]
 async fn new_window(app: AppHandle) -> Result<(), String> {
     spawn_window(&app, false);
     Ok(())
@@ -509,6 +519,7 @@ pub fn run() {
             js_log,
             gnv_config,
             nvim_winfts,
+            nvim_guiopts,
             nvim_paste_clip,
             nvim_clip_yank,
             new_window,

@@ -83,6 +83,9 @@ pub enum BridgeEvent {
     Grid(Vec<Json>),
     /// A window's filetype, so the client can pick which grid is the CM island.
     WinFt { win: i64, buf: i64, ft: String },
+    /// A GUI option changed (`guifont`, `linespace`, ...). No `ext_` event
+    /// carries these; polled via an `OptionSet` autocmd.
+    GuiOpt { name: String, value: String },
 }
 
 #[derive(Deserialize)]
@@ -289,6 +292,15 @@ impl Handler for NvHandler {
                 let buf = args.get(1).and_then(Value::as_i64).unwrap_or(0);
                 let ft = args.get(2).and_then(Value::as_str).unwrap_or("").to_string();
                 let _ = self.shared.tx.send(BridgeEvent::WinFt { win, buf, ft });
+            }
+            "gnv_guiopt" => {
+                let name = args.first().and_then(Value::as_str).unwrap_or("").to_string();
+                let value = match args.get(1) {
+                    Some(Value::String(s)) => s.as_str().unwrap_or("").to_string(),
+                    Some(Value::Integer(n)) => n.to_string(),
+                    _ => String::new(),
+                };
+                let _ = self.shared.tx.send(BridgeEvent::GuiOpt { name, value });
             }
             "redraw" => {
                 let mut batch = self.shared.grid_batch.lock().unwrap();
@@ -527,6 +539,10 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
             "autocmd gnv BufWinEnter,FileType,WinEnter,WinNew,WinClosed * \
              call rpcnotify({chan}, 'gnv_winft', win_getid(), bufnr(), &filetype)"
         ),
+        format!(
+            "autocmd gnv OptionSet guifont,guifontwide,linespace \
+             call rpcnotify({chan}, 'gnv_guiopt', expand('<amatch>'), v:option_new)"
+        ),
     ] {
         nvim.command(&spec).await.map_err(err)?;
     }
@@ -740,6 +756,30 @@ impl Bridge {
     }
 
     /// `[[winid, bufnr, filetype], ...]` for every window (winft replay).
+    /// `[(name, value), ...]` for the GUI options the client cares about, so it
+    /// can pick them up on boot (there is no `ext_` event for them).
+    pub async fn gui_opts(&self) -> Result<Vec<(String, String)>, String> {
+        let v = self
+            .nvim
+            .eval(
+                "[['guifont', &guifont], ['guifontwide', &guifontwide], \
+                 ['linespace', string(&linespace)]]",
+            )
+            .await
+            .map_err(err)?;
+        Ok(v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                let r = row.as_array()?;
+                Some((
+                    r.first().and_then(Value::as_str)?.to_string(),
+                    r.get(1).and_then(Value::as_str).unwrap_or("").to_string(),
+                ))
+            })
+            .collect())
+    }
+
     pub async fn win_fts(&self) -> Result<Vec<(i64, i64, String)>, String> {
         let v = self
             .nvim
