@@ -544,7 +544,8 @@ pub struct Bridge {
 pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child), String> {
     let bin = find_nvim().await;
     let init_args = crate::config::get().neovim.init_args();
-    log::info!("using nvim at {bin} (init: {init_args:?})");
+    let shada_args = crate::config::get().neovim.shada_args();
+    log::info!("using nvim at {bin} (init: {init_args:?}, shada: {shada_args:?})");
     // Resolve the user's login-shell environment once (off the async worker,
     // since it may spawn a shell) so nvim sees a terminal-equivalent $PATH.
     let extra_env = tokio::task::spawn_blocking(login_shell_env)
@@ -553,7 +554,7 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
     let mut cmd = Command::new(&bin);
     cmd.args(["--embed", "--headless", "-n"])
         .args(&init_args)
-        .args(["-i", "NONE"])
+        .args(&shada_args)
         .kill_on_drop(true);
     cmd.envs(extra_env.iter().map(|(k, v)| (k, v)));
 
@@ -586,17 +587,18 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
         });
     }
 
-    // filetype detection on, and a light background for the prose surface. No
-    // scene is staged here: the renderer draws whatever windows and buffers the
-    // launch args (or the user) produce.
+    // No scene is staged here: the renderer draws whatever windows and buffers
+    // the launch args (or the user) produce.
     nvim.command("filetype on").await.ok();
-    // Neovim 0.10+ ships a built-in default colorscheme and defaults to
-    // background=dark (Normal = NvimLightGrey on NvimDarkGrey). This is a prose
-    // editor, so switch to the light palette. The client pins Normal to pure
-    // black-on-white and renders the other hl groups (StatusLine, Visual, ...)
-    // as sent.
-    nvim.command("set background=light").await.ok();
-    // The GUI feeds mouse events via nvim_input_mouse; let nvim act on them.
+    // A bare `-u NONE` nvim ships Neovim 0.10+'s built-in colorscheme with
+    // background=dark. gneovim is a light prose surface, so force the light
+    // palette for that case only. With a real user config, respect whatever
+    // background / colorscheme it sets.
+    if crate::config::get().neovim.is_bare() {
+        nvim.command("set background=light").await.ok();
+    }
+    // The GUI feeds mouse events via nvim_input_mouse; make sure nvim acts on
+    // them even if a user config cleared 'mouse'.
     nvim.command("set mouse=a").await.ok();
 
     // Autocmds in one augroup, targeted at our channel.

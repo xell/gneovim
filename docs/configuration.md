@@ -44,10 +44,14 @@ forward_cmd_keys = false
 
 By default gneovim runs `nvim -u NONE`, so your `~/.config/nvim` is not read. This keeps the renderer working against a predictable nvim while it is still being built. Set `config = "user"` to load your real config.
 
-Two caveats:
+`config` also decides how much of the session gneovim owns:
 
-- The renderer is not finished. A full config (a colorscheme, statusline plugins, treesitter, LSP, render-markdown and similar) will exercise parts of the renderer that are still rough, so expect visual glitches.
-- gneovim always adds `-i NONE` (no shada) and `-n` (no swap) for now.
+- `config = "none"` (the default): a throwaway session. gneovim adds `-i NONE` (no ShaDa) and forces `set background=light`.
+- `config = "user"` or a path: your session. Default ShaDa is used, so command-line history (`q:`), search history, marks, registers, and `:oldfiles` work like terminal nvim. `background` and colorscheme are left to your config.
+
+Either way gneovim adds `-n` (no swap file) and forces `mouse=a` (the GUI feeds mouse events through `nvim_input_mouse`).
+
+Caveat: the renderer is not finished. A full config (a colorscheme, statusline plugins, treesitter, LSP, render-markdown and similar) will exercise parts of the renderer that are still rough, so expect visual glitches.
 
 ## Shell environment
 

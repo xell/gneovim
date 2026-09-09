@@ -68,6 +68,29 @@ impl Neovim {
             path => vec!["-u".into(), expand_tilde(path)],
         }
     }
+
+    /// True when running a bare `nvim -u NONE` (no user config): `config` unset
+    /// or "none". gneovim then owns more of the session (throwaway ShaDa, a
+    /// forced light background). With any real config, those choices are the
+    /// user's.
+    pub fn is_bare(&self) -> bool {
+        self.config
+            .as_deref()
+            .unwrap_or("none")
+            .eq_ignore_ascii_case("none")
+    }
+
+    /// The `-i ...` (ShaDa) args. A bare `-u NONE` session gets `-i NONE` so it
+    /// stays fully throwaway. Any real config uses the default ShaDa file, so
+    /// command-line history (`q:`), search history, marks, registers, and
+    /// `:oldfiles` behave like terminal nvim.
+    pub fn shada_args(&self) -> Vec<String> {
+        if self.is_bare() {
+            vec!["-i".into(), "NONE".into()]
+        } else {
+            vec![]
+        }
+    }
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -152,6 +175,18 @@ mod tests {
         assert!(user.init_args().is_empty());
         let custom = Neovim { path: None, config: Some("~/x/init.lua".into()) };
         assert_eq!(custom.init_args(), vec!["-u", "/home/x/x/init.lua"]);
+    }
+
+    #[test]
+    fn shada_args_from_config() {
+        let none = Neovim { path: None, config: None };
+        assert_eq!(none.shada_args(), vec!["-i", "NONE"]);
+        let explicit_none = Neovim { path: None, config: Some("NONE".into()) };
+        assert_eq!(explicit_none.shada_args(), vec!["-i", "NONE"]);
+        let user = Neovim { path: None, config: Some("user".into()) };
+        assert!(user.shada_args().is_empty());
+        let custom = Neovim { path: None, config: Some("~/x/init.lua".into()) };
+        assert!(custom.shada_args().is_empty());
     }
 
     #[test]
