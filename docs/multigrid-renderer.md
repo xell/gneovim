@@ -30,6 +30,8 @@ Fix: `bridge::connect` builds the split, buffers, and autocmds but does **not** 
 
 Fix: `GridWin.resize` copies the old cells into the new dimensions and only fills truly new cells with blanks.
 
+A floating window can grow or shrink through `grid_resize` alone, with no fresh `win_float_pos` (a completion popup narrowing its match list). The placed DOM element's size is stored from the last `win_float_pos`, so `grid_resize` must also update that stored `w`/`h` or the old height lingers as a blank band below the real rows.
+
 ## `grid_scroll` has the same contract
 
 `["grid_scroll", grid, top, bot, left, right, rows, cols]` moves a rectangle of cells within the grid. The vacated band is **not** cleared by the event; Neovim sends `grid_line` for the revealed cells afterwards. So the client moves cells and leaves the rest alone. Do not blank the vacated region preemptively.
@@ -39,6 +41,10 @@ Fix: `GridWin.resize` copies the old cells into the new dimensions and only fill
 `GridWin` keeps one reused `<div class="grid-row">` per row plus a `dirtyRows` set. `grid_line` marks its row dirty; `repaint()` re-serializes only those rows. A full rebuild (`fullDirty`) happens on `grid_resize`, `grid_clear`, `default_colors_set` (every cell's colour can change), and the post-focus stale-surface repaint. This matters for a held `j` or `<C-d>`: rebuilding all ~50 rows of a window every frame was the dominant cost.
 
 `grid_scroll` on a full-width region (`left == 0 && right == cols`, the normal case) rotates the row-node array to match the cell shift and re-inserts the nodes in the new order, so scrolled text is never re-serialized; only the vacated band is marked dirty and Neovim's following `grid_line` fills it. A sub-column scroll region cannot move whole nodes, so it falls back to marking the band dirty. The cursor is a separate absolutely-positioned overlay (`#grid-cursor`), so row rebuilds never touch it.
+
+## Frame coalescing
+
+`applyGridBatch` does not paint. It appends the incoming ops to `pendingOps` and schedules one `requestAnimationFrame`; `renderGridOps` then applies the whole accumulated list once per frame. Neovim flushes on its own cadence, which under a held `j`, `:%s`, or a large paste is faster than the display refresh, and each paint carries DOM work plus a forced reflow (the WKWebView compositor quirk). Ops keep their arrival order across the coalesced frames, so a later batch's cursor, colour, or layout op still wins. While the window is hidden `requestAnimationFrame` does not fire and `pendingOps` simply accumulates until it is shown again.
 
 ## Colors: Neovim 0.10+ ships a real default colorscheme
 
@@ -58,7 +64,7 @@ The `win` field in `win_pos`, `win_float_pos`, and `win_viewport` is a msgpack e
 
 - Grid 1 is the outer grid: tabline, window separators, statuslines, and the `~` end of buffer marker for the default grid only. In multigrid mode it does **not** carry window text.
 - Each window has its own grid, created by `grid_resize` and placed by `win_pos` (or `win_float_pos` for floats).
-- The message area is its own grid, positioned by `msg_set_pos`.
+- The message area is its own grid, positioned by `msg_set_pos`. Without `ext_cmdline` the command line is drawn into this same grid. Neovim's compositor special-cases it above every floating window, so the client gives it a very large z-index. Otherwise a completion popup that sits directly over the command line row (blink.cmp, nvim-cmp, the `wildoptions=pum` menu) paints its blank tail over the typed text: `:se ft` shows as `:se`.
 - The `q:` command line window, `:help`, `:terminal`, netrw, and quickfix are all ordinary window grids. This is why `:terminal` renders with no extra work: a terminal buffer's screen is libvterm state that Neovim only ever exposes as grid cells, and the renderer already draws grid cells.
 - A floating window's **border, title, and footer are cells in the float's own grid**, not a separate event. The grid is `width + 2` by `height + 2` when it has a border, and `win_float_pos` positions the outer rectangle. So there is nothing to query from `nvim_win_get_config` and nothing extra to draw: the border glyphs (`╭ ─ ╮ │ ╯ ╰`), the title text, and the footer text arrive as ordinary `grid_line` cells with their own highlight ids. This is a multigrid-only convenience; without `ext_multigrid` the border goes into grid 1.
 

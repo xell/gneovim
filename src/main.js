@@ -418,7 +418,9 @@ function layout() {
     g.el.hidden = false;
     g.el.style.position = "absolute";
     place(g.el, p);
-    if (!p.float) g.el.style.zIndex = 1;
+    // normal split grids sit at the base layer; a grid with an explicit zindex
+    // (the message / cmdline grid) keeps the value place() just set.
+    if (!p.float && p.zindex == null) g.el.style.zIndex = 1;
   }
 }
 
@@ -809,15 +811,42 @@ class Island {
 // ---------------------------------------------------------------------------
 // grid op stream
 // ---------------------------------------------------------------------------
+// Coalesce redraw batches to one paint per animation frame. Neovim can flush
+// faster than the display refreshes (held `j`, `:%s`, a big paste); painting
+// every flush wastes DOM work and a forced reflow each time. Ops keep their
+// arrival order, so a later frame's cursor / colour / layout op still wins.
+let pendingOps = [];
+let rafScheduled = 0;
 function applyGridBatch(ops) {
+  for (let i = 0; i < ops.length; i++) pendingOps.push(ops[i]);
+  if (!rafScheduled) rafScheduled = requestAnimationFrame(flushGridOps);
+}
+function flushGridOps() {
+  rafScheduled = 0;
+  const ops = pendingOps;
+  pendingOps = [];
+  renderGridOps(ops);
+}
+
+function renderGridOps(ops) {
   let dirty = new Set();
   let layoutDirty = false;
   for (const o of ops) {
     switch (o.op) {
-      case "resize":
+      case "resize": {
         gw(o.grid).resize(o.w, o.h);
         dirty.add(o.grid);
+        // A float can shrink or grow via grid_resize alone, with no fresh
+        // win_float_pos. Keep the placed element's size in step or its old
+        // height lingers as a blank band below the real rows.
+        const wp = winPos.get(o.grid);
+        if (wp && (wp.w !== o.w || wp.h !== o.h)) {
+          wp.w = o.w;
+          wp.h = o.h;
+          layoutDirty = true;
+        }
         break;
+      }
       case "clear":
         gw(o.grid).clear();
         dirty.add(o.grid);
@@ -892,7 +921,11 @@ function applyGridBatch(ops) {
           scol: 0,
           w: mg.cols || (grids.get(1) || {}).cols || 200,
           h: mg.rows || 1,
-          zindex: 250, // messages ride above floats
+          // Neovim special-cases the message / cmdline grid above every float;
+          // a big zindex reproduces that. Without it a completion popup that
+          // sits directly over the cmdline row (blink.cmp, nvim-cmp, wild pum)
+          // paints its blank tail over the command line text.
+          zindex: 1_000_000,
         });
         layoutDirty = true;
         break;
@@ -987,18 +1020,27 @@ function repaintNow() {
 // transport
 // ---------------------------------------------------------------------------
 const MIN_PAD_X = 4; // minimum left/right breathing room, px
-// Fit an integer cell grid in the viewport and letterbox it: the sub-cell
+// Fit an integer cell grid in the window and letterbox it: the sub-cell
 // horizontal remainder is split evenly so left and right margins match.
 // originX is the left margin; every grid is placed at scol*cellW + originX.
 function screenMetrics() {
-  const r = viewportEl.getBoundingClientRect();
-  const cols = Math.max(20, Math.floor((r.width - 2 * MIN_PAD_X) / cellW));
-  const rows = Math.max(4, Math.floor(r.height / cellH));
-  const padX = Math.max(MIN_PAD_X, Math.round((r.width - cols * cellW) / 2));
+  const el = document.documentElement;
+  const availW = el.clientWidth;
+  const availH = el.clientHeight;
+  const cols = Math.max(20, Math.floor((availW - 2 * MIN_PAD_X) / cellW));
+  const rows = Math.max(4, Math.floor(availH / cellH));
+  const padX = Math.max(MIN_PAD_X, Math.round((availW - cols * cellW) / 2));
   return { cols, rows, padX };
 }
 function applyScreen(m) {
   originX = m.padX;
+  // Clip the viewport to Neovim's exact screen height. The window is rarely an
+  // integer number of cells tall; without this the sub-cell remainder at the
+  // bottom shows a sliver of whatever grid 3 (messages) last held below the row
+  // Neovim considers off screen (a stale line after dismissing a multi-line
+  // :echo). The leftover strip doubles as a small bottom margin.
+  viewportEl.style.bottom = "auto";
+  viewportEl.style.height = m.rows * cellH + "px";
   layout();
   placeGridCursor();
 }
@@ -1123,7 +1165,9 @@ addEventListener("error", (e) => {
   }
 
   lastSize = { cols: m0.cols, rows: m0.rows };
-  new ResizeObserver(() => pushSize()).observe(viewportEl);
+  // Observe the document element, not #viewport: applyScreen resizes #viewport
+  // itself, which would feed back into the observer.
+  new ResizeObserver(() => pushSize()).observe(document.documentElement);
   setTimeout(
     () =>
       jlog(
