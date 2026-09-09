@@ -207,8 +207,37 @@ struct NvHandler {
 impl Handler for NvHandler {
     type Writer = NWriter;
 
+    async fn handle_request(
+        &self,
+        name: String,
+        _args: Vec<Value>,
+        _nvim: Nvim,
+    ) -> Result<Value, Value> {
+        match name.as_str() {
+            // g:clipboard paste callback: return [lines, regtype]
+            "gnv_clip_get" => {
+                let (lines, regtype) = clip_get();
+                Ok(Value::Array(vec![
+                    Value::Array(lines.into_iter().map(Value::from).collect()),
+                    Value::from(regtype),
+                ]))
+            }
+            _ => Err(Value::from(format!("unknown request: {name}"))),
+        }
+    }
+
     async fn handle_notify(&self, name: String, args: Vec<Value>, _nvim: Nvim) {
         match name.as_str() {
+            // g:clipboard copy callback: [regname, lines, regtype]
+            "gnv_clip_set" => {
+                let lines = args
+                    .get(1)
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let regtype = args.get(2).and_then(Value::as_str).unwrap_or("v");
+                clip_set(&lines, regtype);
+            }
             // [buf, changedtick, firstline, lastline, linedata, more]
             "nvim_buf_lines_event" => {
                 if self.shared.suppress.load(Ordering::SeqCst) > 0 {
@@ -331,6 +360,34 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
+// ---------------------------------------------------------------------------
+// System clipboard, wired to nvim's `+` / `*` registers via a g:clipboard
+// provider (set in connect). Both registers map to the macOS general pasteboard.
+// ---------------------------------------------------------------------------
+
+/// `[lines, regtype]` for a g:clipboard `paste` callback.
+fn clip_get() -> (Vec<String>, &'static str) {
+    let text = arboard::Clipboard::new()
+        .and_then(|mut c| c.get_text())
+        .unwrap_or_default();
+    let regtype = if text.ends_with('\n') { "V" } else { "v" };
+    let body = text.strip_suffix('\n').unwrap_or(&text);
+    (body.split('\n').map(str::to_string).collect(), regtype)
+}
+
+/// Store a g:clipboard `copy` callback's `(lines, regtype)` on the pasteboard.
+fn clip_set(lines: &[Value], regtype: &str) {
+    let mut text = lines
+        .iter()
+        .map(|v| v.as_str().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if regtype.starts_with('V') {
+        text.push('\n');
+    }
+    let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(text));
+}
+
 /// Locate the `nvim` binary. A bundled macOS app launches with a stripped
 /// `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), so `Command::new("nvim")` alone is
 /// not enough.
@@ -438,6 +495,21 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
     // Autocmds in one augroup, targeted at our channel.
     let api = nvim.get_api_info().await.map_err(err)?;
     let chan = api.first().and_then(Value::as_i64).ok_or("no channel id")?;
+
+    // Wire the + and * registers to the macOS pasteboard through this channel
+    // (no reliance on pbcopy/pbpaste, which a bundled app cannot find on PATH).
+    nvim.command(&format!(
+        "let g:clipboard = {{\
+           'name': 'gneovim',\
+           'copy': {{\
+             '+': {{lines, rt -> rpcnotify({chan}, 'gnv_clip_set', '+', lines, rt)}},\
+             '*': {{lines, rt -> rpcnotify({chan}, 'gnv_clip_set', '*', lines, rt)}}}},\
+           'paste': {{\
+             '+': {{-> rpcrequest({chan}, 'gnv_clip_get', '+')}},\
+             '*': {{-> rpcrequest({chan}, 'gnv_clip_get', '*')}}}}}}"
+    ))
+    .await
+    .ok();
     nvim.command("augroup gnv | autocmd! | augroup END")
         .await
         .map_err(err)?;
@@ -475,6 +547,32 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
 impl Bridge {
     pub async fn input(&self, keys: &str) -> Result<(), String> {
         self.nvim.input(keys).await.map(|_| ()).map_err(err)
+    }
+
+    /// Paste `text` at the cursor with `nvim_paste` (handles insert vs normal,
+    /// linewise, and `:set paste`). Used by the Edit menu's Paste / Cmd+V.
+    pub async fn paste(&self, text: &str) -> Result<(), String> {
+        self.nvim
+            .call("nvim_paste", vec![text.into(), true.into(), (-1_i64).into()])
+            .await
+            .map_err(err)?
+            .map_err(|e| format!("{e:?}"))
+            .map(|_| ())
+    }
+
+    /// Edit menu Copy / Cut: yank (or delete) into `+`. In a visual/select mode
+    /// it acts on the selection; in normal mode on the current line.
+    pub async fn clip_yank(&self, cut: bool) -> Result<(), String> {
+        let op = if cut { "d" } else { "y" };
+        let lua = format!(
+            "local m = vim.api.nvim_get_mode().mode\n\
+             if m:match('^[vV\\022sS\\019]') then\n\
+               vim.api.nvim_feedkeys('\"+{op}', 'nx', false)\n\
+             elseif m == 'n' then\n\
+               vim.api.nvim_feedkeys('\"+{op}{op}', 'nx', false)\n\
+             end"
+        );
+        self.nvim.exec_lua(&lua, vec![]).await.map(|_| ()).map_err(err)
     }
 
     /// button: left|right|middle|wheel|move  action: press|release|drag (buttons)

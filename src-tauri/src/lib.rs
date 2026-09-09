@@ -356,6 +356,19 @@ fn js_log(msg: String) {
     log::info!("[webview] {msg}");
 }
 
+#[tauri::command]
+async fn nvim_paste_clip(app: AppHandle, window: tauri::Window) -> Result<(), String> {
+    let text = arboard::Clipboard::new()
+        .and_then(|mut c| c.get_text())
+        .unwrap_or_default();
+    bridge_for(&app, window.label()).await?.paste(&text).await
+}
+
+#[tauri::command]
+async fn nvim_clip_yank(app: AppHandle, window: tauri::Window, cut: bool) -> Result<(), String> {
+    bridge_for(&app, window.label()).await?.clip_yank(cut).await
+}
+
 /// The parsed user config, for the frontend (key handling, fonts, ...).
 #[tauri::command]
 fn gnv_config() -> &'static config::Config {
@@ -394,14 +407,72 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     )?;
     let new_tab = MenuItem::with_id(app, "gnv:new_tab", "New Tab", true, Some("CmdOrCtrl+T"))?;
     let sep = PredefinedMenuItem::separator(app)?;
+
+    // Edit submenu: the predefined Cut/Copy/Paste/Select All target the webview,
+    // which is useless for a grid window. Replace them with items that route to
+    // nvim.
+    let cut = MenuItem::with_id(app, "gnv:cut", "Cut", true, Some("CmdOrCtrl+X"))?;
+    let copy = MenuItem::with_id(app, "gnv:copy", "Copy", true, Some("CmdOrCtrl+C"))?;
+    let paste = MenuItem::with_id(app, "gnv:paste", "Paste", true, Some("CmdOrCtrl+V"))?;
+    let select_all =
+        MenuItem::with_id(app, "gnv:select_all", "Select All", true, Some("CmdOrCtrl+A"))?;
+
     for kind in menu.items()? {
-        if let Some(sub) = kind.as_submenu() {
-            if sub.text().is_ok_and(|t| t == "File") {
+        let Some(sub) = kind.as_submenu() else { continue };
+        match sub.text().as_deref() {
+            Ok("File") => {
                 sub.insert_items(&[&new_window, &new_tab, &sep], 0)?;
             }
+            Ok("Edit") => {
+                for it in sub.items()? {
+                    sub.remove(&it)?;
+                }
+                sub.append_items(&[
+                    &PredefinedMenuItem::undo(app, None)?,
+                    &PredefinedMenuItem::redo(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &cut,
+                    &copy,
+                    &paste,
+                    &PredefinedMenuItem::separator(app)?,
+                    &select_all,
+                ])?;
+            }
+            _ => {}
         }
     }
     Ok(menu)
+}
+
+/// Run `f` against the focused (or last-focused) window's bridge, off the menu
+/// event thread.
+fn focused_bridge<F, Fut>(app: &AppHandle, f: F)
+where
+    F: FnOnce(Bridge) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), String>> + Send,
+{
+    let app = app.clone();
+    async_runtime::spawn(async move {
+        let label = app
+            .state::<AppState>()
+            .last_focused
+            .lock()
+            .unwrap()
+            .clone()
+            .or_else(|| {
+                app.webview_windows()
+                    .into_values()
+                    .find(|w| w.is_focused().unwrap_or(false))
+                    .map(|w| w.label().to_string())
+            });
+        if let Some(label) = label {
+            if let Ok(b) = bridge_for(&app, &label).await {
+                if let Err(e) = f(b).await {
+                    log::warn!("menu action for {label}: {e}");
+                }
+            }
+        }
+    });
 }
 
 async fn open_paths(app: AppHandle, paths: Vec<String>) {
@@ -438,6 +509,8 @@ pub fn run() {
             js_log,
             gnv_config,
             nvim_winfts,
+            nvim_paste_clip,
+            nvim_clip_yank,
             new_window,
             new_tab
         ])
@@ -448,6 +521,17 @@ pub fn run() {
             }
             "gnv:new_tab" => {
                 spawn_window(app, true);
+            }
+            "gnv:copy" => focused_bridge(app, |b| async move { b.clip_yank(false).await }),
+            "gnv:cut" => focused_bridge(app, |b| async move { b.clip_yank(true).await }),
+            "gnv:paste" => focused_bridge(app, |b| async move {
+                let t = arboard::Clipboard::new()
+                    .and_then(|mut c| c.get_text())
+                    .unwrap_or_default();
+                b.paste(&t).await
+            }),
+            "gnv:select_all" => {
+                focused_bridge(app, |b| async move { b.input("\x1bggVG").await })
             }
             _ => {}
         })
