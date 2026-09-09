@@ -86,6 +86,8 @@ pub enum BridgeEvent {
     /// A GUI option changed (`guifont`, `linespace`, ...). No `ext_` event
     /// carries these; polled via an `OptionSet` autocmd.
     GuiOpt { name: String, value: String },
+    /// nvim's stdio closed (it exited or the connection dropped).
+    Gone(String),
 }
 
 #[derive(Deserialize)]
@@ -183,6 +185,7 @@ fn grid_op(ev: &str, a: &[Value]) -> Option<Json> {
             "enabled": a.first().and_then(Value::as_bool),
             "modes": a.get(1).and_then(Value::as_array)
                 .map(|m| m.iter().map(attr_map).collect::<Vec<_>>()).unwrap_or_default()}),
+        "set_title" => json!({"op":"title","title":a.first().and_then(Value::as_str)}),
         "flush" => json!({"op":"flush"}),
         _ => return None,
     })
@@ -487,9 +490,22 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
         shared: shared.clone(),
     };
 
-    let (nvim, _io, child) = create::new_child_cmd(&mut cmd, handler)
+    let (nvim, io, child) = create::new_child_cmd(&mut cmd, handler)
         .await
         .map_err(|e| format!("spawn nvim ({bin}): {e}"))?;
+
+    // The io loop future resolves when nvim's stdio closes, i.e. nvim exited.
+    {
+        let tx = shared.tx.clone();
+        tokio::spawn(async move {
+            let reason = match io.await {
+                Ok(Ok(())) => "Neovim exited".to_string(),
+                Ok(Err(e)) => format!("Neovim connection lost: {e}"),
+                Err(e) => format!("Neovim io task failed: {e}"),
+            };
+            let _ = tx.send(BridgeEvent::Gone(reason));
+        });
+    }
 
     // filetype detection on, and a light background for the prose surface. No
     // scene is staged here: the renderer draws whatever windows and buffers the

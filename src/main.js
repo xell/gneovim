@@ -12,7 +12,8 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 // this webview's window label; event names are per-window (gnv://<label>/<kind>)
 // because emit_to() broadcasts to every webview in this app.
-const winLabel = getCurrentWebviewWindow().label;
+const currentWin = getCurrentWebviewWindow();
+const winLabel = currentWin.label;
 const ev = (kind) => `gnv://${winLabel}/${kind}`;
 
 const viewportEl = document.getElementById("viewport");
@@ -441,7 +442,13 @@ function updateImeFocus() {
   }
   if (document.activeElement !== imeEl) imeEl.focus({ preventScroll: true });
 }
-addEventListener("focus", updateImeFocus); // regain focus after cmd-tab
+addEventListener("focus", () => {
+  updateImeFocus(); // regain focus after cmd-tab
+  invoke("nvim_input", { keys: "<FocusGained>" }).catch(() => {});
+});
+addEventListener("blur", () => {
+  invoke("nvim_input", { keys: "<FocusLost>" }).catch(() => {});
+});
 let blinkTimer = 0;
 function stopBlink() {
   clearTimeout(blinkTimer);
@@ -874,6 +881,9 @@ function applyGridBatch(ops) {
         cursorStyleEnabled = !!o.enabled;
         modeInfo = o.modes || [];
         break;
+      case "title":
+        currentWin.setTitle(o.title || "gneovim").catch(() => {});
+        break;
       case "flush":
         break;
     }
@@ -897,6 +907,16 @@ function forceRepaint(el) {
   el.style.display = "none";
   void el.offsetHeight; // reflow
   el.style.display = prev;
+}
+
+// nvim's process exited / the pipe dropped: freeze with a message.
+function showGone(reason) {
+  jlog("nvim gone: " + reason);
+  if (document.getElementById("gone")) return;
+  const el = document.createElement("div");
+  el.id = "gone";
+  el.textContent = `${reason || "Neovim exited"} — close this window.`;
+  document.body.append(el);
 }
 
 // On WindowEvent::Focused, Rust emits gnv://<label>/focus; rebuild every grid as
@@ -928,12 +948,16 @@ function applyScreen(m) {
   placeGridCursor();
 }
 let lastSize = { cols: 0, rows: 0 };
+let resizeTimer = 0;
 function pushSize() {
-  const m = screenMetrics();
-  applyScreen(m);
-  if (m.cols === lastSize.cols && m.rows === lastSize.rows) return;
-  lastSize = { cols: m.cols, rows: m.rows };
-  invoke("nvim_resize", { cols: m.cols, rows: m.rows }).catch(() => {});
+  applyScreen(screenMetrics()); // margins follow the frame immediately
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    const m = screenMetrics();
+    if (m.cols === lastSize.cols && m.rows === lastSize.rows) return;
+    lastSize = { cols: m.cols, rows: m.rows };
+    invoke("nvim_resize", { cols: m.cols, rows: m.rows }).catch(() => {});
+  }, 40); // coalesce a live drag into one nvim resize per frame-ish
 }
 
 // surface any uncaught error as visible text (webview has no visible console)
@@ -997,6 +1021,7 @@ addEventListener("error", (e) => {
     listen(ev("cmdline_hide"), () => {}),
     listen(ev("focus"), () => repaintNow()),
     listen(ev("guiopt"), (e) => applyGuiOpt(e.payload.name, e.payload.value)),
+    listen(ev("gone"), (e) => showGone(e.payload)),
   ]);
 
   jlog(`listeners ready; cellW=${cellW.toFixed(2)} cellH=${cellH.toFixed(2)}`);

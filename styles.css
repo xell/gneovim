@@ -26,6 +26,20 @@ body {
   overflow: hidden;
 }
 
+#gone {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  text-align: center;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.6 ui-monospace, Menlo, monospace;
+}
+
 /* monospace grid windows (non-markdown, verbatim Neovim).
    --cell-w / --cell-h are set by measureCell() in main.js and are the single
    source of truth: each DOM row is exactly one cell tall so it lines up with

@@ -220,6 +220,14 @@ fn spawn_bridge(app: AppHandle, label: String) {
                     ),
                     BridgeEvent::GuiOpt { name, value } => emit_app
                         .emit(&ev("guiopt"), serde_json::json!({"name":name,"value":value})),
+                    BridgeEvent::Gone(reason) => {
+                        log::info!("{emit_label}: {reason}");
+                        // :q / :qa is the common case; close the gui-window too.
+                        if let Some(w) = emit_app.get_webview_window(&emit_label) {
+                            let _ = w.close();
+                        }
+                        emit_app.emit(&ev("gone"), reason)
+                    }
                 };
                 if let Err(e) = r {
                     log::warn!("emit for {emit_label}: {e}");
