@@ -148,9 +148,15 @@ function hlCss(id) {
     fg = bg ?? defColors.bg;
     bg = t;
   }
+  // Neovim's default DiagnosticUnderline* groups (and themes copying them) set
+  // fg == bg on purpose: the glyph is meant to be invisible so only the
+  // undercurl / underline in `sp` shows. Rendered literally that is a solid
+  // block of unreadable text. Drop both colours so the run inherits Normal
+  // fg/bg; the text-decoration below still draws the squiggle.
+  const camouflage = bg && fg.toLowerCase() === bg.toLowerCase();
   const blend = a.blend | 0;
-  let s = `color:${withAlpha(fg, blend)};`;
-  if (bg) s += `background:${withAlpha(bg, blend)};`;
+  let s = camouflage ? "" : `color:${withAlpha(fg, blend)};`;
+  if (bg && !camouflage) s += `background:${withAlpha(bg, blend)};`;
   if (a.bold) s += "font-weight:700;";
   if (a.italic) s += "font-style:italic;";
 

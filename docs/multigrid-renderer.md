@@ -54,6 +54,8 @@ The client honors `default_colors_set` verbatim and publishes it as `--fg` / `--
 
 Grid cells with the default highlight (`hl_id` 0) have no background of their own, so they show whatever is behind them. Give the grid window elements an opaque background, do not rely on the body showing through.
 
+`fg == bg` is a deliberate camouflage convention, not a mistake. Neovim's default `DiagnosticUnderlineError` / `Warn` / `Info` / `Hint` groups (and themes that copy them) set `foreground` and `background` to the same value with `nocombine` and an undercurl/underline in `special`: the glyph is meant to be invisible so only the squiggle shows. Rendered verbatim (`color:X;background:X`) that is a solid block of unreadable text, and with a saturated theme colour it looks like a coloured rectangle over a diagnostic float or virtual-line region. `hlCss` detects `fg == bg` and drops both, so the run inherits Normal fg/bg and stays readable while the `text-decoration` still draws the squiggle in `sp`.
+
 `blend` (0 to 100) on an attribute is the cell's transparency, driven by `winblend` and `pumblend`. `hlCss` appends an alpha byte to the cell's fg and bg colours so the cell composites over the grid element's background. The grid and float elements keep an opaque `--bg`, so a blended cell blends toward the default background rather than showing the buffer literally underneath the float. That is the common terminal-GUI behaviour and is enough unless someone explicitly sets `winblend`; true see-through would need the float element itself to be transparent, which risks hairline gaps between cell spans.
 
 ## Ext handles
