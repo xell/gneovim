@@ -1,7 +1,7 @@
 {
   "fill" : {
     "linear-gradient" : [
-      "display-p3:0.65588,0.76402,0.85882,1.00000",
+      "display-p3:0.83626,0.92351,1.00000,1.00000",
       "display-p3:1.00000,0.97686,0.98146,1.00000"
     ],
     "orientation" : {
@@ -19,8 +19,15 @@
     {
       "layers" : [
         {
-          "image-name" : "Image 7.png",
-          "name" : "Image 7"
+          "image-name" : "neovim-mark@2x.svg",
+          "name" : "neovim-mark@2x",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -1,
+              0.5
+            ]
+          }
         }
       ],
       "shadow" : {
