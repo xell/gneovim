@@ -36,7 +36,14 @@ The webview is never nvim's parent in any wrapper, so a webview reload or crash 
 
 ### Unsaved-changes guard
 
-Because `nvim` is `kill_on_drop`, a bare Cmd+W / Cmd+Q would SIGKILL it and leave swap files behind. So `WindowEvent::CloseRequested` (Cmd+W) and `RunEvent::ExitRequested` (Cmd+Q) are intercepted: the guard asks each window's nvim `unsaved_blockers()` (a Lua scan for modified file buffers, `E37`, and `:terminal` buffers with a live job, `E947`). If a window is clean it is quit with `:qall` so shada and `VimLeave` run, then destroyed. If anything blocks, a native `NSAlert` (`lib.rs::warn_unsaved`) offers Cancel / (for Cmd+Q) Review, which focuses the first offending window / Discard, which runs `:qall!`. The `QUITTING` flag lets the guard's own `app.exit(0)` through without re-entering.
+Because `nvim` is `kill_on_drop`, a bare Cmd+W / Cmd+Q would SIGKILL it and leave swap files behind. So the close paths are intercepted and the guard asks each window's nvim `unsaved_blockers()` (a Lua scan for modified file buffers, `E37`, and `:terminal` buffers with a live job, `E947`). If a window is clean it is quit with `:qall` so shada and `VimLeave` run, then destroyed. If anything blocks, a native `NSAlert` (`lib.rs::warn_unsaved`) offers Cancel / (for Cmd+Q) Review, which focuses the first offending window / Discard, which runs `:qall!`. The `QUITTING` flag lets the guard's own `app.exit(0)` through without re-entering.
+
+The wiring:
+
+- Cmd+W is the predefined "Close Window" item -> `performClose:` -> `WindowEvent::CloseRequested`, which we `prevent_close()` then hand to `guard_close`.
+- Cmd+Q is the tricky one. The predefined "Quit" item is `sel!(terminate:)`, and tao 0.35 has no `applicationShouldTerminate:`, so `RunEvent::ExitRequested` never fires for it and the guard was bypassed. `build_menu` therefore replaces the predefined Quit with a custom `gnv:quit` item (still `Cmd+Q`) whose `on_menu_event` calls `guard_exit`.
+- `RunEvent::ExitRequested` is still handled: it fires when the last window is destroyed, and for `AppHandle::exit()`. It `prevent_exit()`s and runs `guard_exit` unless `QUITTING` is already set.
+- Not covered: the Dock right-click "Quit", and logout / restart / shutdown, which go straight through `terminate:` / the system `applicationShouldTerminate:`. Catching those needs our own `applicationShouldTerminate:` on the app delegate.
 
 ### Dev only: crash recovery
 

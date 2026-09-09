@@ -259,10 +259,12 @@ fn guard_exit(app: &AppHandle) {
             }
         }
         if offenders.is_empty() {
+            // Set before the quit loop: it destroys windows, and the last one
+            // re-fires ExitRequested, which must not re-enter this guard.
+            QUITTING.store(true, Ordering::Relaxed);
             for (_, b) in &entries {
                 let _ = tokio::time::timeout(Duration::from_secs(3), b.quit_all(false)).await;
             }
-            QUITTING.store(true, Ordering::Relaxed);
             app.exit(0);
             return;
         }
@@ -295,10 +297,10 @@ fn guard_exit(app: &AppHandle) {
                 }
             }
             UnsavedChoice::Discard => {
+                QUITTING.store(true, Ordering::Relaxed);
                 for (_, b) in &entries {
                     let _ = b.quit_all(true).await;
                 }
-                QUITTING.store(true, Ordering::Relaxed);
                 app.exit(0);
             }
             UnsavedChoice::Cancel => {}
@@ -612,8 +614,30 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let select_all =
         MenuItem::with_id(app, "gnv:select_all", "Select All", true, Some("CmdOrCtrl+A"))?;
 
+    // The predefined Quit is `sel!(terminate:)`, which tao does not intercept
+    // (no applicationShouldTerminate:), so RunEvent::ExitRequested never fires
+    // and the unsaved-changes guard is bypassed. Swap in our own item.
+    let quit = MenuItem::with_id(
+        app,
+        "gnv:quit",
+        format!("Quit {}", app.package_info().name),
+        true,
+        Some("CmdOrCtrl+Q"),
+    )?;
+
     for kind in menu.items()? {
         let Some(sub) = kind.as_submenu() else { continue };
+        for it in sub.items()? {
+            if it
+                .as_predefined_menuitem()
+                .and_then(|p| p.text().ok())
+                .map(|t| t.starts_with("Quit"))
+                .unwrap_or(false)
+            {
+                sub.remove(&it)?;
+                sub.append_items(&[&quit])?;
+            }
+        }
         match sub.text().as_deref() {
             Ok("File") => {
                 sub.insert_items(&[&new_window, &new_tab, &sep], 0)?;
@@ -728,6 +752,12 @@ pub fn run() {
             }),
             "gnv:select_all" => {
                 focused_bridge(app, |b| async move { b.input("\x1bggVG").await })
+            }
+            "gnv:quit" => {
+                #[cfg(target_os = "macos")]
+                guard_exit(app);
+                #[cfg(not(target_os = "macos"))]
+                app.exit(0);
             }
             _ => {}
         })
