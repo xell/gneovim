@@ -5,7 +5,11 @@
 # Icon Composer document (src-tauri/icons/gneovim.icon) that has to be compiled
 # with actool into an Assets.car and referenced from Info.plist via
 # CFBundleIconName. This script does that to an already-bundled .app, then
-# re-signs it ad-hoc (editing Resources/ and Info.plist breaks the seal).
+# re-signs it: editing Resources/ and Info.plist breaks the seal Tauri applied.
+# The re-sign reuses $APPLE_SIGNING_IDENTITY (the same identity `tauri build`
+# used) so the designated requirement stays stable and macOS TCC / Gatekeeper
+# keep trusting the app across rebuilds. Unset -> ad-hoc, and macOS will
+# re-prompt for permissions after every build.
 #
 # Usage: scripts/mac-glass-icon.sh path/to/gneovim.app
 # No-ops with a warning if actool is unavailable, so plain builds still work.
@@ -53,10 +57,24 @@ cp "$WORK/$ICON_NAME.icns" "$RES/$ICON_NAME.icns"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile $ICON_NAME" "$PLIST" 2>/dev/null \
   || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string $ICON_NAME" "$PLIST"
 
-# Re-seal: we just rewrote Resources/ and Info.plist.
-codesign --force --sign - --timestamp=none "$APP"
+# Re-seal: we just rewrote Resources/ and Info.plist. Same identity as
+# `tauri build` (it reads APPLE_SIGNING_IDENTITY too); unset -> ad-hoc.
+IDENTITY="${APPLE_SIGNING_IDENTITY:--}"
+
+SIGN=(--force --sign "$IDENTITY" --timestamp=none)
+# Preserve the entitlements and hardened-runtime flag Tauri applied (still
+# readable from the Mach-O even though the CodeResources seal is now stale).
+ENT="$WORK/entitlements.plist"
+if codesign -d --entitlements - --xml "$APP" 2>/dev/null >"$ENT" && [[ -s "$ENT" ]]; then
+  SIGN+=(--entitlements "$ENT")
+fi
+if codesign -dvv "$APP" 2>&1 | grep -q "flags=.*runtime"; then
+  SIGN+=(--options runtime)
+fi
+codesign "${SIGN[@]}" "$APP"
+codesign --verify --strict "$APP"
 
 # Nudge Finder/Dock icon caches.
 touch "$APP"
 
-echo "mac-glass-icon: injected $ICON_NAME.icon into $(basename "$APP")"
+echo "mac-glass-icon: injected $ICON_NAME.icon into $(basename "$APP"), re-signed with ${IDENTITY}"
