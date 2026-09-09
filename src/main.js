@@ -2,8 +2,7 @@
 // a CodeMirror island for each markdown window, one nvim driving both.
 
 import "../styles.css";
-import { EditorView, basicSetup } from "codemirror";
-import { Decoration, WidgetType } from "@codemirror/view";
+import { EditorView, Decoration, WidgetType } from "@codemirror/view";
 import { Annotation, StateEffect, StateField, Compartment } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { invoke } from "@tauri-apps/api/core";
@@ -593,11 +592,25 @@ class BlockCursor extends WidgetType {
     return s;
   }
 }
+// The insert-mode caret. Its own widget, not CodeMirror's, so the buffer echo
+// (a whole-line replace on every keystroke) can never map it to the line start.
+class BarCursor extends WidgetType {
+  toDOM() {
+    const s = document.createElement("span");
+    s.className = "nvim-cursor nvim-cursor-bar";
+    return s;
+  }
+}
 function cursorDeco(state, pos) {
-  if (!pos || pos.mode[0] === "i") return Decoration.none;
+  if (!pos) return Decoration.none;
   const doc = state.doc;
   const line = doc.line(Math.min(pos.row + 1, doc.lines));
   const from = Math.min(line.from + pos.col, line.to);
+  if (pos.mode[0] === "i") {
+    return Decoration.set([
+      Decoration.widget({ widget: new BarCursor(), side: 1 }).range(from),
+    ]);
+  }
   const to = Math.min(from + 1, line.to);
   return from === to
     ? Decoration.set([
@@ -654,8 +667,18 @@ class Island {
     this.compose = null; // { text, sel } snapshot while an IME composition runs
     this.view = new EditorView({
       doc: "",
+      // No basicSetup. Neovim is the sole editor for a focused island, so CM
+      // carries no keymap and no self-editing extensions (defaultKeymap /
+      // historyKeymap / history / closeBrackets / autocompletion /
+      // indentOnInput). Every key routes through the global keydown handler to
+      // nvim_input; CM only renders the buffer and reconciles the out-of-band
+      // DOM mutations (Grammarly, autocorrect, IME commit) back via onUpdate.
+      // Markdown styling is deliberately absent until the display bridge
+      // mirrors Neovim's own highlights. The caret in every mode is our
+      // nvimCursorField decoration (bar, block, or EOL block); CM's native
+      // caret is hidden and drawSelection is unused, so no CM-derived caret
+      // can lag a keystroke behind the buffer echo.
       extensions: [
-        basicSetup,
         markdown(),
         EditorView.lineWrapping,
         nvimCursorField,

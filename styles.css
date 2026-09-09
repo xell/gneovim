@@ -75,7 +75,6 @@ body {
   position: absolute;
   overflow: hidden;
   background: var(--bg);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 18%, transparent);
 }
 .island .cm-editor {
   height: 100%;
@@ -93,7 +92,8 @@ body {
   overflow: auto;
 }
 .island .cm-content {
-  caret-color: var(--fg);
+  /* the caret is our own nvim-cursor decoration; suppress the native one */
+  caret-color: transparent;
   font-family: inherit;
   /* explicit so island text never depends on inherited body color */
   color: var(--fg);
@@ -147,6 +147,13 @@ body {
   display: inline-block;
   width: 0.5ch;
 }
-.island:not([data-mode^="i"]) .cm-cursor.cm-cursor-primary {
-  display: none;
+/* insert-mode bar caret inside the island */
+.nvim-cursor-bar {
+  display: inline-block;
+  width: 0;
+  height: 1.2em;
+  border-left: 2px solid var(--fg);
+  vertical-align: middle;
+  margin: 0 -1px;
+  pointer-events: none;
 }
