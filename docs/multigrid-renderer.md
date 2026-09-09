@@ -60,6 +60,7 @@ The `win` field in `win_pos`, `win_float_pos`, and `win_viewport` is a msgpack e
 - Each window has its own grid, created by `grid_resize` and placed by `win_pos` (or `win_float_pos` for floats).
 - The message area is its own grid, positioned by `msg_set_pos`.
 - The `q:` command line window, `:help`, `:terminal`, netrw, and quickfix are all ordinary window grids. This is why `:terminal` renders with no extra work: a terminal buffer's screen is libvterm state that Neovim only ever exposes as grid cells, and the renderer already draws grid cells.
+- A floating window's **border, title, and footer are cells in the float's own grid**, not a separate event. The grid is `width + 2` by `height + 2` when it has a border, and `win_float_pos` positions the outer rectangle. So there is nothing to query from `nvim_win_get_config` and nothing extra to draw: the border glyphs (`╭ ─ ╮ │ ╯ ╰`), the title text, and the footer text arrive as ordinary `grid_line` cells with their own highlight ids. This is a multigrid-only convenience; without `ext_multigrid` the border goes into grid 1.
 
 ## Cursor, with a CodeMirror island in the mix
 
