@@ -111,6 +111,10 @@ body {
   min-width: calc(var(--gutter-numw, 4) * 1ch);
   padding: 0 0.6ch 0 0.7ch;
 }
+/* conceallevel 1 cchar mirrored from an extmark conceal (display bridge) */
+.island .cm-concealed {
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
+}
 
 /* hidden IME/keyboard sink for grid windows: a real <textarea> at the cursor so
    the OS IME candidate window anchors correctly. Text is transparent; the IME

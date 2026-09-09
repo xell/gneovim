@@ -100,6 +100,10 @@ pub enum BridgeEvent {
         signcolumn: String,
         foldcolumn: String,
     },
+    /// Per-window display state for a markdown island (inline conceal now;
+    /// highlights, folds, visual range later), as a JSON string.
+    /// From `runtime/md_decor.lua`.
+    MdDecor { win: i64, json: String },
     /// nvim's stdio closed (it exited or the connection dropped).
     Gone(String),
 }
@@ -356,6 +360,15 @@ impl Handler for NvHandler {
                     signcolumn,
                     foldcolumn,
                 });
+            }
+            "gnv_md_decor" => {
+                let win = args.first().and_then(Value::as_i64).unwrap_or(0);
+                let json = args
+                    .get(1)
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}")
+                    .to_string();
+                let _ = self.shared.tx.send(BridgeEvent::MdDecor { win, json });
             }
             "redraw" => {
                 let mut batch = self.shared.grid_batch.lock().unwrap();
@@ -721,6 +734,16 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
         log::warn!("md_preview.lua injection failed: {e}");
     }
 
+    // The markdown-island display bridge (conceal now; highlights, folds and
+    // the visual range later). Its `gnv_md_decor` augroup is inert for grid
+    // windows: it reads `w:gnv_md_preview` (from md_preview.lua) per event.
+    if let Err(e) = nvim
+        .exec_lua(include_str!("runtime/md_decor.lua"), vec![chan.into()])
+        .await
+    {
+        log::warn!("md_decor.lua injection failed: {e}");
+    }
+
     // No buffer is attached here. Islands attach their window's buffer on
     // demand via `island_attach`; a session with no markdown window never
     // attaches anything.
@@ -1013,6 +1036,21 @@ impl Bridge {
                 ))
             })
             .collect())
+    }
+
+    /// Nudge `md_decor.lua` to re-push every markdown island's decorations.
+    /// Called on island mount and first attach, where no trigger event has
+    /// fired since the client started listening.
+    pub async fn md_decor_refresh(&self) -> Result<(), String> {
+        self.nvim
+            .exec_lua(
+                "pcall(vim.api.nvim_exec_autocmds, 'CursorMoved', \
+                 { group = 'gnv_md_decor', modeline = false })",
+                vec![],
+            )
+            .await
+            .map(|_| ())
+            .map_err(err)
     }
 
     /// `:edit` a file path, splitting nothing on spaces.

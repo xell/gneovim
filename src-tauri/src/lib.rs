@@ -478,6 +478,10 @@ fn spawn_bridge(app: AppHandle, label: String) {
                             "foldcolumn": foldcolumn,
                         }),
                     ),
+                    BridgeEvent::MdDecor { win, json } => emit_app.emit(
+                        &ev("md_decor"),
+                        serde_json::json!({ "win": win, "json": json }),
+                    ),
                     BridgeEvent::Gone(reason) => {
                         log::info!("{emit_label}: {reason}");
                         // :q / :qa is the common case; drop the gui-window too.
@@ -670,6 +674,14 @@ async fn nvim_wingutters(
 }
 
 #[tauri::command]
+async fn nvim_md_decor(app: AppHandle, window: tauri::Window) -> Result<(), String> {
+    bridge_for(&app, window.label())
+        .await?
+        .md_decor_refresh()
+        .await
+}
+
+#[tauri::command]
 async fn new_window(app: AppHandle) -> Result<(), String> {
     spawn_window(&app, false);
     Ok(())
@@ -819,6 +831,7 @@ pub fn run() {
             nvim_winfts,
             nvim_guiopts,
             nvim_wingutters,
+            nvim_md_decor,
             nvim_paste_clip,
             nvim_clip_yank,
             new_window,

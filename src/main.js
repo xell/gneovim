@@ -18,6 +18,18 @@ const ev = (kind) => `gnv://${winLabel}/${kind}`;
 const viewportEl = document.getElementById("viewport");
 const te = new TextEncoder();
 const byteLen = (s) => te.encode(s).length;
+// Inverse of byteLen: the UTF-16 offset into `s` at byte column `byte`. Neovim
+// extmark / cursor columns are byte offsets; CodeMirror positions are UTF-16.
+function byteToCol(s, byte) {
+  let b = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (b >= byte) return i;
+    const c = s.codePointAt(i);
+    b += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+    if (c >= 0x10000) i++; // surrogate pair: skip the low surrogate
+  }
+  return s.length;
+}
 
 // mirror the webview console into the app log (the webview has no visible one)
 const jlog = (m) => invoke("js_log", { msg: String(m) }).catch(() => {});
@@ -394,6 +406,8 @@ function attachIsland(isl) {
       isl.bufnr = snap.buf;
       isl.applyReset(snap);
       layout();
+      // no md_decor trigger event has fired for this window yet; pull once.
+      invoke("nvim_md_decor").catch(() => {});
     })
     .catch((e) => jlog("island_attach failed: " + e));
 }
@@ -606,6 +620,23 @@ class BarCursor extends WidgetType {
     return s;
   }
 }
+// Replacement glyph for an extmark conceal at conceallevel 1 (the `cchar`).
+// conceallevel >= 2 sends an empty string and gets a plain Decoration.replace.
+class ConcealWidget extends WidgetType {
+  constructor(text) {
+    super();
+    this.text = text;
+  }
+  eq(o) {
+    return o.text === this.text;
+  }
+  toDOM() {
+    const s = document.createElement("span");
+    s.className = "cm-concealed";
+    s.textContent = this.text;
+    return s;
+  }
+}
 function cursorDeco(state, pos) {
   if (!pos) return Decoration.none;
   const doc = state.doc;
@@ -633,6 +664,21 @@ const nvimCursorField = StateField.define({
     return { deco: cursorDeco(tr.state, pos), pos };
   },
   provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
+});
+
+// Display-bridge decorations (conceal now; highlight / fold / visual later).
+// A field, not a compartment: replace decorations affect layout and want the
+// StateField.provide path, and mapping through edits keeps them roughly right
+// between the ~20ms debounced payloads.
+const setIslandDecor = StateEffect.define();
+const islandDecorField = StateField.define({
+  create: () => Decoration.none,
+  update(v, tr) {
+    v = v.map(tr.changes);
+    for (const e of tr.effects) if (e.is(setIslandDecor)) v = e.value;
+    return v;
+  },
+  provide: (f) => EditorView.decorations.from(f),
 });
 
 // The run of text present in `b` but not `a` (common prefix + suffix removed).
@@ -668,6 +714,7 @@ class Island {
     this.gutterComp = new Compartment(); // number column, mirrored from Neovim
     this.gutter = null; // last { number, relativenumber, numberwidth, ... }
     this._gutterRaf = 0;
+    this.decor = null; // last md_decor payload (parsed)
     this.el = document.createElement("div");
     this.el.className = "island";
     this.el.hidden = true;
@@ -690,6 +737,7 @@ class Island {
         markdown(),
         EditorView.lineWrapping,
         nvimCursorField,
+        islandDecorField,
         this.gutterComp.of([]),
         this.editableComp.of(EDITABLE_ON),
         EditorView.updateListener.of((u) => this.onUpdate(u)),
@@ -775,6 +823,45 @@ class Island {
       this._gutterRaf = 0;
       this.applyGutter();
     });
+  }
+  // Display bridge (runtime/md_decor.lua). `d` is the parsed payload:
+  // { first, last, conceal: [ [row, startByte, endByte, text], ... ] } in
+  // absolute buffer coordinates. Later slices add highlight / fold / visual
+  // keys. Decorations are view-only, so nothing here reaches nvim_edit.
+  setDecor(d) {
+    this.decor = d;
+    this.applyDecor();
+  }
+  applyDecor() {
+    const d = this.decor;
+    const doc = this.view.state.doc;
+    const spans = [];
+    for (const [row, sc, ec, text] of d?.conceal ?? []) {
+      if (row < 0 || row >= doc.lines) continue;
+      const line = doc.line(row + 1);
+      const from = line.from + byteToCol(line.text, sc);
+      const to = Math.min(line.from + byteToCol(line.text, ec), line.to);
+      if (to <= from) continue;
+      spans.push({ from, to, text });
+    }
+    // replace decorations may not overlap; sort and drop any that do (rare, two
+    // plugins concealing the same run). The payload is small.
+    spans.sort((a, b) => a.from - b.from || a.to - b.to);
+    const ranges = [];
+    let end = -1;
+    for (const s of spans) {
+      if (s.from < end) continue;
+      end = s.to;
+      ranges.push(
+        (s.text
+          ? Decoration.replace({ widget: new ConcealWidget(s.text) })
+          : Decoration.replace({})
+        ).range(s.from, s.to),
+      );
+    }
+    // most debounced payloads on a plain buffer carry nothing; skip the no-op
+    if (!ranges.length && !this.view.state.field(islandDecorField).size) return;
+    this.view.dispatch({ effects: setIslandDecor.of(Decoration.set(ranges)) });
   }
   destroy() {
     if (this._gutterRaf) cancelAnimationFrame(this._gutterRaf);
@@ -1243,6 +1330,10 @@ addEventListener("error", (e) => {
       winGutter.set(e.payload.win, e.payload);
       islands.get(e.payload.win)?.setGutter(e.payload);
     }),
+    listen(ev("md_decor"), (e) => {
+      const isl = islands.get(e.payload.win);
+      if (isl) isl.setDecor(JSON.parse(e.payload.json));
+    }),
     listen(ev("gone"), (e) => showGone(e.payload)),
   ]);
 
@@ -1296,6 +1387,9 @@ addEventListener("error", (e) => {
   } catch (e) {
     jlog("wingutters failed: " + e);
   }
+
+  // display-bridge payloads also fire before we listen; nudge a re-push.
+  invoke("nvim_md_decor").catch((e) => jlog("md_decor failed: " + e));
 
   // GUI options (guifont / linespace) set before we were listening
   try {
