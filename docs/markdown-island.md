@@ -60,12 +60,14 @@ Mirrors Neovim's already computed per window display state for a previewed markd
 `md_decor.lua` never runs its own `foldexpr`, its own conceal evaluation, treesitter, a syntax file, or `render-markdown.nvim`.
 It reads the results those produce with built-in calls and forwards them:
 
-- conceal and highlights: `nvim_buf_get_extmarks(buf, -1, a, b, { details = true })`, plus `nvim_get_hl` to resolve a group name to colours (highlights land in a later slice)
+- conceal: `synconcealed(lnum, col)`, walked over the viewport inside `nvim_win_call`. This is the effective per cell conceal Neovim would draw, so it already folds in `:syntax` conceal, treesitter conceal and extmark conceal, and already honours `conceallevel` and `concealcursor`. No source is special cased and there is no cursor line rule to re-encode.
+- highlights: `nvim_buf_get_extmarks(buf, -1, a, b, { details = true })` plus `nvim_get_hl` (later slice)
 - folds: `foldclosed` / `foldclosedend` / `foldtextresult` (later slice)
 - visual range: `mode()`, `getpos("v")`, `getpos(".")` (later slice)
 
-The only Neovim rule it re-encodes is the one liner "suppress conceal on the window's own cursor line unless `concealcursor` names the current mode".
 Change `foldexpr` or swap the markdown plugin and the island follows with no code change, because it only reads live state.
+
+Why not `nvim_buf_get_extmarks` for conceal: it returns only extmarks a plugin explicitly set. Treesitter conceal is applied as ephemeral extmarks during redraw and is never returned; `:syntax` conceal is not an extmark at all. The first cut used that API and saw nothing on a normal setup.
 
 ### Lifecycle: always on, guarded per window
 
@@ -90,24 +92,22 @@ This one path covers both mount and live toggle on.
 ### Payload and coordinates
 
 `gnv_md_decor` carries `(win, json)` where `json` is `vim.json.encode` of `{ first, last, conceal: [ [row, startByte, endByte, text], ... ] }` in absolute buffer coordinates.
-Columns are byte offsets (extmark convention); the client converts to UTF-16 with `byteToCol` against its own copy of the line.
+Columns are byte offsets; the client converts to UTF-16 with `byteToCol` against its own copy of the line.
 Sending a JSON string keeps every later slice from needing a new Rust type: extend the Lua table, add a key handler in `Island.applyDecor`.
 
 Decorations are view only, so nothing here reaches `nvim_edit`; `onUpdate` bails on a non `docChanged` transaction.
 
 ### Conceal, what is implemented
 
-`conceallevel` 0 emits nothing.
-Level 1 emits the extmark's `conceal` string as a `ConcealWidget` (its `cchar`), or a single space when the string is empty.
-Levels 2 and 3 emit an empty string, rendered as a plain `Decoration.replace` (the run vanishes).
-An entry whose row range covers the guarded cursor line is dropped in Lua.
-Overlapping conceal runs (two plugins concealing the same span) are coalesced on the client because replace decorations may not overlap.
+`conceallevel` 0 skips the walk entirely.
+Otherwise `synconcealed` per byte column reports `{ concealed, replacement, region_id }`; adjacent cells with the same `region_id` are one run, emitted as `{ row, startByte, endByte, replacement }`.
+An empty `replacement` (conceallevel 2 or 3) renders as a plain `Decoration.replace` (the run vanishes); a non empty one (a conceallevel 1 `cchar`) renders once for the whole run as a `ConcealWidget`.
+Overlapping runs from different regions cannot occur (a cell has one `region_id`); the client still sorts and drops overlaps defensively because replace decorations may not overlap.
 
 Known limits of this slice:
 
-- extmark conceal only. A `conceal` from a syntax file (the builtin markdown syntax hiding `_` and `**`) is not in `nvim_buf_get_extmarks` and stays visible in the island.
-- single line conceal only. Multi line conceal marks (`d.end_row ~= d.row`) are skipped; they are rare in markdown.
-- the cursor line gate uses the global `mode()`, so for an unfocused island it is the focused window's mode. `concealcursor=n` (the common case) is unaffected.
+- the padded rows outside Neovim's own viewport rely on `treesitter :parse({first,last})` having run; `md_decor.lua` calls it, but a brand new buffer can be one debounce behind on those rows.
+- `synconcealed` walks every byte of every viewport line per debounced push. Fine for prose; a pathological long minified line would be the worst case.
 - under fast typing a payload can be one debounce interval stale; the next `TextChanged` corrects it.
 
 ## Files

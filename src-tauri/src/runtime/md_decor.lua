@@ -5,12 +5,12 @@
 -- Purpose: mirror Neovim's *already computed* per-window display state for a
 -- markdown-live-preview window into its CodeMirror island. This script does not
 -- reimplement conceal, folds, treesitter, syntax, or render-markdown.nvim. It
--- reads their results with built-in calls (nvim_buf_get_extmarks, and later
--- nvim_get_hl / foldclosed / getpos) and forwards a compact payload.
+-- reads their results with built-in calls (synconcealed, and later nvim_get_hl
+-- / foldclosed / getpos) and forwards a compact payload.
 --
--- First slice: inline conceal only (`conceallevel` / `concealcursor`, the
--- extmark `conceal` field). Highlights, folds and the visual range extend the
--- payload in later slices.
+-- First slice: inline conceal only, via synconcealed() (covers :syntax,
+-- treesitter and extmark conceal alike). Highlights, folds and the visual
+-- range extend the payload in later slices.
 --
 -- Args: (channel).
 
@@ -29,47 +29,55 @@ local function preview_on(win)
   return ok and v == 1
 end
 
--- Inline conceal segments for `win` over the padded viewport, as
--- { {row, start_byte, end_byte, text}, ... } in absolute buffer coordinates.
--- Byte columns; the client converts to UTF-16 offsets against its own copy.
+-- Inline conceal runs for `win` over the padded viewport, as
+-- { {row, start_byte, end_byte, text}, ... } in absolute buffer coordinates
+-- (byte columns; the client converts to UTF-16 against its own copy).
+--
+-- Source is synconcealed(): the effective per-cell conceal Neovim would
+-- display. It already folds in :syntax conceal, treesitter conceal and extmark
+-- conceal, and already honours conceallevel / concealcursor, so this function
+-- special-cases none of them. r = { concealed(0/1), replacement, region_id };
+-- cells with the same region_id are one run (one cchar for the whole run).
 local function collect_conceal(win, buf, first, last)
-  local wo = vim.wo[win]
-  local cl = wo.conceallevel
-  if cl == 0 then
+  if vim.wo[win].conceallevel == 0 then
     return {}
   end
-  -- conceallevel 1 shows the cchar (or a space); 2 and 3 show nothing.
-  local text_for = cl >= 2 and function()
-    return ''
-  end or function(cchar)
-    return (cchar ~= nil and cchar ~= '') and cchar or ' '
-  end
-
-  -- Conceal is suppressed on the window's own cursor line unless
-  -- 'concealcursor' names the current mode.
-  local guard_row = nil
-  if not tostring(wo.concealcursor):find(vim.fn.mode():sub(1, 1), 1, true) then
-    guard_row = vim.api.nvim_win_get_cursor(win)[1] - 1 -- 0-based
-  end
-
-  local marks =
-    vim.api.nvim_buf_get_extmarks(buf, -1, { first, 0 }, { last, -1 }, { details = true })
-  local out = {}
-  for _, m in ipairs(marks) do
-    local row, col, d = m[2], m[3], m[4]
-    -- a conceal extmark carries a `conceal` string (possibly ""). Single-line
-    -- only for now; multi-line conceal marks are rare in markdown.
-    if
-      d
-      and d.conceal ~= nil
-      and d.end_row == row
-      and d.end_col ~= nil
-      and d.end_col > col
-      and guard_row ~= row
-    then
-      out[#out + 1] = { row, col, d.end_col, text_for(d.conceal) }
+  -- Make sure treesitter has parsed the padded range, so synconcealed() is
+  -- right for the rows just outside Neovim's own viewport that the island
+  -- (taller lines, so it shows fewer) can still have on screen.
+  pcall(function()
+    local p = vim.treesitter.get_parser(buf)
+    if p then
+      p:parse({ first, last })
     end
-  end
+  end)
+
+  local lines = vim.api.nvim_buf_get_lines(buf, first, last + 1, false)
+  local out = {}
+  vim.api.nvim_win_call(win, function()
+    for i, line in ipairs(lines) do
+      local row = first + i - 1
+      local lnum = row + 1
+      local rs, rid, rtext -- open run: start byte (0-based), region id, text
+      for col = 1, #line do
+        local r = vim.fn.synconcealed(lnum, col)
+        if r[1] == 1 then
+          if rs == nil then
+            rs, rid, rtext = col - 1, r[3], r[2]
+          elseif r[3] ~= rid then
+            out[#out + 1] = { row, rs, col - 1, rtext }
+            rs, rid, rtext = col - 1, r[3], r[2]
+          end
+        elseif rs ~= nil then
+          out[#out + 1] = { row, rs, col - 1, rtext }
+          rs = nil
+        end
+      end
+      if rs ~= nil then
+        out[#out + 1] = { row, rs, #line, rtext }
+      end
+    end
+  end)
   return out
 end
 
