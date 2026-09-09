@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, AtomicI64, Ordering},
-    Arc,
+    Arc, OnceLock,
 };
 use std::time::Duration;
 
@@ -455,6 +455,79 @@ async fn find_nvim() -> String {
     "nvim".to_string()
 }
 
+/// A macOS app launched from Finder / Dock / Spotlight inherits a stripped
+/// `launchd` environment: `PATH` is roughly `/usr/bin:/bin:/usr/sbin:/sbin` and
+/// none of the user's shell startup files have run. The spawned nvim then can't
+/// find LSP servers, formatters, telescope's `rg`/`fd`, node, etc., and reports
+/// a `$PATH` unlike the one in a terminal.
+///
+/// Resolve the real login-shell environment once and return the variables to
+/// overlay onto the nvim child. Cached for the life of the process. Set
+/// `GNV_NO_SHELL_ENV` to skip. Skipped automatically when `PATH` already looks
+/// like a normal interactive one (running from a terminal, e.g. `tauri dev`).
+fn login_shell_env() -> &'static [(String, String)] {
+    static ENV: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    ENV.get_or_init(|| {
+        if !cfg!(target_os = "macos") || std::env::var_os("GNV_NO_SHELL_ENV").is_some() {
+            return Vec::new();
+        }
+        // A stripped launchd PATH is only the system dirs; a real interactive
+        // one has the user's home in it (~/.local/bin, ~/.cargo/bin, version
+        // manager shims, ...) or a Homebrew prefix. If it already looks rich we
+        // were launched from a terminal (e.g. `tauri dev`) and can skip.
+        let path = std::env::var("PATH").unwrap_or_default();
+        let home = std::env::var("HOME").unwrap_or_default();
+        let already_rich =
+            (!home.is_empty() && path.contains(&home)) || path.contains("/opt/homebrew/");
+        if already_rich {
+            return Vec::new();
+        }
+
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        // -i so shells that build PATH in .zshrc / .bashrc are covered; a NUL
+        // sentinel so anything an rc file echoes to stdout is skipped; `env -0`
+        // so values containing newlines survive. stdin is /dev/null so an
+        // interactive shell with no tty hits EOF and exits instead of hanging.
+        let out = std::process::Command::new(&shell)
+            .args(["-ilc", "printf '\\0__GNV_ENV__\\0'; command env -0"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output();
+        let stdout = match out {
+            Ok(o) if o.status.success() => o.stdout,
+            _ => {
+                log::warn!("login-shell env probe failed; using inherited environment");
+                return Vec::new();
+            }
+        };
+        let text = String::from_utf8_lossy(&stdout);
+        let body = match text.split_once("\0__GNV_ENV__\0") {
+            Some((_, rest)) => rest,
+            None => text.as_ref(),
+        };
+        let mut vars = Vec::new();
+        for entry in body.split('\0') {
+            let Some((k, v)) = entry.split_once('=') else {
+                continue;
+            };
+            // never carry a nested-nvim marker or override nvim's own runtime
+            // vars into the child
+            if matches!(
+                k,
+                "NVIM" | "NVIM_LISTEN_ADDRESS" | "VIM" | "VIMRUNTIME" | "MYVIMRC" | "VIMINIT"
+            ) {
+                continue;
+            }
+            vars.push((k.to_string(), v.to_string()));
+        }
+        match vars.iter().find(|(k, _)| k == "PATH") {
+            Some((_, p)) => log::info!("login-shell env: {} vars, PATH={p}", vars.len()),
+            None => log::warn!("login-shell env: probe returned no PATH"),
+        }
+        vars
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public bridge
 // ---------------------------------------------------------------------------
@@ -472,11 +545,17 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
     let bin = find_nvim().await;
     let init_args = crate::config::get().neovim.init_args();
     log::info!("using nvim at {bin} (init: {init_args:?})");
+    // Resolve the user's login-shell environment once (off the async worker,
+    // since it may spawn a shell) so nvim sees a terminal-equivalent $PATH.
+    let extra_env = tokio::task::spawn_blocking(login_shell_env)
+        .await
+        .unwrap_or(&[]);
     let mut cmd = Command::new(&bin);
     cmd.args(["--embed", "--headless", "-n"])
         .args(&init_args)
         .args(["-i", "NONE"])
         .kill_on_drop(true);
+    cmd.envs(extra_env.iter().map(|(k, v)| (k, v)));
 
     let shared = Shared {
         tx,

@@ -49,7 +49,13 @@ Two caveats:
 - The renderer is not finished. A full config (a colorscheme, statusline plugins, treesitter, LSP, render-markdown and similar) will exercise parts of the renderer that are still rough, so expect visual glitches.
 - gneovim always adds `-i NONE` (no shada) and `-n` (no swap) for now.
 
-Launched from `/Applications`, a macOS app gets a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), so config that shells out to `git`, `cc`, `rg`, `node` and the like may fail. Launched with `npm run tauri dev` from a terminal it inherits your full shell environment. Importing the login shell environment for the bundled app is a later change.
+## Shell environment
+
+Launched from Finder, Dock, or Spotlight, a macOS app inherits a minimal `launchd` environment: `PATH` is roughly `/usr/bin:/bin:/usr/sbin:/sbin` and none of your shell startup files have run. Neovim would then fail to find LSP servers, formatters, `rg` / `fd`, `node`, and anything else installed by Homebrew or a version manager, and `:echo $PATH` would look nothing like a terminal.
+
+gneovim fixes this: on first launch it runs your login shell once (`$SHELL -ilc`), captures the resulting environment, and applies it to the spawned nvim. The result is cached for the life of the app. It is skipped automatically when `PATH` already looks like an interactive one (contains your home directory or a Homebrew prefix), which is the case under `npm run tauri dev`. Set `GNV_NO_SHELL_ENV` to disable it entirely.
+
+The nested-nvim markers (`NVIM`, `NVIM_LISTEN_ADDRESS`, `VIM`, `VIMRUNTIME`, `MYVIMRC`, `VIMINIT`) are dropped from the imported set so launching gneovim from inside a `:terminal` does not confuse the child.
 
 ## How the nvim binary is chosen
 
@@ -59,6 +65,6 @@ In order, first hit wins:
 2. `neovim.path` from the config file, after `~/` expansion, if it points at a file
 3. common absolute locations: `/opt/homebrew/bin/nvim`, `/usr/local/bin/nvim`, `~/.local/share/bob/nvim-bin/nvim`, `~/.local/bin/nvim`, `/opt/nvim/bin/nvim`, `/usr/bin/nvim`
 4. `$SHELL -lc "command -v nvim"`, which sources your real `PATH`
-5. bare `nvim`, relying on the process `PATH`
+5. bare `nvim`, relying on the process `PATH` (which by then carries the imported login-shell environment, see above)
 
 If `neovim.path` is set but does not resolve, gneovim logs `config: neovim.path = ... is not a file, falling back to auto-detection` and continues down the list.
