@@ -2,7 +2,7 @@
 //! (a file in a vsplit, one window switched to filetype=markdown), and check
 //! the multigrid event stream reaches the channel. The bridge stages nothing
 //! itself, so the test drives the scene.
-//! cargo test --test spike -- --nocapture
+//! cargo test --test multigrid_renderer -- --nocapture
 
 use std::collections::HashSet;
 use std::time::Duration;

@@ -57,6 +57,10 @@ pub struct Neovim {
     ///   "user"          -> no `-u`, nvim finds `~/.config/nvim` normally
     ///   "~/path/init.lua" (anything else) -> `-u <that path>` (`~/` expanded)
     pub config: Option<String>,
+
+    /// Extra arguments passed verbatim to `nvim` at startup, split on
+    /// whitespace. For flags not covered by `path` / `config`. Default "".
+    pub args: Option<String>,
 }
 
 impl Neovim {
@@ -90,6 +94,17 @@ impl Neovim {
         } else {
             vec![]
         }
+    }
+
+    /// Extra `nvim` args from `[neovim] args`, whitespace-split. Empty by
+    /// default.
+    pub fn extra_args(&self) -> Vec<String> {
+        self.args
+            .as_deref()
+            .unwrap_or("")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
     }
 }
 
@@ -167,26 +182,40 @@ mod tests {
     #[test]
     fn init_args_from_config() {
         std::env::set_var("HOME", "/home/x");
-        let none = Neovim { path: None, config: None };
+        let none = Neovim { path: None, config: None, args: None };
         assert_eq!(none.init_args(), vec!["-u", "NONE"]);
-        let explicit_none = Neovim { path: None, config: Some("none".into()) };
+        let explicit_none = Neovim { path: None, config: Some("none".into()), args: None };
         assert_eq!(explicit_none.init_args(), vec!["-u", "NONE"]);
-        let user = Neovim { path: None, config: Some("user".into()) };
+        let user = Neovim { path: None, config: Some("user".into()), args: None };
         assert!(user.init_args().is_empty());
-        let custom = Neovim { path: None, config: Some("~/x/init.lua".into()) };
+        let custom = Neovim { path: None, config: Some("~/x/init.lua".into()), args: None };
         assert_eq!(custom.init_args(), vec!["-u", "/home/x/x/init.lua"]);
     }
 
     #[test]
     fn shada_args_from_config() {
-        let none = Neovim { path: None, config: None };
+        let none = Neovim { path: None, config: None, args: None };
         assert_eq!(none.shada_args(), vec!["-i", "NONE"]);
-        let explicit_none = Neovim { path: None, config: Some("NONE".into()) };
+        let explicit_none = Neovim { path: None, config: Some("NONE".into()), args: None };
         assert_eq!(explicit_none.shada_args(), vec!["-i", "NONE"]);
-        let user = Neovim { path: None, config: Some("user".into()) };
+        let user = Neovim { path: None, config: Some("user".into()), args: None };
         assert!(user.shada_args().is_empty());
-        let custom = Neovim { path: None, config: Some("~/x/init.lua".into()) };
+        let custom = Neovim { path: None, config: Some("~/x/init.lua".into()), args: None };
         assert!(custom.shada_args().is_empty());
+    }
+
+    #[test]
+    fn extra_args_splits_on_whitespace() {
+        let none = Neovim { path: None, config: None, args: None };
+        assert!(none.extra_args().is_empty());
+        let empty = Neovim { path: None, config: None, args: Some("   ".into()) };
+        assert!(empty.extra_args().is_empty());
+        let some = Neovim {
+            path: None,
+            config: None,
+            args: Some("--clean  +startinsert".into()),
+        };
+        assert_eq!(some.extra_args(), vec!["--clean", "+startinsert"]);
     }
 
     #[test]

@@ -53,9 +53,9 @@ impl Handler for H {
 
 #[tokio::test]
 async fn dump_redraw() {
-    std::fs::write("/tmp/spike-code.rs", "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n").unwrap();
+    std::fs::write("/tmp/gnv-probe.rs", "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n").unwrap();
     std::fs::write(
-        "/tmp/spike.md",
+        "/tmp/gnv-probe.md",
         "# Heading\n\nSome *emphasis* and a [link](http://example.com).\n\n- one\n- two\n",
     )
     .unwrap();
@@ -76,8 +76,8 @@ async fn dump_redraw() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     log.lock().unwrap().push("=== after ui_attach ===".into());
 
-    nvim.command("edit /tmp/spike-code.rs").await.unwrap();
-    nvim.command("vsplit /tmp/spike.md").await.unwrap();
+    nvim.command("edit /tmp/gnv-probe.rs").await.unwrap();
+    nvim.command("vsplit /tmp/gnv-probe.md").await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     log.lock().unwrap().push("=== after vsplit ===".into());
 

@@ -17,7 +17,7 @@ So the native shell manages N `NSWindow`s, each with a `WKWebView` (or Chromium 
 
 Exactly one nvim, rendered whole. Its `nvim-tabs` (tabpages) and `nvim-windows` (the splits inside a tabpage) stay nvim's to own. The app renders them; it does not substitute AppKit tabs or split views for them.
 
-That multi pane rendering is a large separate piece, not yet built: it needs `ext_multigrid` or window layout polling, several CodeMirror instances laid out to match nvim's window layout, and a tabline for the nvim-tabs. The current single CodeMirror view is a placeholder that shows only the active window's active buffer.
+That multi pane rendering is built (milestone 2): the `ext_multigrid` grid renderer draws every window verbatim, with one CodeMirror island laid over each `filetype=markdown` window. Splits, floats, and tabpages all fall out of the grid stream. See [multigrid-renderer.md](multigrid-renderer.md).
 
 ## Who provisions nvim
 

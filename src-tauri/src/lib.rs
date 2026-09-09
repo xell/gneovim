@@ -360,7 +360,7 @@ async fn nvim_ui_start(
         .await
 }
 
-/// Bridge the webview console into the app log (spike debugging aid).
+/// Bridge the webview console into the app log (the webview has no visible one).
 #[tauri::command]
 fn js_log(msg: String) {
     log::info!("[webview] {msg}");

@@ -1,5 +1,5 @@
-// Spike: ext_multigrid grid renderer for non-markdown windows, CodeMirror
-// island for the markdown window, one nvim driving both.
+// gneovim frontend: an ext_multigrid grid renderer for non-markdown windows,
+// a CodeMirror island for each markdown window, one nvim driving both.
 
 import "../styles.css";
 import { EditorView, basicSetup } from "codemirror";
@@ -20,7 +20,7 @@ const viewportEl = document.getElementById("viewport");
 const te = new TextEncoder();
 const byteLen = (s) => te.encode(s).length;
 
-// mirror the webview console into the app log (spike debugging)
+// mirror the webview console into the app log (the webview has no visible one)
 const jlog = (m) => invoke("js_log", { msg: String(m) }).catch(() => {});
 addEventListener("error", (e) =>
   jlog(`ERROR ${e.message} @ ${e.filename}:${e.lineno}\n${e.error?.stack || ""}`),

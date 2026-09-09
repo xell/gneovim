@@ -2,7 +2,7 @@
 
 Context for the grid renderer that draws every non `markdown` window verbatim from Neovim's `ext_multigrid` stream, with a CodeMirror island only inside `filetype=markdown` windows. See [state-ownership-and-the-tmux-analogy.md](state-ownership-and-the-tmux-analogy.md) and [gui-window-model.md](gui-window-model.md) for the surrounding model.
 
-Everything below was learned by debugging the spike on branch `spike/grid-plus-md-island`. The through line: **Neovim's redraw stream is aggressively incremental. It sends only the delta since the last flush and assumes the client still holds everything else. Almost every rendering bug in the spike was the client throwing away state that Neovim was never going to resend.**
+Everything below was learned by debugging the renderer while it was built. The through line: **Neovim's redraw stream is aggressively incremental. It sends only the delta since the last flush and assumes the client still holds everything else. Almost every rendering bug was the client throwing away state that Neovim was never going to resend.**
 
 ## The one rule
 
@@ -16,7 +16,7 @@ Never discard grid state unless Neovim told you to (`grid_clear`, `grid_destroy`
 
 `nvim_ui_attach` triggers a full redraw immediately, synchronously with the attach call. That first frame carries every window's `grid_line`, which is the only time the contents of non focused windows are sent unprompted.
 
-If the webview has not yet registered its event handlers when attach runs, that frame is dropped (Tauri does not buffer events for listeners that do not exist yet). Neovim then never resends the non current windows, so they render blank until you physically touch them (in the spike: `V` plus cursor motion in the right window was the only way to force `grid_line` for those rows). This looked exactly like "redraw is broken", but the pipeline was fine, the frame just never had an audience.
+If the webview has not yet registered its event handlers when attach runs, that frame is dropped (Tauri does not buffer events for listeners that do not exist yet). Neovim then never resends the non current windows, so they render blank until you physically touch them (`V` plus cursor motion in a window was the only way to force `grid_line` for those rows). This looked exactly like "redraw is broken", but the pipeline was fine, the frame just never had an audience.
 
 Fix: `bridge::connect` builds the split, buffers, and autocmds but does **not** attach the UI. The client calls an explicit `nvim_ui_start(cols, rows)` command only after `Promise.all([...listen...])` resolves. `ui_start` is idempotent: a second call (webview reload) just resizes.
 
@@ -50,7 +50,7 @@ A floating window can grow or shrink through `grid_resize` alone, with no fresh 
 
 Even with `-u NONE` there is a built in colorscheme, and the default `background` is `dark`. So `default_colors_set` ships `Normal` as `NvimLightGrey2` on `NvimDarkGrey2`, roughly `#e0e2ea` foreground on `#14141b` background. Those exact values are easy to mistake for a hardcoded theme in the client.
 
-For a light UI: `:set background=light` in the session (so `StatusLine`, `Visual`, `NonText`, and friends get light variants), and additionally pin `Normal` in the client if you want a pure white surface rather than Neovim's `#e0e2ea` grey. The spike pins `Normal` to black on white and keeps only Neovim's `sp` (spell or undercurl color).
+The client honors `default_colors_set` verbatim and publishes it as `--fg` / `--bg` / `--sp`, so `:colorscheme` and `:set background` drive the whole UI. For a bare `-u NONE` session (no user config) the bridge forces `set background=light` so `StatusLine`, `Visual`, `NonText`, and friends get light variants to match the app's light surface; with a real user config that choice is left alone. The hardcoded `#000` / `#fff` / `#d40000` in the client are only a pre-connect fallback for when Neovim sends `-1` (no `Normal` colors).
 
 Grid cells with the default highlight (`hl_id` 0) have no background of their own, so they show whatever is behind them. Give the grid window elements an opaque background, do not rely on the body showing through.
 
@@ -70,7 +70,7 @@ The `win` field in `win_pos`, `win_float_pos`, and `win_viewport` is a msgpack e
 
 ## Cursor, with a CodeMirror island in the mix
 
-The `gnv_cursor` feed (a `CursorMoved`/`CursorMovedI`/`ModeChanged` autocmd calling `rpcnotify`) reports the **global** cursor position, whichever window has focus. Mirroring it unconditionally into the island's document draws a phantom cursor in the island whenever focus is actually in a grid window, clamped to the island's line count (in the spike, a cursor that tracked the right window but appeared in the left, stuck within the first nine lines).
+The `gnv_cursor` feed (a `CursorMoved`/`CursorMovedI`/`ModeChanged` autocmd calling `rpcnotify`) reports the **global** cursor position, whichever window has focus. Mirroring it unconditionally into the island's document draws a phantom cursor in the island whenever focus is actually in a grid window, clamped to the island's line count (a cursor that tracks the focused grid window but shows in the island, stuck within its first few lines).
 
 Rules that work:
 

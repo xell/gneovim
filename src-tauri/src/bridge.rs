@@ -79,7 +79,7 @@ pub enum BridgeEvent {
     Cursor(CursorPayload),
     Cmdline(CmdlinePayload),
     CmdlineHide,
-    /// One flushed frame of normalized grid ops (spike: multigrid renderer).
+    /// One flushed frame of normalized grid ops for the multigrid renderer.
     Grid(Vec<Json>),
     /// A window's filetype, so the client can pick which grid is the CM island.
     WinFt { win: i64, buf: i64, ft: String },
@@ -543,18 +543,23 @@ pub struct Bridge {
 /// handle so the caller can keep it alive (and kill it) with the app.
 pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child), String> {
     let bin = find_nvim().await;
-    let init_args = crate::config::get().neovim.init_args();
-    let shada_args = crate::config::get().neovim.shada_args();
-    log::info!("using nvim at {bin} (init: {init_args:?}, shada: {shada_args:?})");
+    let nv = &crate::config::get().neovim;
+    let init_args = nv.init_args();
+    let shada_args = nv.shada_args();
+    let extra_args = nv.extra_args();
+    log::info!(
+        "using nvim at {bin} (init: {init_args:?}, shada: {shada_args:?}, extra: {extra_args:?})"
+    );
     // Resolve the user's login-shell environment once (off the async worker,
     // since it may spawn a shell) so nvim sees a terminal-equivalent $PATH.
     let extra_env = tokio::task::spawn_blocking(login_shell_env)
         .await
         .unwrap_or(&[]);
     let mut cmd = Command::new(&bin);
-    cmd.args(["--embed", "--headless", "-n"])
+    cmd.args(["--embed", "--headless"])
         .args(&init_args)
         .args(&shada_args)
+        .args(&extra_args)
         .kill_on_drop(true);
     cmd.envs(extra_env.iter().map(|(k, v)| (k, v)));
 
@@ -588,8 +593,9 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
     }
 
     // No scene is staged here: the renderer draws whatever windows and buffers
-    // the launch args (or the user) produce.
-    nvim.command("filetype on").await.ok();
+    // the launch args (or the user) produce. Filetype detection is left to the
+    // user's config.
+    //
     // A bare `-u NONE` nvim ships Neovim 0.10+'s built-in colorscheme with
     // background=dark. gneovim is a light prose surface, so force the light
     // palette for that case only. With a real user config, respect whatever

@@ -24,6 +24,10 @@ path = "~/.local/share/bob/nvim-bin/nvim"
 #   "~/path/to/init.lua" -> nvim runs with -u <that path>
 config = "user"
 
+# Extra arguments passed verbatim to nvim at startup, split on whitespace.
+# For flags not covered by path / config. Default "".
+args = ""
+
 [input]
 # Treat macOS Option as Meta: Option+<key> reaches Neovim as <M-...> instead of
 # composing accented characters (é, •, …). Default true.
@@ -47,9 +51,9 @@ By default gneovim runs `nvim -u NONE`, so your `~/.config/nvim` is not read. Th
 `config` also decides how much of the session gneovim owns:
 
 - `config = "none"` (the default): a throwaway session. gneovim adds `-i NONE` (no ShaDa) and forces `set background=light`.
-- `config = "user"` or a path: your session. Default ShaDa is used, so command-line history (`q:`), search history, marks, registers, and `:oldfiles` work like terminal nvim. `background` and colorscheme are left to your config.
+- `config = "user"` or a path: your session. Default ShaDa is used, so command-line history (`q:`), search history, marks, registers, and `:oldfiles` work like terminal nvim. `background`, colorscheme, and filetype detection are left to your config.
 
-Either way gneovim adds `-n` (no swap file) and forces `mouse=a` (the GUI feeds mouse events through `nvim_input_mouse`).
+The full launch line is `nvim --embed --headless` then the `config` args, then the ShaDa args, then `args`. gneovim also forces `mouse=a` at startup (the GUI feeds mouse events through `nvim_input_mouse`); everything else, including swap files and filetype detection, is up to your config or `args`.
 
 Caveat: the renderer is not finished. A full config (a colorscheme, statusline plugins, treesitter, LSP, render-markdown and similar) will exercise parts of the renderer that are still rough, so expect visual glitches.
 
