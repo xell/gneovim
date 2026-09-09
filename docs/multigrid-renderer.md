@@ -48,6 +48,8 @@ For a light UI: `:set background=light` in the session (so `StatusLine`, `Visual
 
 Grid cells with the default highlight (`hl_id` 0) have no background of their own, so they show whatever is behind them. Give the grid window elements an opaque background, do not rely on the body showing through.
 
+`blend` (0 to 100) on an attribute is the cell's transparency, driven by `winblend` and `pumblend`. `hlCss` appends an alpha byte to the cell's fg and bg colours so the cell composites over the grid element's background. The grid and float elements keep an opaque `--bg`, so a blended cell blends toward the default background rather than showing the buffer literally underneath the float. That is the common terminal-GUI behaviour and is enough unless someone explicitly sets `winblend`; true see-through would need the float element itself to be transparent, which risks hairline gaps between cell spans.
+
 ## Ext handles
 
 The `win` field in `win_pos`, `win_float_pos`, and `win_viewport` is a msgpack ext value (the window handle), not a plain integer. Decode it with `rmpv::decode::read_value` and take `.as_i64()`. Same pattern for buffer and tabpage handles.

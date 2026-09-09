@@ -112,6 +112,17 @@ let defColors = { fg: "#000000", bg: "#ffffff", sp: "#d40000" };
 const hex = (n) =>
   n == null || n < 0 ? null : "#" + n.toString(16).padStart(6, "0");
 
+// blend (0-100, from hl_attr_define) is the cell's transparency: 0 opaque,
+// 100 invisible. Append an alpha byte so the cell composites over whatever the
+// grid element's background is (floats/pum with winblend/pumblend).
+const withAlpha = (css, blend) =>
+  blend && /^#[0-9a-f]{6}$/i.test(css)
+    ? css +
+      Math.round((100 - blend) * 2.55)
+        .toString(16)
+        .padStart(2, "0")
+    : css;
+
 function luma(hex6) {
   const n = parseInt(hex6.slice(1), 16);
   return 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255);
@@ -137,8 +148,9 @@ function hlCss(id) {
     fg = bg ?? defColors.bg;
     bg = t;
   }
-  let s = `color:${fg};`;
-  if (bg) s += `background:${bg};`;
+  const blend = a.blend | 0;
+  let s = `color:${withAlpha(fg, blend)};`;
+  if (bg) s += `background:${withAlpha(bg, blend)};`;
   if (a.bold) s += "font-weight:700;";
   if (a.italic) s += "font-style:italic;";
 
