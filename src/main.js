@@ -176,6 +176,12 @@ class GridWin {
     this.el.className = "grid gridwin";
     this.el.dataset.grid = id;
     this.cursor = null;
+    // row-level repaint: one reused <div class="grid-row"> per row, and the set
+    // of rows whose cells changed since the last repaint. `fullDirty` forces a
+    // rebuild of every row (resize, clear, colour change, stale-surface repaint).
+    this.rowEls = [];
+    this.dirtyRows = new Set();
+    this.fullDirty = true;
   }
   resize(w, h) {
     // grid_resize does NOT imply a clear: Neovim keeps the overlapping cells and
@@ -189,15 +195,18 @@ class GridWin {
     );
     this.cols = w;
     this.rows = h;
+    this.fullDirty = true; // row count / width changed: rebuild all rows
   }
   clear() {
     this.cells = Array.from({ length: this.rows }, () =>
       Array.from({ length: this.cols }, () => [" ", 0]),
     );
+    this.fullDirty = true;
   }
   line(row, col, cells) {
     const r = this.cells[row];
     if (!r) return;
+    this.dirtyRows.add(row);
     let hl = 0;
     let c = col;
     for (const [text, cellHl, repeat] of cells) {
@@ -207,60 +216,88 @@ class GridWin {
     }
   }
   scroll({ top, bot, left, right, rows }) {
+    if (!rows || bot <= top) return;
     const move = (from, to) => {
       for (let c = left; c < right; c++) this.cells[to][c] = this.cells[from][c];
     };
     if (rows > 0) {
       for (let r = top + rows; r < bot; r++) move(r, r - rows);
-    } else if (rows < 0) {
+    } else {
       for (let r = bot - 1 + rows; r >= top; r--) move(r, r - rows);
     }
+    // Full-width scroll: move the row nodes to match the cell shift so the
+    // scrolled text is never re-serialized. Only the vacated band needs
+    // repainting (Neovim's following grid_line fills it; mark it dirty so a
+    // blank scroll-in still paints). A sub-column region (left/right) is rare
+    // and can't move whole nodes, so fall back to repainting the band.
+    const region = bot - top;
+    if (left === 0 && right === this.cols && this.rowEls.length === this.rows) {
+      const seg = this.rowEls.slice(top, bot);
+      const k = ((rows % region) + region) % region; // left-rotate amount
+      const rotated = seg.slice(k).concat(seg.slice(0, k));
+      for (let i = 0; i < region; i++) this.rowEls[top + i] = rotated[i];
+      const anchor = this.rowEls[bot] || null;
+      for (let i = top; i < bot; i++)
+        this.el.insertBefore(this.rowEls[i], anchor);
+      if (rows > 0) for (let r = bot - rows; r < bot; r++) this.dirtyRows.add(r);
+      else for (let r = top; r < top - rows; r++) this.dirtyRows.add(r);
+    } else {
+      for (let r = top; r < bot; r++) this.dirtyRows.add(r);
+    }
+  }
+  paintRow(r) {
+    const rowEl = this.rowEls[r];
+    const row = this.cells[r];
+    const frag = document.createDocumentFragment();
+    let run = "";
+    let runHl = row.length ? row[0][1] : 0;
+    const flush = () => {
+      if (!run) return;
+      const sp = document.createElement("span");
+      sp.style.cssText = hlCss(runHl);
+      sp.textContent = run;
+      frag.append(sp);
+      run = "";
+    };
+    for (let c = 0; c < this.cols; c++) {
+      const [ch, hl] = row[c];
+      // "" is the right half of a preceding double-width cell; skip it
+      if (ch === "") continue;
+      if (hl !== runHl) {
+        flush();
+        runHl = hl;
+      }
+      // A double-width glyph (CJK, some emoji): the next cell is "". The
+      // fallback CJK font is not monospace, so pin the glyph to exactly two
+      // cells or the row drifts out of sync with the cell-based cursor math.
+      if (c + 1 < this.cols && row[c + 1][0] === "") {
+        flush();
+        const sp = document.createElement("span");
+        sp.className = "wide";
+        sp.style.cssText = hlCss(hl) + `width:${2 * cellW}px`;
+        sp.textContent = ch;
+        frag.append(sp);
+      } else {
+        run += ch;
+      }
+    }
+    flush();
+    rowEl.replaceChildren(frag);
   }
   repaint() {
-    const frag = document.createDocumentFragment();
-    for (let r = 0; r < this.rows; r++) {
-      const rowEl = document.createElement("div");
-      rowEl.className = "grid-row";
-      const row = this.cells[r];
-      let run = "";
-      let runHl = row.length ? row[0][1] : 0;
-      const flush = () => {
-        if (!run) return;
-        const sp = document.createElement("span");
-        sp.style.cssText = hlCss(runHl);
-        sp.textContent = run;
-        rowEl.append(sp);
-        run = "";
-      };
-      for (let c = 0; c < this.cols; c++) {
-        const [ch, hl] = row[c];
-        // "" is the right half of a preceding double-width cell; skip it
-        if (ch === "") continue;
-        if (hl !== runHl) {
-          flush();
-          runHl = hl;
-        }
-        // A double-width glyph (CJK, some emoji): the next cell is "". The
-        // fallback CJK font is not monospace, so pin the glyph to exactly two
-        // cells or the row drifts out of sync with the cell-based cursor math.
-        if (c + 1 < this.cols && row[c + 1][0] === "") {
-          flush();
-          const sp = document.createElement("span");
-          sp.className = "wide";
-          sp.style.cssText = hlCss(hl) + `width:${2 * cellW}px`;
-          sp.textContent = ch;
-          rowEl.append(sp);
-        } else {
-          run += ch;
-        }
-      }
-      flush();
-      if (this.cursor && this.cursor.row === r) {
-        rowEl.dataset.cursorCol = this.cursor.col;
-      }
-      frag.append(rowEl);
+    if (this.fullDirty || this.rowEls.length !== this.rows) {
+      this.rowEls = Array.from({ length: this.rows }, () => {
+        const d = document.createElement("div");
+        d.className = "grid-row";
+        return d;
+      });
+      this.el.replaceChildren(...this.rowEls);
+      for (let r = 0; r < this.rows; r++) this.paintRow(r);
+    } else {
+      for (const r of this.dirtyRows) if (r < this.rows) this.paintRow(r);
     }
-    this.el.replaceChildren(frag);
+    this.fullDirty = false;
+    this.dirtyRows.clear();
   }
 }
 
@@ -868,6 +905,8 @@ function applyGridBatch(ops) {
           sp: hex(o.sp) ?? defColors.sp,
         };
         applyTheme();
+        // every cell's colour may have changed: rebuild all rows of every grid
+        for (const g of grids.values()) g.fullDirty = true;
         dirty = new Set(grids.keys());
         break;
       case "hl":
@@ -922,7 +961,11 @@ function showGone(reason) {
 // On WindowEvent::Focused, Rust emits gnv://<label>/focus; rebuild every grid as
 // cheap insurance against a stale WKWebView surface after a tab/window reveal.
 function repaintNow() {
-  for (const [id, g] of grids) if (!islandGridIds.has(id)) g.repaint();
+  for (const [id, g] of grids)
+    if (!islandGridIds.has(id)) {
+      g.fullDirty = true; // stale WKWebView surface: force a full row rebuild
+      g.repaint();
+    }
   for (const isl of islands.values()) isl.view.requestMeasure();
   layout();
   placeGridCursor();

@@ -34,6 +34,12 @@ Fix: `GridWin.resize` copies the old cells into the new dimensions and only fill
 
 `["grid_scroll", grid, top, bot, left, right, rows, cols]` moves a rectangle of cells within the grid. The vacated band is **not** cleared by the event; Neovim sends `grid_line` for the revealed cells afterwards. So the client moves cells and leaves the rest alone. Do not blank the vacated region preemptively.
 
+## Row-level repaint
+
+`GridWin` keeps one reused `<div class="grid-row">` per row plus a `dirtyRows` set. `grid_line` marks its row dirty; `repaint()` re-serializes only those rows. A full rebuild (`fullDirty`) happens on `grid_resize`, `grid_clear`, `default_colors_set` (every cell's colour can change), and the post-focus stale-surface repaint. This matters for a held `j` or `<C-d>`: rebuilding all ~50 rows of a window every frame was the dominant cost.
+
+`grid_scroll` on a full-width region (`left == 0 && right == cols`, the normal case) rotates the row-node array to match the cell shift and re-inserts the nodes in the new order, so scrolled text is never re-serialized; only the vacated band is marked dirty and Neovim's following `grid_line` fills it. A sub-column scroll region cannot move whole nodes, so it falls back to marking the band dirty. The cursor is a separate absolutely-positioned overlay (`#grid-cursor`), so row rebuilds never touch it.
+
 ## Colors: Neovim 0.10+ ships a real default colorscheme
 
 Even with `-u NONE` there is a built in colorscheme, and the default `background` is `dark`. So `default_colors_set` ships `Normal` as `NvimLightGrey2` on `NvimDarkGrey2`, roughly `#e0e2ea` foreground on `#14141b` background. Those exact values are easy to mistake for a hardcoded theme in the client.
