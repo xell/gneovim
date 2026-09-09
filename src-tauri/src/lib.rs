@@ -460,6 +460,24 @@ fn spawn_bridge(app: AppHandle, label: String) {
                         .emit(&ev("guiopt"), serde_json::json!({"name":name,"value":value})),
                     BridgeEvent::MdPreview { win, state } => emit_app
                         .emit(&ev("md_preview"), serde_json::json!({"win":win,"state":state})),
+                    BridgeEvent::WinGutter {
+                        win,
+                        number,
+                        relativenumber,
+                        numberwidth,
+                        signcolumn,
+                        foldcolumn,
+                    } => emit_app.emit(
+                        &ev("win_gutter"),
+                        serde_json::json!({
+                            "win": win,
+                            "number": number,
+                            "relativenumber": relativenumber,
+                            "numberwidth": numberwidth,
+                            "signcolumn": signcolumn,
+                            "foldcolumn": foldcolumn,
+                        }),
+                    ),
                     BridgeEvent::Gone(reason) => {
                         log::info!("{emit_label}: {reason}");
                         // :q / :qa is the common case; drop the gui-window too.
@@ -644,6 +662,14 @@ async fn nvim_guiopts(
 }
 
 #[tauri::command]
+async fn nvim_wingutters(
+    app: AppHandle,
+    window: tauri::Window,
+) -> Result<Vec<(i64, bool, bool, i64, String, String)>, String> {
+    bridge_for(&app, window.label()).await?.win_gutters().await
+}
+
+#[tauri::command]
 async fn new_window(app: AppHandle) -> Result<(), String> {
     spawn_window(&app, false);
     Ok(())
@@ -792,6 +818,7 @@ pub fn run() {
             gnv_config,
             nvim_winfts,
             nvim_guiopts,
+            nvim_wingutters,
             nvim_paste_clip,
             nvim_clip_yank,
             new_window,

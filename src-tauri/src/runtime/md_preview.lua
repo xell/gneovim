@@ -61,6 +61,23 @@ local function set_preview(win, on)
   notify(win, v)
 end
 
+-- Mirror a markdown window's gutter options into the GUI so its CM island can
+-- draw the same number column Neovim would. signcolumn / foldcolumn ride along
+-- for a later pass. Same pcall rationale as notify().
+local function push_gutter(win)
+  if not is_md(win) then
+    return
+  end
+  local wo = vim.wo[win]
+  pcall(vim.rpcnotify, chan, 'gnv_win_gutter', win, {
+    number = wo.number,
+    relativenumber = wo.relativenumber,
+    numberwidth = wo.numberwidth,
+    signcolumn = wo.signcolumn,
+    foldcolumn = wo.foldcolumn,
+  })
+end
+
 -- Keep w:gnv_md_preview honest as windows and filetypes change: materialize the
 -- default on a fresh markdown window, clear it when a window stops being one.
 local function reconcile(win)
@@ -78,7 +95,19 @@ local grp = vim.api.nvim_create_augroup('gnv_md_preview', { clear = true })
 vim.api.nvim_create_autocmd({ 'BufWinEnter', 'FileType', 'WinEnter', 'WinNew' }, {
   group = grp,
   callback = function()
-    reconcile(vim.api.nvim_get_current_win())
+    local win = vim.api.nvim_get_current_win()
+    reconcile(win)
+    push_gutter(win)
+  end,
+})
+
+-- Live `:set number` / `relativenumber` / `numberwidth` / `signcolumn` /
+-- `foldcolumn` in the focused window.
+vim.api.nvim_create_autocmd('OptionSet', {
+  group = grp,
+  pattern = { 'number', 'relativenumber', 'numberwidth', 'signcolumn', 'foldcolumn' },
+  callback = function()
+    push_gutter(vim.api.nvim_get_current_win())
   end,
 })
 
@@ -87,6 +116,7 @@ vim.api.nvim_create_autocmd({ 'BufWinEnter', 'FileType', 'WinEnter', 'WinNew' },
 vim.schedule(function()
   for _, w in ipairs(vim.api.nvim_list_wins()) do
     reconcile(w)
+    push_gutter(w)
   end
 end)
 

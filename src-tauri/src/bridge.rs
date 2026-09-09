@@ -89,6 +89,17 @@ pub enum BridgeEvent {
     /// A window's markdown-live-preview flag changed. `state`: 1 preview island,
     /// 0 grid, -1 no longer a markdown window. From `runtime/md_preview.lua`.
     MdPreview { win: i64, state: i64 },
+    /// A markdown window's gutter options, so its island can mirror Neovim's
+    /// number column. `signcolumn` / `foldcolumn` ride along for a later pass.
+    /// From `runtime/md_preview.lua`.
+    WinGutter {
+        win: i64,
+        number: bool,
+        relativenumber: bool,
+        numberwidth: i64,
+        signcolumn: String,
+        foldcolumn: String,
+    },
     /// nvim's stdio closed (it exited or the connection dropped).
     Gone(String),
 }
@@ -312,6 +323,39 @@ impl Handler for NvHandler {
                 let win = args.first().and_then(Value::as_i64).unwrap_or(0);
                 let state = args.get(1).and_then(Value::as_i64).unwrap_or(-1);
                 let _ = self.shared.tx.send(BridgeEvent::MdPreview { win, state });
+            }
+            "gnv_win_gutter" => {
+                let win = args.first().and_then(Value::as_i64).unwrap_or(0);
+                let (mut number, mut relativenumber) = (false, false);
+                let mut numberwidth = 4;
+                let mut signcolumn = String::from("auto");
+                let mut foldcolumn = String::from("0");
+                if let Some(map) = args.get(1).and_then(Value::as_map) {
+                    for (k, v) in map {
+                        match k.as_str() {
+                            Some("number") => number = v.as_bool().unwrap_or(false),
+                            Some("relativenumber") => {
+                                relativenumber = v.as_bool().unwrap_or(false)
+                            }
+                            Some("numberwidth") => numberwidth = v.as_i64().unwrap_or(4),
+                            Some("signcolumn") => {
+                                signcolumn = v.as_str().unwrap_or("auto").to_string()
+                            }
+                            Some("foldcolumn") => {
+                                foldcolumn = v.as_str().unwrap_or("0").to_string()
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                let _ = self.shared.tx.send(BridgeEvent::WinGutter {
+                    win,
+                    number,
+                    relativenumber,
+                    numberwidth,
+                    signcolumn,
+                    foldcolumn,
+                });
             }
             "redraw" => {
                 let mut batch = self.shared.grid_batch.lock().unwrap();
@@ -933,6 +977,39 @@ impl Bridge {
                     r.get(1).and_then(Value::as_i64)?,
                     r.get(2).and_then(Value::as_str).unwrap_or("").to_string(),
                     r.get(3).and_then(Value::as_i64).unwrap_or(-1),
+                ))
+            })
+            .collect())
+    }
+
+    /// `[(winid, number, relativenumber, numberwidth, signcolumn, foldcolumn), ...]`
+    /// for every window, replayed on first attach: the `OptionSet` / `WinEnter`
+    /// feed in `md_preview.lua` fires before the client is listening.
+    pub async fn win_gutters(
+        &self,
+    ) -> Result<Vec<(i64, bool, bool, i64, String, String)>, String> {
+        let v = self
+            .nvim
+            .eval(
+                "map(getwininfo(), {_,w -> [w.winid, \
+                 getwinvar(w.winid, '&number'), getwinvar(w.winid, '&relativenumber'), \
+                 getwinvar(w.winid, '&numberwidth'), getwinvar(w.winid, '&signcolumn'), \
+                 getwinvar(w.winid, '&foldcolumn')]})",
+            )
+            .await
+            .map_err(err)?;
+        Ok(v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                let r = row.as_array()?;
+                Some((
+                    r.first().and_then(Value::as_i64)?,
+                    r.get(1).and_then(Value::as_i64).unwrap_or(0) != 0,
+                    r.get(2).and_then(Value::as_i64).unwrap_or(0) != 0,
+                    r.get(3).and_then(Value::as_i64).unwrap_or(4),
+                    r.get(4).and_then(Value::as_str).unwrap_or("auto").to_string(),
+                    r.get(5).and_then(Value::as_str).unwrap_or("0").to_string(),
                 ))
             })
             .collect())

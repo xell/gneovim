@@ -2,7 +2,7 @@
 // a CodeMirror island for each markdown window, one nvim driving both.
 
 import "../styles.css";
-import { EditorView, Decoration, WidgetType } from "@codemirror/view";
+import { EditorView, Decoration, WidgetType, lineNumbers } from "@codemirror/view";
 import { Annotation, StateEffect, StateField, Compartment } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { invoke } from "@tauri-apps/api/core";
@@ -329,6 +329,10 @@ let islandGridIds = new Set(); // gridIds currently rendered as an island
 // `w:gnv_md_preview` (gnv://<label>/md_preview events + the winfts replay).
 // Absent -> fall back to livePreviewDefault.
 const previewWins = new Map();
+// winId -> { number, relativenumber, numberwidth, signcolumn, foldcolumn }, the
+// window's gutter options mirrored from Neovim (runtime/md_preview.lua feed +
+// the nvim_wingutters replay). Applied to the island's gutter compartment.
+const winGutter = new Map();
 let livePreviewDefault = true; // from gnv_config [markdown] live_preview_default
 let modeName_ = "n";
 
@@ -371,6 +375,7 @@ function reconcileIslands(force = false) {
       const isl = new Island(wid);
       islands.set(wid, isl);
       attachIsland(isl);
+      if (winGutter.has(wid)) isl.setGutter(winGutter.get(wid));
     } else if (force || (wantBuf != null && cur.bufnr !== wantBuf)) {
       const old = cur.bufnr;
       cur.bufnr = null;
@@ -660,6 +665,9 @@ class Island {
     this.mode = "n";
     this.editableComp = new Compartment();
     this.editable = true;
+    this.gutterComp = new Compartment(); // number column, mirrored from Neovim
+    this.gutter = null; // last { number, relativenumber, numberwidth, ... }
+    this._gutterRaf = 0;
     this.el = document.createElement("div");
     this.el.className = "island";
     this.el.hidden = true;
@@ -682,8 +690,17 @@ class Island {
         markdown(),
         EditorView.lineWrapping,
         nvimCursorField,
+        this.gutterComp.of([]),
         this.editableComp.of(EDITABLE_ON),
         EditorView.updateListener.of((u) => this.onUpdate(u)),
+        EditorView.updateListener.of((u) => {
+          // relativenumber: repaint the number column when the cursor line
+          // moves, even on a transaction that changed nothing else.
+          if (!this.gutter?.relativenumber) return;
+          const a = u.startState.field(nvimCursorField, false)?.pos?.row;
+          const b = u.state.field(nvimCursorField, false)?.pos?.row;
+          if (a !== b) this.scheduleGutterRefresh();
+        }),
         EditorView.domEventHandlers({
           mousedown: (ev, v) => this.onMousedown(ev, v),
         }),
@@ -720,7 +737,47 @@ class Island {
     // in normal mode we do not (keys are global), so leave focus alone.
     if (on) this.view.focus();
   }
+  // Mirror Neovim's number column. `o` is the window's gutter options; only
+  // `number` / `relativenumber` / `numberwidth` are drawn for now (signcolumn
+  // and foldcolumn ride along in `o` for a later pass).
+  setGutter(o) {
+    this.gutter = o;
+    this.applyGutter();
+  }
+  applyGutter() {
+    const g = this.gutter;
+    const ext = [];
+    if (g && (g.number || g.relativenumber)) {
+      this.el.style.setProperty(
+        "--gutter-numw",
+        String(Math.max(g.numberwidth || 4, 2)),
+      );
+      ext.push(
+        lineNumbers({
+          formatNumber: (n, state) => {
+            if (!g.relativenumber) return String(n);
+            const cur = state.field(nvimCursorField, false)?.pos;
+            const curLine = cur ? Math.min(cur.row + 1, state.doc.lines) : null;
+            if (curLine == null) return String(n);
+            if (n === curLine) return g.number ? String(n) : "0";
+            return String(Math.abs(n - curLine));
+          },
+        }),
+      );
+    } else {
+      this.el.style.removeProperty("--gutter-numw");
+    }
+    this.view.dispatch({ effects: this.gutterComp.reconfigure(ext) });
+  }
+  scheduleGutterRefresh() {
+    if (this._gutterRaf) return;
+    this._gutterRaf = requestAnimationFrame(() => {
+      this._gutterRaf = 0;
+      this.applyGutter();
+    });
+  }
   destroy() {
+    if (this._gutterRaf) cancelAnimationFrame(this._gutterRaf);
     this.view.destroy();
     this.el.remove();
   }
@@ -1169,6 +1226,10 @@ addEventListener("error", (e) => {
       else previewWins.set(win, state === 1);
       reconcileIslands();
     }),
+    listen(ev("win_gutter"), (e) => {
+      winGutter.set(e.payload.win, e.payload);
+      islands.get(e.payload.win)?.setGutter(e.payload);
+    }),
     listen(ev("gone"), (e) => showGone(e.payload)),
   ]);
 
@@ -1203,6 +1264,24 @@ addEventListener("error", (e) => {
     jlog(`winfts replayed: ${JSON.stringify([...winFt])}`);
   } catch (e) {
     jlog("winfts failed: " + e);
+  }
+
+  // gutter-option feed (md_preview.lua) also fires before we listen; pull it.
+  try {
+    for (const [
+      win,
+      number,
+      relativenumber,
+      numberwidth,
+      signcolumn,
+      foldcolumn,
+    ] of await invoke("nvim_wingutters")) {
+      const g = { win, number, relativenumber, numberwidth, signcolumn, foldcolumn };
+      winGutter.set(win, g);
+      islands.get(win)?.setGutter(g);
+    }
+  } catch (e) {
+    jlog("wingutters failed: " + e);
   }
 
   // GUI options (guifont / linespace) set before we were listening
