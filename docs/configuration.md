@@ -51,7 +51,31 @@ confirm_quit = true
 # Confirm before Cmd+W closes a gui-window or gui-tab, even with nothing
 # unsaved. Default true.
 confirm_close = true
+
+[markdown]
+# Whether a filetype=markdown window renders as a CodeMirror live-preview
+# island by default. Overridable per window at runtime (see below). Default
+# true.
+live_preview_default = true
 ```
+
+## Markdown live preview
+
+A `filetype=markdown` window renders as a CodeMirror island; every other window
+renders from Neovim's grid. `[markdown] live_preview_default` sets the default,
+and three user commands (created automatically in any nvim gneovim spawns)
+override it per window:
+
+    :MarkdownLivePreviewOn       island for the current window
+    :MarkdownLivePreviewOff      current window back to grid rendering
+    :MarkdownLivePreviewToggle
+    :MarkdownLivePreview...!     with a bang: every markdown window in the tabpage
+
+The state lives in `w:gnv_md_preview` (`1` preview, `0` grid), so two splits of
+the *same* markdown file can differ, and you can read the flag from a statusline
+or a script. gneovim also sets `g:gneovim` and registers itself via
+`nvim_set_client_info`; check `vim.g.gneovim` from a `UIEnter` autocmd (it is
+not set yet when `init.lua` first runs).
 
 ## Closing and quitting
 

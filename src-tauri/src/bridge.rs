@@ -86,6 +86,9 @@ pub enum BridgeEvent {
     /// A GUI option changed (`guifont`, `linespace`, ...). No `ext_` event
     /// carries these; polled via an `OptionSet` autocmd.
     GuiOpt { name: String, value: String },
+    /// A window's markdown-live-preview flag changed. `state`: 1 preview island,
+    /// 0 grid, -1 no longer a markdown window. From `runtime/md_preview.lua`.
+    MdPreview { win: i64, state: i64 },
     /// nvim's stdio closed (it exited or the connection dropped).
     Gone(String),
 }
@@ -304,6 +307,11 @@ impl Handler for NvHandler {
                     _ => String::new(),
                 };
                 let _ = self.shared.tx.send(BridgeEvent::GuiOpt { name, value });
+            }
+            "gnv_md_preview" => {
+                let win = args.first().and_then(Value::as_i64).unwrap_or(0);
+                let state = args.get(1).and_then(Value::as_i64).unwrap_or(-1);
+                let _ = self.shared.tx.send(BridgeEvent::MdPreview { win, state });
             }
             "redraw" => {
                 let mut batch = self.shared.grid_batch.lock().unwrap();
@@ -650,6 +658,25 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
         nvim.command(&spec).await.map_err(err)?;
     }
 
+    // GUI-detection global + the :MarkdownLivePreview{On,Off,Toggle} commands.
+    // Injected, not a user plugin: it must match `handle_notify`'s
+    // `gnv_md_preview` arm. Set before `ui_start` so `g:gneovim` is present by
+    // the time a `UIEnter` autocmd in the user's config runs.
+    let md_default: i64 = crate::config::get().markdown.live_preview_default.into();
+    if let Err(e) = nvim
+        .exec_lua(
+            include_str!("runtime/md_preview.lua"),
+            vec![
+                chan.into(),
+                md_default.into(),
+                env!("CARGO_PKG_VERSION").into(),
+            ],
+        )
+        .await
+    {
+        log::warn!("md_preview.lua injection failed: {e}");
+    }
+
     // No buffer is attached here. Islands attach their window's buffer on
     // demand via `island_attach`; a session with no markdown window never
     // attaches anything.
@@ -883,12 +910,16 @@ impl Bridge {
             .collect())
     }
 
-    pub async fn win_fts(&self) -> Result<Vec<(i64, i64, String)>, String> {
+    /// `[(winid, bufnr, filetype, md_preview), ...]` for every window, replayed
+    /// on the client's first attach. `md_preview`: 1 preview, 0 grid, -1 unset
+    /// (from `w:gnv_md_preview`, maintained by `runtime/md_preview.lua`).
+    pub async fn win_fts(&self) -> Result<Vec<(i64, i64, String, i64)>, String> {
         let v = self
             .nvim
             .eval(
                 "map(getwininfo(), {_,w -> \
-                 [w.winid, w.bufnr, getbufvar(w.bufnr, '&filetype')]})",
+                 [w.winid, w.bufnr, getbufvar(w.bufnr, '&filetype'), \
+                 getwinvar(w.winid, 'gnv_md_preview', -1)]})",
             )
             .await
             .map_err(err)?;
@@ -901,6 +932,7 @@ impl Bridge {
                     r.first().and_then(Value::as_i64)?,
                     r.get(1).and_then(Value::as_i64)?,
                     r.get(2).and_then(Value::as_str).unwrap_or("").to_string(),
+                    r.get(3).and_then(Value::as_i64).unwrap_or(-1),
                 ))
             })
             .collect())

@@ -326,6 +326,11 @@ const winFt = new Map(); // winId -> filetype
 const winBuf = new Map(); // winId -> bufnr
 const islands = new Map(); // winId -> Island (one CM instance per markdown window)
 let islandGridIds = new Set(); // gridIds currently rendered as an island
+// winId -> bool: markdown-live-preview flag, from runtime/md_preview.lua's
+// `w:gnv_md_preview` (gnv://<label>/md_preview events + the winfts replay).
+// Absent -> fall back to livePreviewDefault.
+const previewWins = new Map();
+let livePreviewDefault = true; // from gnv_config [markdown] live_preview_default
 let modeName_ = "n";
 
 function gw(id) {
@@ -339,12 +344,18 @@ function gw(id) {
 }
 
 const isMarkdown = (wid) => (winFt.get(wid) || "").includes("markdown");
+// A window gets a CM island only if it is markdown AND its live-preview flag is
+// on (explicit per-window value, else the configured default). Turning it off
+// drops the window back to plain grid rendering like every other window.
+const wantIsland = (wid) =>
+  isMarkdown(wid) &&
+  (previewWins.has(wid) ? previewWins.get(wid) : livePreviewDefault);
 
-// Mount an Island over every markdown window, unmount the rest, re-point any
-// whose buffer changed. `force` re-attaches every island (desync recovery).
+// Mount an Island over every previewed markdown window, unmount the rest,
+// re-point any whose buffer changed. `force` re-attaches every island.
 function reconcileIslands(force = false) {
   const desired = new Map(); // winId -> gridId
-  for (const [gid, wid] of gridToWin) if (isMarkdown(wid)) desired.set(wid, gid);
+  for (const [gid, wid] of gridToWin) if (wantIsland(wid)) desired.set(wid, gid);
 
   for (const [wid, isl] of [...islands]) {
     if (!desired.has(wid)) {
@@ -862,7 +873,11 @@ function renderGridOps(ops) {
         if (g) g.el.remove();
         grids.delete(o.grid);
         winPos.delete(o.grid);
+        const goneWin = gridToWin.get(o.grid);
         gridToWin.delete(o.grid);
+        // window ids are reused; drop its stale preview flag
+        if (goneWin != null && ![...gridToWin.values()].includes(goneWin))
+          previewWins.delete(goneWin);
         layoutDirty = true;
         break;
       }
@@ -1078,6 +1093,7 @@ addEventListener("error", (e) => {
     optionIsMeta = cfg?.input?.option_is_meta ?? true;
     blockImeInNormalMode = cfg?.input?.block_ime_in_normal_mode ?? true;
     forwardCmdKeys = cfg?.input?.forward_cmd_keys ?? false;
+    livePreviewDefault = cfg?.markdown?.live_preview_default ?? true;
     if (matchMedia?.("(pointer: coarse)")?.matches) blockImeInNormalMode = false;
     jlog(
       `config: option_is_meta=${optionIsMeta} block_ime=${blockImeInNormalMode} ` +
@@ -1124,6 +1140,12 @@ addEventListener("error", (e) => {
     listen(ev("cmdline_hide"), () => {}),
     listen(ev("focus"), () => repaintNow()),
     listen(ev("guiopt"), (e) => applyGuiOpt(e.payload.name, e.payload.value)),
+    listen(ev("md_preview"), (e) => {
+      const { win, state } = e.payload;
+      if (state === -1) previewWins.delete(win);
+      else previewWins.set(win, state === 1);
+      reconcileIslands();
+    }),
     listen(ev("gone"), (e) => showGone(e.payload)),
   ]);
 
@@ -1145,12 +1167,14 @@ addEventListener("error", (e) => {
     }
   }
 
-  // winft events fired before we were listening; replay them. reconcileIslands()
-  // then mounts an island on every markdown window that exists.
+  // winft events fired before we were listening; replay them (with the
+  // per-window live-preview flag). reconcileIslands() then mounts an island on
+  // every previewed markdown window.
   try {
-    for (const [win, buf, ft] of await invoke("nvim_winfts")) {
+    for (const [win, buf, ft, mdp] of await invoke("nvim_winfts")) {
       winFt.set(win, ft || "");
       if (buf != null) winBuf.set(win, buf);
+      if (mdp === 0 || mdp === 1) previewWins.set(win, mdp === 1);
     }
     reconcileIslands();
     jlog(`winfts replayed: ${JSON.stringify([...winFt])}`);

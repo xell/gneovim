@@ -458,6 +458,8 @@ fn spawn_bridge(app: AppHandle, label: String) {
                     ),
                     BridgeEvent::GuiOpt { name, value } => emit_app
                         .emit(&ev("guiopt"), serde_json::json!({"name":name,"value":value})),
+                    BridgeEvent::MdPreview { win, state } => emit_app
+                        .emit(&ev("md_preview"), serde_json::json!({"win":win,"state":state})),
                     BridgeEvent::Gone(reason) => {
                         log::info!("{emit_label}: {reason}");
                         // :q / :qa is the common case; drop the gui-window too.
@@ -629,7 +631,7 @@ fn gnv_config() -> &'static config::Config {
 async fn nvim_winfts(
     app: AppHandle,
     window: tauri::Window,
-) -> Result<Vec<(i64, i64, String)>, String> {
+) -> Result<Vec<(i64, i64, String, i64)>, String> {
     bridge_for(&app, window.label()).await?.win_fts().await
 }
 

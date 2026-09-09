@@ -15,6 +15,24 @@ pub struct Config {
     pub neovim: Neovim,
     pub input: Input,
     pub window: Window,
+    pub markdown: Markdown,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Markdown {
+    /// Whether a `filetype=markdown` window renders as a CodeMirror live
+    /// preview island by default. Per-window overridable at runtime with
+    /// `:MarkdownLivePreviewOn` / `Off` / `Toggle`. Default true.
+    pub live_preview_default: bool,
+}
+
+impl Default for Markdown {
+    fn default() -> Self {
+        Self {
+            live_preview_default: true,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
