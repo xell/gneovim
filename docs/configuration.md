@@ -42,7 +42,31 @@ block_ime_in_normal_mode = true
 # app/menu modifier, and forwarding it collides with menu shortcuts (Cmd+N, ...).
 # Enable if you have <D-...> mappings.
 forward_cmd_keys = false
+
+[window]
+# Confirm before Cmd+Q quits the app, even with nothing unsaved. Quitting
+# destroys every gui-window's Neovim (all its tabs and splits). Default true.
+confirm_quit = true
+
+# Confirm before Cmd+W closes a gui-window or gui-tab, even with nothing
+# unsaved. Default true.
+confirm_close = true
 ```
+
+## Closing and quitting
+
+Cmd+W (close a gui-window or gui-tab) and Cmd+Q (quit) are intercepted so a
+window with unsaved changes is never silently killed:
+
+- If any buffer is modified or a `:terminal` job is still running, a warning
+  dialog lists them. Cmd+Q's dialog also has a **Review** button that focuses
+  the first affected window.
+- Otherwise, `[window] confirm_quit` / `confirm_close` decide whether a plain
+  "are you sure" dialog appears first (it shows the session's tab / window /
+  buffer counts). Set them to `false` for the fast path.
+
+A confirmed or unblocked close runs `:qall` so ShaDa and `VimLeave` autocommands
+run; only a leftover hang is force-killed (after 3s).
 
 ## Loading your Neovim config
 

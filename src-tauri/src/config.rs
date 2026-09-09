@@ -14,6 +14,29 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub neovim: Neovim,
     pub input: Input,
+    pub window: Window,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Window {
+    /// Confirm before Cmd+Q quits the app, even with nothing unsaved. Closing
+    /// destroys every gui-window's Neovim (all its tabs and splits). Default
+    /// true.
+    pub confirm_quit: bool,
+
+    /// Confirm before Cmd+W closes a gui-window or gui-tab, even with nothing
+    /// unsaved. Default true.
+    pub confirm_close: bool,
+}
+
+impl Default for Window {
+    fn default() -> Self {
+        Self {
+            confirm_quit: true,
+            confirm_close: true,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]

@@ -146,18 +146,34 @@ fn summarize(items: &[String]) -> String {
     }
 }
 
+/// "1 window" / "3 windows"
+#[cfg(target_os = "macos")]
+fn count(n: i64, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}
+
+/// "3 tab pages, 8 windows, 24 buffers" for `(tabpages, windows, buffers)`.
+#[cfg(target_os = "macos")]
+fn stats_line((t, w, b): (i64, i64, i64)) -> String {
+    format!(
+        "{}, {}, {}",
+        count(t, "tab page"),
+        count(w, "window"),
+        count(b, "buffer")
+    )
+}
+
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UnsavedChoice {
     Cancel,
     Review,
-    Discard,
+    Proceed,
 }
 
-/// Native modal warning. `buttons[0]` is the default (Return); if it is titled
-/// "Cancel" it also answers Escape. Awaited off the main thread; the alert runs
-/// on it. Returns which button was pressed (index 0 -> Cancel, index 1 of a
-/// 3-button alert -> Review, otherwise -> Discard).
+/// Native modal. `buttons[0]` is the default (Return); if titled "Cancel" it
+/// also answers Escape. Awaited off the main thread; the alert runs on it.
+/// Index 0 -> Cancel, index 1 of a 3-button alert -> Review, otherwise Proceed.
 #[cfg(target_os = "macos")]
 async fn warn_unsaved(
     app: &AppHandle,
@@ -184,7 +200,7 @@ async fn warn_unsaved(
         let choice = match (buttons.len(), idx) {
             (_, 0) => UnsavedChoice::Cancel,
             (3, 1) => UnsavedChoice::Review,
-            _ => UnsavedChoice::Discard,
+            _ => UnsavedChoice::Proceed,
         };
         let _ = tx.send(choice);
     });
@@ -213,13 +229,32 @@ fn guard_close(window: &tauri::Window) {
                 return;
             }
         };
+        let title = window.title().unwrap_or_else(|_| "This window".into());
         if blockers.is_empty() {
+            // Nothing unsaved. Still confirm unless the user opted out: closing
+            // destroys this whole Neovim (every tab and split it holds).
+            if crate::config::get().window.confirm_close {
+                let stats = bridge
+                    .session_stats()
+                    .await
+                    .map(stats_line)
+                    .unwrap_or_default();
+                let choice = warn_unsaved(
+                    &app,
+                    format!("Close \u{201c}{title}\u{201d}?"),
+                    format!("This ends its Neovim session.\n{stats}"),
+                    &["Cancel", "Close"],
+                )
+                .await;
+                if choice != UnsavedChoice::Proceed {
+                    return;
+                }
+            }
             // clean quit so nvim writes shada and runs VimLeave; force after 3s
             let _ = tokio::time::timeout(Duration::from_secs(3), bridge.quit_all(false)).await;
             let _ = window.destroy();
             return;
         }
-        let title = window.title().unwrap_or_else(|_| "This window".into());
         let choice = warn_unsaved(
             &app,
             format!("\u{201c}{title}\u{201d} has unsaved changes"),
@@ -227,7 +262,7 @@ fn guard_close(window: &tauri::Window) {
             &["Cancel", "Discard & Close"],
         )
         .await;
-        if choice == UnsavedChoice::Discard {
+        if choice == UnsavedChoice::Proceed {
             let _ = bridge.quit_all(true).await;
             let _ = window.destroy();
         }
@@ -259,6 +294,32 @@ fn guard_exit(app: &AppHandle) {
             }
         }
         if offenders.is_empty() {
+            // Nothing unsaved anywhere. Still confirm unless opted out: quitting
+            // ends every gui-window's Neovim.
+            if crate::config::get().window.confirm_quit {
+                let (mut t, mut w, mut b) = (0i64, 0i64, 0i64);
+                for (_, br) in &entries {
+                    if let Ok((tt, ww, bb)) = br.session_stats().await {
+                        t += tt;
+                        w += ww;
+                        b += bb;
+                    }
+                }
+                let choice = warn_unsaved(
+                    &app,
+                    "Quit gneovim?".into(),
+                    format!(
+                        "This ends {}.\n{}",
+                        count(entries.len() as i64, "Neovim session"),
+                        stats_line((t, w, b))
+                    ),
+                    &["Cancel", "Quit"],
+                )
+                .await;
+                if choice != UnsavedChoice::Proceed {
+                    return;
+                }
+            }
             // Set before the quit loop: it destroys windows, and the last one
             // re-fires ExitRequested, which must not re-enter this guard.
             QUITTING.store(true, Ordering::Relaxed);
@@ -296,7 +357,7 @@ fn guard_exit(app: &AppHandle) {
                     let _ = w.set_focus();
                 }
             }
-            UnsavedChoice::Discard => {
+            UnsavedChoice::Proceed => {
                 QUITTING.store(true, Ordering::Relaxed);
                 for (_, b) in &entries {
                     let _ = b.quit_all(true).await;

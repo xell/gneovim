@@ -958,4 +958,21 @@ impl Bridge {
         let cmd = if force { "qall!" } else { "qall" };
         self.nvim.command(cmd).await.map_err(err)
     }
+
+    /// `(tabpages, windows, listed_buffers)` for this nvim, for the "you are
+    /// about to close a big session" confirmation.
+    pub async fn session_stats(&self) -> Result<(i64, i64, i64), String> {
+        let v = self
+            .nvim
+            .exec_lua(
+                "return { #vim.api.nvim_list_tabpages(), #vim.api.nvim_list_wins(), \
+                 #vim.fn.getbufinfo({ buflisted = 1 }) }",
+                vec![],
+            )
+            .await
+            .map_err(err)?;
+        let a = v.as_array().ok_or("session_stats: not an array")?;
+        let n = |i: usize| a.get(i).and_then(Value::as_i64).unwrap_or(0);
+        Ok((n(0), n(1), n(2)))
+    }
 }
