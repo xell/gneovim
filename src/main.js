@@ -1081,8 +1081,26 @@ class Island {
       to = doc.line(b + 1).from;
       insert = linedata.map((l) => l + "\n").join("");
     }
+    // `nvim_buf_attach` reports at line granularity, so the block above replaces
+    // whole lines even for a one-character keystroke. Shrink to the minimal
+    // edit (common prefix + suffix removed) so decorations outside the actual
+    // change map through untouched and do not flash / reflow the line.
+    const cur = doc.sliceString(from, to);
+    let p = 0;
+    const mp = Math.min(cur.length, insert.length);
+    while (p < mp && cur.charCodeAt(p) === insert.charCodeAt(p)) p++;
+    let s = 0;
+    const ms = Math.min(cur.length - p, insert.length - p);
+    while (
+      s < ms &&
+      cur.charCodeAt(cur.length - 1 - s) === insert.charCodeAt(insert.length - 1 - s)
+    )
+      s++;
+    from += p;
+    to -= s;
+    insert = insert.slice(p, insert.length - s);
     try {
-      this.tx({ changes: { from, to, insert } });
+      if (from !== to || insert) this.tx({ changes: { from, to, insert } });
     } catch (err) {
       jlog("island desync " + err);
       reconcileIslands(true);
