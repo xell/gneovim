@@ -404,28 +404,38 @@ fn spawn_window(app: &AppHandle, as_tab: bool, open: OpenSpec) -> Option<String>
         }
     };
 
+    // The private NSWindow cosmetics (corner radius, traffic-light inset) and
+    // the macOS tab grouping must run on the main thread. `spawn_window` is also
+    // reached from worker threads (file-association `open_paths`, the
+    // `OpenNewTab` bridge event); on macOS 26 `_setCornerRadius:` routes through
+    // WindowManagement.framework, which traps ("Must only be used from the main
+    // thread") when called off-main.
     #[cfg(target_os = "macos")]
-    apply_corner_radius(&win);
-    #[cfg(target_os = "macos")]
-    apply_traffic_light_inset(&win);
+    {
+        let w = win.clone();
+        let _ = win.run_on_main_thread(move || {
+            apply_corner_radius(&w);
+            apply_traffic_light_inset(&w);
 
-    #[cfg(target_os = "macos")]
-    if as_tab {
-        match &parent {
-            Some(p) => {
-                log::info!("new tab: grouping with {}", p.label());
-                add_as_tab(p, &win);
-                let _ = win.show();
-                // The tab bar now appears on both windows; AppKit re-lays out
-                // the traffic lights asynchronously, so re-assert the inset.
-                apply_traffic_light_inset_deferred(win.clone());
-                apply_traffic_light_inset_deferred(p.clone());
+            if as_tab {
+                match &parent {
+                    Some(p) => {
+                        log::info!("new tab: grouping with {}", p.label());
+                        add_as_tab(p, &w);
+                        let _ = w.show();
+                        // The tab bar now appears on both windows; AppKit
+                        // re-lays out the traffic lights asynchronously, so
+                        // re-assert the inset.
+                        apply_traffic_light_inset_deferred(w.clone());
+                        apply_traffic_light_inset_deferred(p.clone());
+                    }
+                    None => {
+                        log::warn!("new tab: no parent window, opening standalone");
+                        let _ = w.show();
+                    }
+                }
             }
-            None => {
-                log::warn!("new tab: no parent window, opening standalone");
-                let _ = win.show();
-            }
-        }
+        });
     }
 
     spawn_bridge(app.clone(), label.clone(), open);
