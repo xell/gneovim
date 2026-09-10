@@ -60,14 +60,16 @@ Mirrors Neovim's already computed per window display state for a previewed markd
 `md_decor.lua` never runs its own `foldexpr`, its own conceal evaluation, treesitter, a syntax file, or `render-markdown.nvim`.
 It reads the results those produce with built-in calls and forwards them:
 
-- conceal: `synconcealed(lnum, col)`, walked over the viewport inside `nvim_win_call`. This is the effective per cell conceal Neovim would draw, so it already folds in `:syntax` conceal, treesitter conceal and extmark conceal, and already honours `conceallevel` and `concealcursor`. No source is special cased and there is no cursor line rule to re-encode.
+- conceal: a union of three reads, because no single Neovim API reports conceal from every source. `synconcealed(lnum, col)` walked over the viewport gives `:syntax` conceal. `vim.treesitter.query.get(lang, 'highlights')` iterated over the viewport, collecting captures whose `conceal` metadata is set, gives treesitter conceal (the base language tree and every injected one). `nvim_buf_get_extmarks(buf, -1, a, b, { details = true })` filtered to marks with a `conceal` field gives render-markdown style extmark conceal.
 - highlights: `nvim_buf_get_extmarks(buf, -1, a, b, { details = true })` plus `nvim_get_hl` (later slice)
 - folds: `foldclosed` / `foldclosedend` / `foldtextresult` (later slice)
 - visual range: `mode()`, `getpos("v")`, `getpos(".")` (later slice)
 
-Change `foldexpr` or swap the markdown plugin and the island follows with no code change, because it only reads live state.
+The treesitter read is the same `highlights.scm` query the treesitter highlighter itself runs; `md_decor.lua` reads its `conceal` metadata, it does not decide what to conceal. Change `foldexpr` or swap the markdown plugin and the island follows with no code change, because it only reads live state.
 
-Why not `nvim_buf_get_extmarks` for conceal: it returns only extmarks a plugin explicitly set. Treesitter conceal is applied as ephemeral extmarks during redraw and is never returned; `:syntax` conceal is not an extmark at all. The first cut used that API and saw nothing on a normal setup.
+Why three reads. `synconcealed()` is `:syntax` only on every Neovim version (its implementation calls `syn_get_id` and nothing else), so it misses treesitter conceal, which is where a modern markdown setup hides most markers. `nvim_buf_get_extmarks` returns only extmarks a plugin explicitly set, so it misses treesitter conceal (applied as ephemeral extmarks during redraw, never returned) and `:syntax` conceal (not an extmark at all). Each read covers what the others cannot. Overlapping or duplicate runs across the three are expected and the client drops them.
+
+Neither `synconcealed()` nor the raw query honours `concealcursor`, so `md_decor.lua` re-encodes the one rule "suppress conceal on the window's own cursor line unless `concealcursor` names the current mode" and applies it to all three.
 
 ### Lifecycle: always on, guarded per window
 
@@ -99,15 +101,21 @@ Decorations are view only, so nothing here reaches `nvim_edit`; `onUpdate` bails
 
 ### Conceal, what is implemented
 
-`conceallevel` 0 skips the walk entirely.
-Otherwise `synconcealed` per byte column reports `{ concealed, replacement, region_id }`; adjacent cells with the same `region_id` are one run, emitted as `{ row, startByte, endByte, replacement }`.
-An empty `replacement` (conceallevel 2 or 3) renders as a plain `Decoration.replace` (the run vanishes); a non empty one (a conceallevel 1 `cchar`) renders once for the whole run as a `ConcealWidget`.
-Overlapping runs from different regions cannot occur (a cell has one `region_id`); the client still sorts and drops overlaps defensively because replace decorations may not overlap.
+`conceallevel` 0 returns nothing.
+Otherwise each source contributes runs `{ row, startByte, endByte, text }`:
+
+- `synconcealed()` per byte column, adjacent cells with the same `region_id` coalesced into one run, `text` taken from its replacement string (already correct for the level).
+- treesitter: each single line capture node with `conceal` metadata, `text` from `text_for(cchar)` which applies the level rules (1 -> cchar or space, 2 -> cchar or nothing, 3 -> nothing).
+- extmarks: each single line mark with a `conceal` field, `text` from `text_for`.
+
+An empty `text` renders as a plain `Decoration.replace` (the run vanishes); a non empty one renders once for the run as a `ConcealWidget`.
+The client sorts every run by start and drops any that overlaps the previous one, so duplicates across the three sources and rare cross source overlaps are handled.
 
 Known limits of this slice:
 
-- the padded rows outside Neovim's own viewport rely on `treesitter :parse({first,last})` having run; `md_decor.lua` calls it, but a brand new buffer can be one debounce behind on those rows.
-- `synconcealed` walks every byte of every viewport line per debounced push. Fine for prose; a pathological long minified line would be the worst case.
+- single line conceal only. A treesitter or extmark conceal whose range spans a line break is skipped, as is `conceal_lines` (whole line conceal). Rare in markdown.
+- the padded rows outside Neovim's own viewport rely on `parser:parse({first,last})` having run; `md_decor.lua` calls it, but a brand new buffer can be one debounce behind on those rows.
+- the treesitter read iterates every highlight capture in the viewport per debounced push, and `synconcealed` walks every byte of every viewport line. Fine for prose; a pathological long minified line or a huge injected code block would be the worst case.
 - under fast typing a payload can be one debounce interval stale; the next `TextChanged` corrects it.
 
 ## Files

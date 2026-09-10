@@ -5,12 +5,15 @@
 -- Purpose: mirror Neovim's *already computed* per-window display state for a
 -- markdown-live-preview window into its CodeMirror island. This script does not
 -- reimplement conceal, folds, treesitter, syntax, or render-markdown.nvim. It
--- reads their results with built-in calls (synconcealed, and later nvim_get_hl
--- / foldclosed / getpos) and forwards a compact payload.
+-- reads their results with built-in calls (synconcealed, the treesitter
+-- highlights query, nvim_buf_get_extmarks, and later nvim_get_hl / foldclosed
+-- / getpos) and forwards a compact payload.
 --
--- First slice: inline conceal only, via synconcealed() (covers :syntax,
--- treesitter and extmark conceal alike). Highlights, folds and the visual
--- range extend the payload in later slices.
+-- First slice: inline conceal only. synconcealed() is :syntax-only on every
+-- Neovim version, so conceal is a union of three reads: synconcealed() for
+-- :syntax, the treesitter highlights-query `conceal` metadata for treesitter,
+-- and extmark `conceal` for render-markdown and friends. Highlights, folds and
+-- the visual range extend the payload in later slices.
 --
 -- Args: (channel).
 
@@ -33,27 +36,51 @@ end
 -- { {row, start_byte, end_byte, text}, ... } in absolute buffer coordinates
 -- (byte columns; the client converts to UTF-16 against its own copy).
 --
--- Source is synconcealed(): the effective per-cell conceal Neovim would
--- display. It already folds in :syntax conceal, treesitter conceal and extmark
--- conceal, and already honours conceallevel / concealcursor, so this function
--- special-cases none of them. r = { concealed(0/1), replacement, region_id };
--- cells with the same region_id are one run (one cchar for the whole run).
+-- Union of three sources. synconcealed() reports :syntax conceal only, on every
+-- Neovim version, so it cannot stand alone: the treesitter query and the
+-- extmark scan cover the rest. Neither the query nor synconcealed() honour
+-- 'concealcursor', so the cursor-line guard is applied here to every source.
+-- The client sorts and drops overlaps, so duplicate runs across sources are
+-- harmless.
 local function collect_conceal(win, buf, first, last)
-  if vim.wo[win].conceallevel == 0 then
+  local cl = vim.wo[win].conceallevel
+  if cl == 0 then
     return {}
   end
-  -- Make sure treesitter has parsed the padded range, so synconcealed() is
-  -- right for the rows just outside Neovim's own viewport that the island
-  -- (taller lines, so it shows fewer) can still have on screen.
-  pcall(function()
-    local p = vim.treesitter.get_parser(buf)
-    if p then
-      p:parse({ first, last })
-    end
-  end)
 
-  local lines = vim.api.nvim_buf_get_lines(buf, first, last + 1, false)
+  -- conceallevel: 1 -> cchar or a space; 2 -> cchar or nothing; 3 -> nothing.
+  -- synconcealed()'s replacement string already follows these rules, so it is
+  -- passed through; the raw treesitter / extmark cchar goes through text_for.
+  local function text_for(cchar)
+    local has = cchar ~= nil and cchar ~= ''
+    if cl >= 3 then
+      return ''
+    elseif cl == 2 then
+      return has and cchar or ''
+    end
+    return has and cchar or ' '
+  end
+
+  -- Conceal is suppressed on the window's own cursor line unless 'concealcursor'
+  -- names the current mode.
+  local guard_row
+  local mc = vim.api.nvim_get_mode().mode:sub(1, 1):lower()
+  if mc == '\22' then
+    mc = 'v'
+  end
+  if not tostring(vim.wo[win].concealcursor):find(mc, 1, true) then
+    guard_row = vim.api.nvim_win_get_cursor(win)[1] - 1
+  end
+
   local out = {}
+  local function add(row, sc, ec, text)
+    if row ~= guard_row and ec > sc then
+      out[#out + 1] = { row, sc, ec, text }
+    end
+  end
+
+  -- 1. :syntax conceal, via synconcealed() over the viewport.
+  local lines = vim.api.nvim_buf_get_lines(buf, first, last + 1, false)
   vim.api.nvim_win_call(win, function()
     for i, line in ipairs(lines) do
       local row = first + i - 1
@@ -65,19 +92,61 @@ local function collect_conceal(win, buf, first, last)
           if rs == nil then
             rs, rid, rtext = col - 1, r[3], r[2]
           elseif r[3] ~= rid then
-            out[#out + 1] = { row, rs, col - 1, rtext }
+            add(row, rs, col - 1, rtext)
             rs, rid, rtext = col - 1, r[3], r[2]
           end
         elseif rs ~= nil then
-          out[#out + 1] = { row, rs, col - 1, rtext }
+          add(row, rs, col - 1, rtext)
           rs = nil
         end
       end
       if rs ~= nil then
-        out[#out + 1] = { row, rs, #line, rtext }
+        add(row, rs, #line, rtext)
       end
     end
   end)
+
+  -- 2. treesitter conceal, from the `conceal` metadata on the highlights query
+  -- (the same query the treesitter highlighter reads). Walk the base language
+  -- tree and every injected one.
+  pcall(function()
+    local parser = vim.treesitter.get_parser(buf)
+    if not parser then
+      return
+    end
+    parser:parse({ first, last })
+    local function walk(ltree)
+      local q = vim.treesitter.query.get(ltree:lang(), 'highlights')
+      if q then
+        for _, tstree in pairs(ltree:trees()) do
+          for id, node, meta in q:iter_captures(tstree:root(), buf, first, last + 1) do
+            local cc = (meta[id] and meta[id].conceal) or meta.conceal
+            if cc ~= nil then
+              local sr, sc, er, ec = node:range()
+              if sr == er then
+                add(sr, sc, ec, text_for(cc))
+              end
+            end
+          end
+        end
+      end
+      for _, child in pairs(ltree:children()) do
+        walk(child)
+      end
+    end
+    walk(parser)
+  end)
+
+  -- 3. real extmark conceal (render-markdown and similar). Single line only.
+  local marks =
+    vim.api.nvim_buf_get_extmarks(buf, -1, { first, 0 }, { last, -1 }, { details = true })
+  for _, mk in ipairs(marks) do
+    local row, col, d = mk[2], mk[3], mk[4]
+    if d and d.conceal ~= nil and d.end_row == row and d.end_col and d.end_col > col then
+      add(row, col, d.end_col, text_for(d.conceal))
+    end
+  end
+
   return out
 end
 
