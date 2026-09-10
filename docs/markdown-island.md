@@ -63,7 +63,7 @@ It reads the results those produce with built-in calls and forwards them:
 - conceal: a union of three reads, because no single Neovim API reports conceal from every source. `synconcealed(lnum, col)` walked over the viewport gives `:syntax` conceal. `vim.treesitter.query.get(lang, 'highlights')` iterated over the viewport, collecting captures whose `conceal` metadata is set, gives treesitter conceal (the base language tree and every injected one). `nvim_buf_get_extmarks(buf, -1, a, b, { details = true })` filtered to marks with a `conceal` field gives render-markdown style extmark conceal.
 - highlights: `nvim_buf_get_extmarks(buf, -1, a, b, { details = true })` plus `nvim_get_hl` (later slice)
 - visual range: `nvim_get_mode()` for the kind (charwise, linewise, blockwise, and the select-mode variants), `getpos("v")` and `getpos(".")` for the two ends. Only emitted when the island's window is the current window.
-- folds: `foldclosed` / `foldclosedend` / `foldtextresult` (later slice)
+- folds: `foldclosed` / `foldclosedend` / `foldtextresult` inside `nvim_win_call`, walking the padded viewport and jumping past each closed fold. Source agnostic: whatever `foldmethod` and `foldtext` the user set is what shows.
 
 The treesitter read is the same `highlights.scm` query the treesitter highlighter itself runs; `md_decor.lua` reads its `conceal` metadata, it does not decide what to conceal. Change `foldexpr` or swap the markdown plugin and the island follows with no code change, because it only reads live state.
 
@@ -93,7 +93,7 @@ This one path covers both mount and live toggle on.
 
 ### Payload and coordinates
 
-`gnv_md_decor` carries `(win, json)` where `json` is `vim.json.encode` of `{ first, last, conceal: [ [row, startByte, endByte, text], ... ], visual: [ [row, startByte, endByte], ... ] }` in absolute buffer coordinates.
+`gnv_md_decor` carries `(win, json)` where `json` is `vim.json.encode` of `{ first, last, conceal: [ [row, startByte, endByte, text], ... ], visual: [ [row, startByte, endByte], ... ], folds: [ [startRow, endRow, text], ... ] }` in absolute buffer coordinates.
 Columns are byte offsets; the client converts to UTF-16 with `byteToCol` against its own copy of the line.
 Sending a JSON string keeps every later slice from needing a new Rust type: extend the Lua table, add a key handler in `Island.applyDecor`.
 
@@ -131,6 +131,16 @@ The client renders each run as a `Decoration.mark` with class `cm-nvim-visual`, 
 Leaving visual mode fires `ModeChanged`, the next push carries an empty `visual`, and the wash clears.
 
 Known limits: the character-under-cursor byte width fix covers multibyte, but `selection=exclusive`, `virtualedit`, and ragged blockwise right edges are not modelled. The real `Visual` highlight colour is not resolved yet; the wash is a fixed tint until the highlight slice.
+
+### Folds, what is implemented
+
+`collect_folds` walks the padded viewport with `foldclosed` / `foldclosedend`, and for each closed fold emits `{ startRow, endRow, foldtextresult }` with the trailing fill run trimmed, then jumps past `foldclosedend`. The real fold bounds are used even when they extend past the padded range.
+
+The client renders each fold as a `block: true` `Decoration.replace` from the start of the first folded line to the start of the line after the fold (consuming the newlines, so no blank gap), with a `FoldWidget` showing the fold text. A replace may not nest, so any conceal run or visual mark that falls inside a fold is dropped before the set is built. This is why folds are computed first in `applyDecor`.
+
+`FoldWidget` is display only. Open a fold from Neovim (`zo`), and the next push drops the decoration.
+
+Trigger gap: Neovim has no fold autocmd. `zR` / `zM` / `zi` are caught by `OptionSet foldlevel,foldenable`; a `zc` that moves the cursor to the fold start is caught by `CursorMoved`; a bare `zo` with a stationary cursor is only caught by the `CursorHold` backstop (after `updatetime`) or the next cursor move or scroll.
 
 ## Files
 

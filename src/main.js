@@ -637,6 +637,23 @@ class ConcealWidget extends WidgetType {
     return s;
   }
 }
+// A closed Neovim fold: one placeholder line (foldtextresult) replacing the
+// whole folded range. Display only; open the fold from Neovim (`zo`).
+class FoldWidget extends WidgetType {
+  constructor(text) {
+    super();
+    this.text = text;
+  }
+  eq(o) {
+    return o.text === this.text;
+  }
+  toDOM() {
+    const d = document.createElement("div");
+    d.className = "cm-nvim-fold";
+    d.textContent = this.text || "···";
+    return d;
+  }
+}
 function cursorDeco(state, pos) {
   if (!pos) return Decoration.none;
   const doc = state.doc;
@@ -827,9 +844,9 @@ class Island {
   }
   // Display bridge (runtime/md_decor.lua). `d` is the parsed payload:
   // { first, last, conceal: [[row, startByte, endByte, text], ...],
-  //   visual: [[row, startByte, endByte], ...] } in absolute buffer
-  // coordinates. Later slices add highlight / fold keys. Decorations are
-  // view-only, so nothing here reaches nvim_edit.
+  //   visual: [[row, startByte, endByte], ...],
+  //   folds:  [[startRow, endRow, text], ...] } in absolute buffer
+  // coordinates. Decorations are view-only, so nothing here reaches nvim_edit.
   setDecor(d) {
     this.decor = d;
     this.applyDecor();
@@ -845,11 +862,29 @@ class Island {
   }
   applyDecor() {
     const d = this.decor;
-    // conceal: replace decorations, which may not overlap each other.
+    const doc = this.view.state.doc;
+
+    // folds first: a closed fold is a block replace over whole lines. Anything
+    // inside it (conceal, visual) is dropped, since a replace may not nest.
+    const foldSpans = [];
+    for (const [sr, er, text] of d?.folds ?? []) {
+      if (sr < 0 || sr >= doc.lines) continue;
+      const lastFolded = Math.min(er + 1, doc.lines); // 1-based
+      const from = doc.line(sr + 1).from;
+      // end at the start of the line after the fold, so the block replace
+      // consumes the folded lines' newlines and leaves no blank gap.
+      const to =
+        lastFolded < doc.lines ? doc.line(lastFolded + 1).from : doc.length;
+      if (to > from) foldSpans.push({ from, to, text });
+    }
+    const inFold = (a, b) =>
+      foldSpans.some((f) => a < f.to && b > f.from);
+
+    // conceal: inline replace decorations, which may not overlap each other.
     const spans = [];
     for (const [row, sc, ec, text] of d?.conceal ?? []) {
       const r = this._range(row, sc, ec);
-      if (r) spans.push({ ...r, text });
+      if (r && !inFold(r.from, r.to)) spans.push({ ...r, text });
     }
     spans.sort((a, b) => a.from - b.from || a.to - b.to);
     const ranges = [];
@@ -864,10 +899,18 @@ class Island {
         ).range(s.from, s.to),
       );
     }
+    for (const f of foldSpans) {
+      ranges.push(
+        Decoration.replace({
+          widget: new FoldWidget(f.text),
+          block: true,
+        }).range(f.from, f.to),
+      );
+    }
     // visual/select range: a background mark, may overlap anything.
     for (const [row, sc, ec] of d?.visual ?? []) {
       const r = this._range(row, sc, ec);
-      if (r) ranges.push(VISUAL_MARK.range(r.from, r.to));
+      if (r && !inFold(r.from, r.to)) ranges.push(VISUAL_MARK.range(r.from, r.to));
     }
     // most debounced payloads on a plain buffer carry nothing; skip the no-op
     if (!ranges.length && !this.view.state.field(islandDecorField).size) return;

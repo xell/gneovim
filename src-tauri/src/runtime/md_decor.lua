@@ -198,6 +198,33 @@ local function collect_visual(win, first, last)
   return runs
 end
 
+-- Closed folds overlapping the padded viewport, as { {startRow, endRow, text},
+-- ... } (0-based rows, inclusive). `text` is `foldtextresult`, trimmed of the
+-- trailing fill run. There is no fold autocmd, so this re-runs on the same
+-- broad trigger set as the rest.
+local function collect_folds(win, first, last)
+  local folds = {}
+  vim.api.nvim_win_call(win, function()
+    if not vim.wo.foldenable then
+      return
+    end
+    local l = first + 1 -- 1-based
+    local top = last + 1
+    while l <= top do
+      local fc = vim.fn.foldclosed(l)
+      if fc == -1 then
+        l = l + 1
+      else
+        local fe = vim.fn.foldclosedend(l)
+        local text = (tostring(vim.fn.foldtextresult(fc)):gsub('[%s%-%.·•_=]+$', ''))
+        folds[#folds + 1] = { fc - 1, fe - 1, text }
+        l = fe + 1
+      end
+    end
+  end)
+  return folds
+end
+
 local function push(win)
   local buf = vim.api.nvim_win_get_buf(win)
   local info = vim.fn.getwininfo(win)[1]
@@ -212,6 +239,7 @@ local function push(win)
     last = last,
     conceal = collect_conceal(win, buf, first, last),
     visual = collect_visual(win, first, last),
+    folds = collect_folds(win, first, last),
   }
   pcall(vim.rpcnotify, chan, 'gnv_md_decor', win, vim.json.encode(payload))
 end
@@ -249,9 +277,13 @@ vim.api.nvim_create_autocmd({
   'ModeChanged',
   'WinEnter',
   'BufWinEnter',
+  -- backstop: a lone `zo` / `zc` with a stationary cursor fires no other event.
+  'CursorHold',
+  'CursorHoldI',
 }, { group = grp, callback = schedule })
 vim.api.nvim_create_autocmd('OptionSet', {
   group = grp,
-  pattern = { 'conceallevel', 'concealcursor' },
+  -- foldlevel / foldenable catch the bulk fold commands (`zR` `zM` `zi` ...).
+  pattern = { 'conceallevel', 'concealcursor', 'foldlevel', 'foldenable' },
   callback = schedule,
 })
