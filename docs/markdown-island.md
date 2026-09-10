@@ -154,6 +154,8 @@ The client renders each fold as one plain (non-block) `Decoration.replace` from 
 
 `FoldWidget` is display only. Open a fold from Neovim (`zo`), and the next push drops the decoration.
 
+When the cursor is on a closed fold, Neovim reports it on the fold's first line, which is inside the replace range, so the cursor decoration would be swallowed and vanish. `cursorDeco` detects a `FoldWidget` replace covering the cursor position and instead renders a block cursor at the replace's left edge with `side: -1`. `islandDecorField` is defined before `nvimCursorField` so `cursorDeco` reads the current fold set within the same transaction that adds a fold.
+
 Trigger gap: Neovim has no fold autocmd. `zR` / `zM` / `zi` are caught by `OptionSet foldlevel,foldenable`; a `zc` that moves the cursor to the fold start is caught by `CursorMoved`; a bare `zo` with a stationary cursor is only caught by the `CursorHold` backstop (after `updatetime`) or the next cursor move or scroll.
 
 ## Files

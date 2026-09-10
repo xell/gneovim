@@ -717,11 +717,53 @@ class FoldWidget extends WidgetType {
     return s;
   }
 }
+// Display-bridge decorations (conceal, visual range, folds, highlights). A
+// field, not a compartment, because a fold replace spans line breaks and needs
+// the StateField.provide path. The set IS mapped through edits so it stays in
+// place until the next md_decor push (~20ms after TextChanged) refreshes it;
+// dropping it on every keystroke made the concealed markers flash and forced a
+// full re-render. Folds are plain (non-block) inline replaces, the same kind
+// CodeMirror's own code folding maps through changes safely; an earlier
+// `block: true` version misaligned when mapped and froze the island. Defined
+// before nvimCursorField so cursorDeco can read the current fold set.
+const VISUAL_MARK = Decoration.mark({ class: "cm-nvim-visual" });
+const setIslandDecor = StateEffect.define();
+const islandDecorField = StateField.define({
+  create: () => Decoration.none,
+  update(v, tr) {
+    v = v.map(tr.changes);
+    for (const e of tr.effects) if (e.is(setIslandDecor)) v = e.value;
+    return v;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
 function cursorDeco(state, pos) {
   if (!pos) return Decoration.none;
   const doc = state.doc;
   const line = doc.line(Math.min(pos.row + 1, doc.lines));
-  const from = Math.min(line.from + pos.col, line.to);
+  let from = Math.min(line.from + pos.col, line.to);
+
+  // A closed fold replaces its whole range with the FoldWidget; a cursor
+  // decoration placed inside would be swallowed and the cursor vanishes. Snap
+  // it to the fold's left edge and render it there with side -1 (before the
+  // replaced content).
+  let onFold = false;
+  const deco = state.field(islandDecorField, false);
+  if (deco) {
+    deco.between(from, from, (dfrom, dto, value) => {
+      if (dfrom < dto && value.spec && value.spec.widget instanceof FoldWidget) {
+        from = dfrom;
+        onFold = true;
+        return false;
+      }
+    });
+  }
+  if (onFold) {
+    return Decoration.set([
+      Decoration.widget({ widget: new BlockCursor(), side: -1 }).range(from),
+    ]);
+  }
   if (pos.mode[0] === "i") {
     return Decoration.set([
       Decoration.widget({ widget: new BarCursor(), side: 1 }).range(from),
@@ -741,29 +783,11 @@ const nvimCursorField = StateField.define({
   update(v, tr) {
     let pos = v.pos;
     for (const e of tr.effects) if (e.is(setNvimCursor)) pos = e.value;
+    // recompute every transaction: a fold added by setIslandDecor (defined
+    // above, so current here) changes where the cursor must render.
     return { deco: cursorDeco(tr.state, pos), pos };
   },
   provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
-});
-
-// Display-bridge decorations (conceal, visual range, folds, highlights). A
-// field, not a compartment, because a fold replace spans line breaks and needs
-// the StateField.provide path. The set IS mapped through edits so it stays in
-// place until the next md_decor push (~20ms after TextChanged) refreshes it;
-// dropping it on every keystroke made the concealed markers flash and forced a
-// full re-render. Folds are plain (non-block) inline replaces, the same kind
-// CodeMirror's own code folding maps through changes safely; an earlier
-// `block: true` version misaligned when mapped and froze the island.
-const VISUAL_MARK = Decoration.mark({ class: "cm-nvim-visual" });
-const setIslandDecor = StateEffect.define();
-const islandDecorField = StateField.define({
-  create: () => Decoration.none,
-  update(v, tr) {
-    v = v.map(tr.changes);
-    for (const e of tr.effects) if (e.is(setIslandDecor)) v = e.value;
-    return v;
-  },
-  provide: (f) => EditorView.decorations.from(f),
 });
 
 // The run of text present in `b` but not `a` (common prefix + suffix removed).
