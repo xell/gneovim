@@ -717,22 +717,44 @@ class FoldWidget extends WidgetType {
     return s;
   }
 }
-// Display-bridge decorations (conceal, visual range, folds, highlights). A
-// field, not a compartment, because a fold replace spans line breaks and needs
-// the StateField.provide path. The set IS mapped through edits so it stays in
-// place until the next md_decor push (~20ms after TextChanged) refreshes it;
-// dropping it on every keystroke made the concealed markers flash and forced a
-// full re-render. Folds are plain (non-block) inline replaces, the same kind
-// CodeMirror's own code folding maps through changes safely; an earlier
-// `block: true` version misaligned when mapped and froze the island. Defined
-// before nvimCursorField so cursorDeco can read the current fold set.
+// Display-bridge decorations, in two fields.
+//
+// islandDecorField: conceal, highlights, visual range. Marks and short inline
+// replaces. Mapped through edits (guarded) so they stay put between the ~20ms
+// pushes without flashing on every keystroke.
+//
+// islandFoldField: closed-fold replaces only. A fold replace spans line breaks,
+// and mapping one through certain edits corrupts the set so that every later
+// `map(tr.changes)` throws, which aborts the transaction and freezes the island
+// permanently (survives `:e`). So this field is NEVER mapped: it drops on any
+// doc change and the next push rebuilds it. Folds are rare and big, so a
+// one-cycle drop on edit is unnoticeable, unlike conceal.
+//
+// Both are defined before nvimCursorField so cursorDeco reads the current sets.
 const VISUAL_MARK = Decoration.mark({ class: "cm-nvim-visual" });
 const setIslandDecor = StateEffect.define();
 const islandDecorField = StateField.define({
   create: () => Decoration.none,
   update(v, tr) {
-    v = v.map(tr.changes);
+    if (tr.docChanged) {
+      try {
+        v = v.map(tr.changes);
+      } catch (e) {
+        jlog("island decor map failed, dropping: " + e);
+        v = Decoration.none;
+      }
+    }
     for (const e of tr.effects) if (e.is(setIslandDecor)) v = e.value;
+    return v;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+const setIslandFolds = StateEffect.define();
+const islandFoldField = StateField.define({
+  create: () => Decoration.none,
+  update(v, tr) {
+    if (tr.docChanged) return Decoration.none;
+    for (const e of tr.effects) if (e.is(setIslandFolds)) v = e.value;
     return v;
   },
   provide: (f) => EditorView.decorations.from(f),
@@ -749,10 +771,10 @@ function cursorDeco(state, pos) {
   // it to the fold's left edge and render it there with side -1 (before the
   // replaced content).
   let onFold = false;
-  const deco = state.field(islandDecorField, false);
-  if (deco) {
-    deco.between(from, from, (dfrom, dto, value) => {
-      if (dfrom < dto && value.spec && value.spec.widget instanceof FoldWidget) {
+  const folds = state.field(islandFoldField, false);
+  if (folds) {
+    folds.between(from, from, (dfrom, dto) => {
+      if (dfrom < dto) {
         from = dfrom;
         onFold = true;
         return false;
@@ -847,6 +869,7 @@ class Island {
         EditorView.lineWrapping,
         nvimCursorField,
         islandDecorField,
+        islandFoldField,
         this.gutterComp.of([]),
         this.editableComp.of(EDITABLE_ON),
         EditorView.updateListener.of((u) => this.onUpdate(u)),
@@ -993,11 +1016,6 @@ class Island {
         ).range(s.from, s.to),
       );
     }
-    for (const f of foldSpans) {
-      ranges.push(
-        Decoration.replace({ widget: new FoldWidget(f.text) }).range(f.from, f.to),
-      );
-    }
     // highlights: one mark per treesitter capture / hl_group extmark run. They
     // overlap freely; CM nests the spans and CSS resolves, like a browser.
     for (const [row, sc, ec, group] of d?.hl?.runs ?? []) {
@@ -1011,16 +1029,29 @@ class Island {
       const r = this._range(row, sc, ec);
       if (r && !inFold(r.from, r.to)) ranges.push(VISUAL_MARK.range(r.from, r.to));
     }
-    // most debounced payloads on a plain buffer carry nothing; skip the no-op
-    if (!ranges.length && !this.view.state.field(islandDecorField).size) return;
-    let set;
-    try {
-      set = Decoration.set(ranges, true);
-    } catch (e) {
-      jlog("island decor build failed: " + e);
-      return;
+    // folds go in their own never-mapped field (see islandFoldField).
+    const foldSet = Decoration.set(
+      foldSpans.map((f) =>
+        Decoration.replace({ widget: new FoldWidget(f.text) }).range(f.from, f.to),
+      ),
+    );
+
+    const st = this.view.state;
+    const noConcealChange =
+      !ranges.length && !st.field(islandDecorField).size;
+    const noFoldChange = !foldSpans.length && !st.field(islandFoldField).size;
+    if (noConcealChange && noFoldChange) return;
+
+    const effects = [];
+    if (!noConcealChange) {
+      try {
+        effects.push(setIslandDecor.of(Decoration.set(ranges, true)));
+      } catch (e) {
+        jlog("island decor build failed: " + e);
+      }
     }
-    this.view.dispatch({ effects: setIslandDecor.of(set) });
+    if (!noFoldChange) effects.push(setIslandFolds.of(foldSet));
+    if (effects.length) this.view.dispatch({ effects });
   }
   destroy() {
     if (this._gutterRaf) cancelAnimationFrame(this._gutterRaf);
@@ -1154,6 +1185,15 @@ class Island {
     updateImeFocus();
   }
   applyReset(m) {
+    // clear decorations before the full-doc replace: if a stale set is what is
+    // making dispatches throw, mapping it through this huge change would keep
+    // the island wedged even across `:e` / a forced re-attach.
+    this.view.dispatch({
+      effects: [
+        setIslandDecor.of(Decoration.none),
+        setIslandFolds.of(Decoration.none),
+      ],
+    });
     this.tx({
       changes: { from: 0, to: this.view.state.doc.length, insert: m.lines.join("\n") },
     });

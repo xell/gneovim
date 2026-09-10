@@ -99,7 +99,11 @@ Sending a JSON string keeps every later slice from needing a new Rust type: exte
 
 Decorations are view only, so nothing here reaches `nvim_edit`; `onUpdate` bails on a non `docChanged` transaction.
 
-`islandDecorField` maps its set through edits (`v.map(tr.changes)`) so decorations stay in place between the ~20ms pushes. Folds must be plain inline replaces for this: an earlier `block: true` fold replace, mapped across a change that shifted its line range, misaligned and CodeMirror threw inside the same dispatch that applies the buffer echo, freezing the island (`dd` did not update the CM doc, then the re-attach in `applyBufLines`'s catch threw the same way). Not mapping at all was worse: dropping the set on every keystroke flashed the concealed markers and forced a full re-render. Plain inline replaces are the kind CodeMirror's own code folding maps safely, so the set maps cleanly and `applyDecor` wraps the rebuild in a `try` as a backstop.
+Decorations live in two fields.
+
+`islandDecorField` holds conceal, highlights, and the visual range: marks and short single line replaces. It maps through edits (`v.map(tr.changes)`) so they stay put between the ~20ms pushes without flashing on every keystroke. The map is wrapped in a `try`: on the (so far unreproduced) chance the mapped set becomes one CodeMirror cannot re-map, it drops to `Decoration.none` rather than throwing, which would abort the transaction and wedge the island for good.
+
+`islandFoldField` holds only the closed fold replaces. A fold replace spans line breaks, and mapping one through the wrong edit corrupted the set so that every later `map(tr.changes)` threw, aborting the transaction and freezing the island permanently: `dd` stopped updating the CM doc, and neither `:e` nor a forced re-attach recovered because `applyReset`'s own full-doc replace hit the same throw. Only destroying the `EditorView` (`:MarkdownLivePreviewOff` then on) escaped. So this field is never mapped: it returns `Decoration.none` on any `docChanged` transaction and the next push rebuilds it. Folds are rare and large, so a one push-cycle drop on edit is unnoticeable. `applyReset` also clears both fields before its replace, as a belt-and-braces recovery path.
 
 ### Conceal, what is implemented
 
@@ -150,17 +154,17 @@ Known limits: multi line captures are skipped (a fenced code block's raw content
 
 `collect_folds` walks the padded viewport with `foldclosed` / `foldclosedend`, and for each closed fold emits `{ startRow, endRow, foldtextresult }` with the trailing fill run trimmed, then jumps past `foldclosedend`. The real fold bounds are used even when they extend past the padded range.
 
-The client renders each fold as one plain (non-block) `Decoration.replace` from the start of the first folded line to the `.to` of the last folded line, with a `FoldWidget` (`display: block` span) showing the fold text. The trailing newline is left in place so the next line flows normally. A replace may not nest, so any conceal run, highlight mark, or visual mark that falls inside a fold is dropped before the set is built; folds are therefore computed first in `applyDecor`.
+The client renders each fold as one plain (non-block) `Decoration.replace` from the start of the first folded line to the `.to` of the last folded line, with a `FoldWidget` (`display: block` span) showing the fold text, in the never-mapped `islandFoldField`. The trailing newline is left in place so the next line flows normally. A replace may not nest, so any conceal run, highlight mark, or visual mark that falls inside a fold is dropped from `islandDecorField` before its set is built; the fold spans are therefore computed first in `applyDecor`.
 
 `FoldWidget` is display only. Open a fold from Neovim (`zo`), and the next push drops the decoration.
 
-When the cursor is on a closed fold, Neovim reports it on the fold's first line, which is inside the replace range, so the cursor decoration would be swallowed and vanish. `cursorDeco` detects a `FoldWidget` replace covering the cursor position and instead renders a block cursor at the replace's left edge with `side: -1`. `islandDecorField` is defined before `nvimCursorField` so `cursorDeco` reads the current fold set within the same transaction that adds a fold.
+When the cursor is on a closed fold, Neovim reports it on the fold's first line, which is inside the replace range, so the cursor decoration would be swallowed and vanish. `cursorDeco` checks `islandFoldField` for a fold covering the cursor position and instead renders a block cursor at the fold's left edge with `side: -1`. `islandFoldField` is defined before `nvimCursorField` so `cursorDeco` reads the current fold set within the same transaction that adds a fold.
 
 Trigger gap: Neovim has no fold autocmd. `zR` / `zM` / `zi` are caught by `OptionSet foldlevel,foldenable`; a `zc` that moves the cursor to the fold start is caught by `CursorMoved`; a bare `zo` with a stationary cursor is only caught by the `CursorHold` backstop (after `updatetime`) or the next cursor move or scroll.
 
 ## Files
 
-- `src/main.js`: `Island` class (`editableComp`, `gutterComp`, `applyCursor`, `onUpdate`, `onComposeEnd`, `scrollTo`, `applyGutter`, `applyDecor`), `nvimCursorField` and `islandDecorField`, `reconcileIslands`, `byteToCol`, the global `keydown` handler, the `md_decor` / `win_gutter` / `md_preview` listeners.
+- `src/main.js`: `Island` class (`editableComp`, `gutterComp`, `applyCursor`, `applyBufLines`, `onUpdate`, `onComposeEnd`, `scrollTo`, `applyGutter`, `applyDecor`), `nvimCursorField` / `islandDecorField` / `islandFoldField`, `reconcileIslands`, `byteToCol`, `hlClass` / `mergeHlDefs`, the global `keydown` handler, the `md_decor` / `win_gutter` / `md_preview` listeners.
 - `src-tauri/src/runtime/md_preview.lua`: the `w:gnv_md_preview` flag, the `:MarkdownLivePreview*` commands, the gutter option feed.
 - `src-tauri/src/runtime/md_decor.lua`: the display bridge feed.
 - `src-tauri/src/bridge.rs`: `BridgeEvent::MdPreview` / `WinGutter` / `MdDecor`, the `gnv_*` notify arms, `win_gutters`, `md_decor_refresh`, `island_snapshot`, the refcounted buffer attach.
