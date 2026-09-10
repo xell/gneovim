@@ -52,6 +52,17 @@ confirm_quit = true
 # unsaved. Default true.
 confirm_close = true
 
+# Where a file opened from outside (Open with, drag to the dock, file
+# association) lands. Default "window".
+#   "window"   -> a new gui-window with its own Neovim
+#   "tab"      -> a new gui-tab (a macOS merged tab) with its own Neovim
+#   "nvim-tab" -> a new Neovim tabpage in the last-focused gui-window,
+#                 reusing its Neovim (no new window or process)
+# "nvim-tab" falls back to "window" when no gui-window is ready to receive the
+# file. Multiple files open as that many windows / gui-tabs, or as that many
+# Neovim tabpages in the one window.
+open_files_in = "window"
+
 [markdown]
 # Whether a filetype=markdown window renders as a CodeMirror live-preview
 # island by default. Overridable per window at runtime (see below). Default

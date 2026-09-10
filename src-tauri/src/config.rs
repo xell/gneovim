@@ -46,6 +46,16 @@ pub struct Window {
     /// Confirm before Cmd+W closes a gui-window or gui-tab, even with nothing
     /// unsaved. Default true.
     pub confirm_close: bool,
+
+    /// Where a file opened from outside (Open with, drag to the dock, file
+    /// association) lands. One of:
+    ///   "window"   -> a new gui-window with its own Neovim (the default)
+    ///   "tab"      -> a new gui-tab (a macOS merged tab) with its own Neovim
+    ///   "nvim-tab" -> a new Neovim tabpage in the last-focused gui-window,
+    ///                 reusing its Neovim; no new window or process
+    /// "nvim-tab" falls back to "window" when there is no gui-window to receive
+    /// the file. An unrecognised value logs a warning and uses "window".
+    pub open_files_in: Option<String>,
 }
 
 impl Default for Window {
@@ -53,6 +63,36 @@ impl Default for Window {
         Self {
             confirm_quit: true,
             confirm_close: true,
+            open_files_in: None,
+        }
+    }
+}
+
+/// Resolved value of `[window] open_files_in`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenTarget {
+    /// A new gui-window, its own Neovim.
+    Window,
+    /// A new gui-tab (macOS merged tab), its own Neovim.
+    Tab,
+    /// A new Neovim tabpage in the last-focused gui-window, reusing its Neovim.
+    NvimTab,
+}
+
+impl Window {
+    /// `open_files_in` mapped to an [`OpenTarget`]; unset or unknown -> `Window`.
+    pub fn open_target(&self) -> OpenTarget {
+        match self.open_files_in.as_deref().map(str::trim) {
+            None | Some("") | Some("window") => OpenTarget::Window,
+            Some("tab") => OpenTarget::Tab,
+            Some("nvim-tab") | Some("nvim_tab") => OpenTarget::NvimTab,
+            Some(other) => {
+                log::warn!(
+                    "config: [window] open_files_in = {other:?} is not one of \
+                     \"window\" / \"tab\" / \"nvim-tab\"; using \"window\""
+                );
+                OpenTarget::Window
+            }
         }
     }
 }
@@ -243,6 +283,22 @@ mod tests {
         assert!(user.shada_args().is_empty());
         let custom = Neovim { path: None, config: Some("~/x/init.lua".into()), args: None };
         assert!(custom.shada_args().is_empty());
+    }
+
+    #[test]
+    fn open_target_from_config() {
+        assert_eq!(Window::default().open_target(), OpenTarget::Window);
+        let mk = |s: &str| {
+            toml::from_str::<Config>(&format!("[window]\nopen_files_in = \"{s}\"\n"))
+                .unwrap()
+                .window
+                .open_target()
+        };
+        assert_eq!(mk("window"), OpenTarget::Window);
+        assert_eq!(mk("tab"), OpenTarget::Tab);
+        assert_eq!(mk("nvim-tab"), OpenTarget::NvimTab);
+        assert_eq!(mk("nvim_tab"), OpenTarget::NvimTab);
+        assert_eq!(mk("bogus"), OpenTarget::Window);
     }
 
     #[test]

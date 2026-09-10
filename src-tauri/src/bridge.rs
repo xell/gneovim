@@ -1147,6 +1147,31 @@ impl Bridge {
             .map_err(err)
     }
 
+    /// Open each path as its own Neovim tabpage (`[window] open_files_in =
+    /// "nvim-tab"`). The first path reuses the current tab when it is still a
+    /// pristine `[No Name]` scratch (a just-launched window), otherwise every
+    /// path gets a fresh `:tabedit`.
+    pub async fn open_files_as_tabs(&self, paths: &[String]) -> Result<(), String> {
+        const LUA: &str = r#"
+            local paths = ...
+            for i, p in ipairs(paths) do
+              local buf = vim.api.nvim_get_current_buf()
+              local reuse = i == 1
+                and vim.api.nvim_buf_get_name(buf) == ''
+                and not vim.bo[buf].modified
+                and #vim.api.nvim_list_tabpages() == 1
+                and #vim.api.nvim_tabpage_list_wins(0) == 1
+              vim.cmd({ cmd = reuse and 'edit' or 'tabedit', args = { p } })
+            end
+        "#;
+        let arr: Vec<Value> = paths.iter().map(|s| Value::from(s.as_str())).collect();
+        self.nvim
+            .exec_lua(LUA, vec![Value::Array(arr)])
+            .await
+            .map(|_| ())
+            .map_err(err)
+    }
+
     /// Short descriptions of every buffer that would make `:qall` fail without a
     /// bang: a modified file buffer (`E37`) or a `:terminal` with a live job
     /// (`E947`). Empty result means this nvim can quit cleanly.

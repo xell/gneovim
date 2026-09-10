@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use bridge::{Bridge, BridgeEvent, OpenSpec, Region, ResetPayload};
+use config::OpenTarget;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::{
     async_runtime, AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
@@ -817,9 +818,41 @@ where
     });
 }
 
+/// The last-focused gui-window, or any gui-window, or none.
+fn recipient_window(app: &AppHandle) -> Option<String> {
+    let last = app.state::<AppState>().last_focused.lock().unwrap().clone();
+    last.filter(|l| app.get_webview_window(l).is_some())
+        .or_else(|| app.webview_windows().into_keys().next())
+}
+
+/// Open files from outside (Open with, drag to dock, file association), per
+/// `[window] open_files_in`.
 async fn open_paths(app: AppHandle, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+
+    // "nvim-tab": load every file as a Neovim tabpage in an existing
+    // gui-window's Neovim. Fall through to a fresh window if none is ready.
+    if crate::config::get().window.open_target() == OpenTarget::NvimTab {
+        if let Some(label) = recipient_window(&app) {
+            if let Ok(b) = bridge_for(&app, &label).await {
+                if b.open_files_as_tabs(&paths).await.is_ok() {
+                    if let Some(w) = app.get_webview_window(&label) {
+                        let _ = w.unminimize();
+                        let _ = w.set_focus();
+                    }
+                    return;
+                }
+            }
+        }
+        log::warn!("open_files_in = nvim-tab: no ready gui-window, opening a new one");
+    }
+
+    // "tab" -> each file a new gui-tab; "window" (default) -> each a new window.
+    let as_tab = crate::config::get().window.open_target() == OpenTarget::Tab;
     for path in paths {
-        let Some(label) = spawn_window(&app, false, OpenSpec::default()) else {
+        let Some(label) = spawn_window(&app, as_tab, OpenSpec::default()) else {
             continue;
         };
         if let Ok(b) = bridge_for(&app, &label).await {
