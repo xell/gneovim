@@ -753,8 +753,27 @@ const setIslandFolds = StateEffect.define();
 const islandFoldField = StateField.define({
   create: () => Decoration.none,
   update(v, tr) {
-    if (tr.docChanged) return Decoration.none;
     for (const e of tr.effects) if (e.is(setIslandFolds)) v = e.value;
+    if (tr.docChanged && v.size) {
+      // Map per position, never RangeSet.map: mapping a multi-line replace set
+      // that way corrupted it into a state where every later map threw and the
+      // island froze for good. Here each fold's ends are mapped independently
+      // (mapPos never throws); a fold whose content was entirely deleted
+      // collapses to zero length and is dropped. Keeps folds collapsed through
+      // an edit so the layout does not jump on every keystroke.
+      const kept = [];
+      v.between(0, tr.startState.doc.length, (from, to, deco) => {
+        const nf = tr.changes.mapPos(from, 1);
+        const nt = tr.changes.mapPos(to, -1);
+        if (nf < nt) kept.push(deco.range(nf, nt));
+      });
+      try {
+        v = Decoration.set(kept, true);
+      } catch (e) {
+        jlog("island fold remap failed: " + e);
+        v = Decoration.none;
+      }
+    }
     return v;
   },
   provide: (f) => EditorView.decorations.from(f),
