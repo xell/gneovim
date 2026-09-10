@@ -396,14 +396,18 @@ function rebuildHlStyle() {
   hlStyleEl.textContent = css;
 }
 function mergeHlDefs(defs) {
-  let changed = false;
+  // a group's attrs only change on ColorScheme, which clears hlDefs and the
+  // <style>; so only a genuinely new group needs a rebuild. Comparing attrs
+  // every push (and regenerating the whole <style>) forced a document-wide
+  // style recalc on every keystroke.
+  let added = false;
   for (const [group, a] of Object.entries(defs)) {
-    if (JSON.stringify(hlDefs.get(group)) !== JSON.stringify(a)) {
+    if (!hlDefs.has(group)) {
       hlDefs.set(group, a);
-      changed = true;
+      added = true;
     }
   }
-  if (changed) rebuildHlStyle();
+  if (added) rebuildHlStyle();
 }
 
 function gw(id) {
@@ -696,7 +700,8 @@ class ConcealWidget extends WidgetType {
   }
 }
 // A closed Neovim fold: one placeholder line (foldtextresult) replacing the
-// whole folded range. Display only; open the fold from Neovim (`zo`).
+// whole folded range. Display only; open the fold from Neovim (`zo`). A span,
+// not a div: this is an inline (non-block) replace widget, CSS makes it a line.
 class FoldWidget extends WidgetType {
   constructor(text) {
     super();
@@ -706,10 +711,10 @@ class FoldWidget extends WidgetType {
     return o.text === this.text;
   }
   toDOM() {
-    const d = document.createElement("div");
-    d.className = "cm-nvim-fold";
-    d.textContent = this.text || "···";
-    return d;
+    const s = document.createElement("span");
+    s.className = "cm-nvim-fold";
+    s.textContent = this.text || "···";
+    return s;
   }
 }
 function cursorDeco(state, pos) {
@@ -742,18 +747,19 @@ const nvimCursorField = StateField.define({
 });
 
 // Display-bridge decorations (conceal, visual range, folds, highlights). A
-// field, not a compartment, because block fold replaces want the
-// StateField.provide path. The set is NOT mapped through edits: a block replace
-// mapped across a change that shifts its line range misaligns and CodeMirror
-// then throws inside the same dispatch that applies the buffer echo, freezing
-// the island. Instead the whole set is dropped on any doc change and the next
-// md_decor push (~20ms) rebuilds it against the new buffer.
+// field, not a compartment, because a fold replace spans line breaks and needs
+// the StateField.provide path. The set IS mapped through edits so it stays in
+// place until the next md_decor push (~20ms after TextChanged) refreshes it;
+// dropping it on every keystroke made the concealed markers flash and forced a
+// full re-render. Folds are plain (non-block) inline replaces, the same kind
+// CodeMirror's own code folding maps through changes safely; an earlier
+// `block: true` version misaligned when mapped and froze the island.
 const VISUAL_MARK = Decoration.mark({ class: "cm-nvim-visual" });
 const setIslandDecor = StateEffect.define();
 const islandDecorField = StateField.define({
   create: () => Decoration.none,
   update(v, tr) {
-    if (tr.docChanged) return Decoration.none;
+    v = v.map(tr.changes);
     for (const e of tr.effects) if (e.is(setIslandDecor)) v = e.value;
     return v;
   },
@@ -929,17 +935,16 @@ class Island {
     const d = this.decor;
     const doc = this.view.state.doc;
 
-    // folds first: a closed fold is a block replace over whole lines. Anything
-    // inside it (conceal, visual) is dropped, since a replace may not nest.
+    // folds first: a closed fold is one inline replace over the whole range.
+    // Anything inside it (conceal, visual, hl) is dropped, a replace may not
+    // nest. End at the last folded line's `.to` (before its newline) so the
+    // range stays within the buffer and the trailing newline keeps the next
+    // line flowing normally.
     const foldSpans = [];
     for (const [sr, er, text] of d?.folds ?? []) {
       if (sr < 0 || sr >= doc.lines) continue;
-      const lastFolded = Math.min(er + 1, doc.lines); // 1-based
       const from = doc.line(sr + 1).from;
-      // end at the start of the line after the fold, so the block replace
-      // consumes the folded lines' newlines and leaves no blank gap.
-      const to =
-        lastFolded < doc.lines ? doc.line(lastFolded + 1).from : doc.length;
+      const to = doc.line(Math.min(er + 1, doc.lines)).to;
       if (to > from) foldSpans.push({ from, to, text });
     }
     const inFold = (a, b) =>
@@ -966,10 +971,7 @@ class Island {
     }
     for (const f of foldSpans) {
       ranges.push(
-        Decoration.replace({
-          widget: new FoldWidget(f.text),
-          block: true,
-        }).range(f.from, f.to),
+        Decoration.replace({ widget: new FoldWidget(f.text) }).range(f.from, f.to),
       );
     }
     // highlights: one mark per treesitter capture / hl_group extmark run. They
@@ -987,9 +989,14 @@ class Island {
     }
     // most debounced payloads on a plain buffer carry nothing; skip the no-op
     if (!ranges.length && !this.view.state.field(islandDecorField).size) return;
-    this.view.dispatch({
-      effects: setIslandDecor.of(Decoration.set(ranges, true)),
-    });
+    let set;
+    try {
+      set = Decoration.set(ranges, true);
+    } catch (e) {
+      jlog("island decor build failed: " + e);
+      return;
+    }
+    this.view.dispatch({ effects: setIslandDecor.of(set) });
   }
   destroy() {
     if (this._gutterRaf) cancelAnimationFrame(this._gutterRaf);

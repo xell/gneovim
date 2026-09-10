@@ -120,8 +120,9 @@ body {
 .island .cm-nvim-visual {
   background: var(--visual-bg, color-mix(in srgb, var(--fg) 17%, transparent));
 }
-/* a closed fold, collapsed to one placeholder line */
+/* a closed fold, collapsed to one placeholder line (inline replace widget) */
 .island .cm-nvim-fold {
+  display: block;
   font-family: var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace);
   font-size: 0.85em;
   color: color-mix(in srgb, var(--fg) 55%, transparent);

@@ -99,7 +99,7 @@ Sending a JSON string keeps every later slice from needing a new Rust type: exte
 
 Decorations are view only, so nothing here reaches `nvim_edit`; `onUpdate` bails on a non `docChanged` transaction.
 
-`islandDecorField` holds the set but does **not** map it through edits. A `block: true` fold replace mapped across a change that shifts its line range misaligns, and CodeMirror throws inside the same dispatch that applies the buffer echo, which freezes the island (`dd` deletes the line in Neovim but the CM doc never updates, then the re-attach in `applyBufLines`'s catch throws the same way). So the field returns `Decoration.none` on any `docChanged` transaction, and the next push (~20ms after the `TextChanged`) rebuilds everything against the new buffer. Fast typing therefore drops decorations for a debounce interval, same as the conceal staleness note.
+`islandDecorField` maps its set through edits (`v.map(tr.changes)`) so decorations stay in place between the ~20ms pushes. Folds must be plain inline replaces for this: an earlier `block: true` fold replace, mapped across a change that shifted its line range, misaligned and CodeMirror threw inside the same dispatch that applies the buffer echo, freezing the island (`dd` did not update the CM doc, then the re-attach in `applyBufLines`'s catch threw the same way). Not mapping at all was worse: dropping the set on every keystroke flashed the concealed markers and forced a full re-render. Plain inline replaces are the kind CodeMirror's own code folding maps safely, so the set maps cleanly and `applyDecor` wraps the rebuild in a `try` as a backstop.
 
 ### Conceal, what is implemented
 
@@ -150,7 +150,7 @@ Known limits: multi line captures are skipped (a fenced code block's raw content
 
 `collect_folds` walks the padded viewport with `foldclosed` / `foldclosedend`, and for each closed fold emits `{ startRow, endRow, foldtextresult }` with the trailing fill run trimmed, then jumps past `foldclosedend`. The real fold bounds are used even when they extend past the padded range.
 
-The client renders each fold as a `block: true` `Decoration.replace` from the start of the first folded line to the start of the line after the fold (consuming the newlines, so no blank gap), with a `FoldWidget` showing the fold text. A replace may not nest, so any conceal run or visual mark that falls inside a fold is dropped before the set is built. This is why folds are computed first in `applyDecor`.
+The client renders each fold as one plain (non-block) `Decoration.replace` from the start of the first folded line to the `.to` of the last folded line, with a `FoldWidget` (`display: block` span) showing the fold text. The trailing newline is left in place so the next line flows normally. A replace may not nest, so any conceal run, highlight mark, or visual mark that falls inside a fold is dropped before the set is built; folds are therefore computed first in `applyDecor`.
 
 `FoldWidget` is display only. Open a fold from Neovim (`zo`), and the next push drops the decoration.
 
