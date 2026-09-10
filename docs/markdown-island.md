@@ -99,6 +99,8 @@ Sending a JSON string keeps every later slice from needing a new Rust type: exte
 
 Decorations are view only, so nothing here reaches `nvim_edit`; `onUpdate` bails on a non `docChanged` transaction.
 
+`islandDecorField` holds the set but does **not** map it through edits. A `block: true` fold replace mapped across a change that shifts its line range misaligns, and CodeMirror throws inside the same dispatch that applies the buffer echo, which freezes the island (`dd` deletes the line in Neovim but the CM doc never updates, then the re-attach in `applyBufLines`'s catch throws the same way). So the field returns `Decoration.none` on any `docChanged` transaction, and the next push (~20ms after the `TextChanged`) rebuilds everything against the new buffer. Fast typing therefore drops decorations for a debounce interval, same as the conceal staleness note.
+
 ### Conceal, what is implemented
 
 `conceallevel` 0 returns nothing.

@@ -741,16 +741,19 @@ const nvimCursorField = StateField.define({
   provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
 });
 
-// Display-bridge decorations (conceal + visual range now; highlight / fold
-// later). A field, not a compartment: replace decorations affect layout and
-// want the StateField.provide path, and mapping through edits keeps them
-// roughly right between the ~20ms debounced payloads.
+// Display-bridge decorations (conceal, visual range, folds, highlights). A
+// field, not a compartment, because block fold replaces want the
+// StateField.provide path. The set is NOT mapped through edits: a block replace
+// mapped across a change that shifts its line range misaligns and CodeMirror
+// then throws inside the same dispatch that applies the buffer echo, freezing
+// the island. Instead the whole set is dropped on any doc change and the next
+// md_decor push (~20ms) rebuilds it against the new buffer.
 const VISUAL_MARK = Decoration.mark({ class: "cm-nvim-visual" });
 const setIslandDecor = StateEffect.define();
 const islandDecorField = StateField.define({
   create: () => Decoration.none,
   update(v, tr) {
-    v = v.map(tr.changes);
+    if (tr.docChanged) return Decoration.none;
     for (const e of tr.effects) if (e.is(setIslandDecor)) v = e.value;
     return v;
   },
