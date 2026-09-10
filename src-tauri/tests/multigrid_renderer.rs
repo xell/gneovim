@@ -23,7 +23,7 @@ async fn multigrid_renderer_flow() {
     .unwrap();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<BridgeEvent>();
-    let (b, _child) = bridge::connect(tx).await.expect("connect");
+    let (b, _child) = bridge::connect(tx, Default::default()).await.expect("connect");
     b.ui_start(160, 48).await.expect("ui_start");
     b.input(&format!(":edit {}\r", file.display())).await.unwrap();
     b.input(":vsplit\r").await.unwrap();

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use bridge::{Bridge, BridgeEvent, Region, ResetPayload};
+use bridge::{Bridge, BridgeEvent, OpenSpec, Region, ResetPayload};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::{
     async_runtime, AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
@@ -370,8 +370,9 @@ fn guard_exit(app: &AppHandle) {
 }
 
 /// Create a gui-window with its own nvim. `as_tab` adds it to the focused
-/// window's tab group (macOS); otherwise it is a standalone window.
-fn spawn_window(app: &AppHandle, as_tab: bool) -> Option<String> {
+/// window's tab group (macOS); otherwise it is a standalone window. `open`
+/// carries any files / text the new nvim should load (`:OpenInNewGneovimTab`).
+fn spawn_window(app: &AppHandle, as_tab: bool, open: OpenSpec) -> Option<String> {
     let _ = as_tab;
     #[cfg(target_os = "macos")]
     let parent: Option<tauri::WebviewWindow> = if as_tab {
@@ -427,12 +428,14 @@ fn spawn_window(app: &AppHandle, as_tab: bool) -> Option<String> {
         }
     }
 
-    spawn_bridge(app.clone(), label.clone());
+    spawn_bridge(app.clone(), label.clone(), open);
     Some(label)
 }
 
 /// Connect a fresh nvim for `label` and stream its events to that window alone.
-fn spawn_bridge(app: AppHandle, label: String) {
+/// `open` is forwarded to [`bridge::connect`] so the new nvim boots with the
+/// requested files / text loaded.
+fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec) {
     async_runtime::spawn(async move {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BridgeEvent>();
 
@@ -482,6 +485,15 @@ fn spawn_bridge(app: AppHandle, label: String) {
                         &ev("md_decor"),
                         serde_json::json!({ "win": win, "json": json }),
                     ),
+                    // Spawn a new gui-tab (its own nvim) loaded with the
+                    // requested files / carried-over text. Window creation +
+                    // macOS tab grouping must run on the main thread.
+                    BridgeEvent::OpenNewTab { paths, content } => {
+                        let tab_app = emit_app.clone();
+                        emit_app.run_on_main_thread(move || {
+                            spawn_window(&tab_app, true, OpenSpec { paths, content });
+                        })
+                    }
                     BridgeEvent::Gone(reason) => {
                         log::info!("{emit_label}: {reason}");
                         // :q / :qa is the common case; drop the gui-window too.
@@ -499,7 +511,7 @@ fn spawn_bridge(app: AppHandle, label: String) {
             }
         });
 
-        match bridge::connect(tx).await {
+        match bridge::connect(tx, open).await {
             Ok((bridge, child)) => {
                 app.state::<AppState>().windows.lock().unwrap().insert(
                     label.clone(),
@@ -683,13 +695,13 @@ async fn nvim_md_decor(app: AppHandle, window: tauri::Window) -> Result<(), Stri
 
 #[tauri::command]
 async fn new_window(app: AppHandle) -> Result<(), String> {
-    spawn_window(&app, false);
+    spawn_window(&app, false, OpenSpec::default());
     Ok(())
 }
 
 #[tauri::command]
 async fn new_tab(app: AppHandle) -> Result<(), String> {
-    spawn_window(&app, true);
+    spawn_window(&app, true, OpenSpec::default());
     Ok(())
 }
 
@@ -797,7 +809,7 @@ where
 
 async fn open_paths(app: AppHandle, paths: Vec<String>) {
     for path in paths {
-        let Some(label) = spawn_window(&app, false) else {
+        let Some(label) = spawn_window(&app, false, OpenSpec::default()) else {
             continue;
         };
         if let Ok(b) = bridge_for(&app, &label).await {
@@ -840,10 +852,10 @@ pub fn run() {
         .menu(|handle| build_menu(handle))
         .on_menu_event(|app, event| match event.id().as_ref() {
             "gnv:new_window" => {
-                spawn_window(app, false);
+                spawn_window(app, false, OpenSpec::default());
             }
             "gnv:new_tab" => {
-                spawn_window(app, true);
+                spawn_window(app, true, OpenSpec::default());
             }
             "gnv:copy" => focused_bridge(app, |b| async move { b.clip_yank(false).await }),
             "gnv:cut" => focused_bridge(app, |b| async move { b.clip_yank(true).await }),
@@ -908,7 +920,7 @@ pub fn run() {
             _ => {}
         })
         .setup(|app| {
-            spawn_bridge(app.handle().clone(), "main".to_string());
+            spawn_bridge(app.handle().clone(), "main".to_string(), OpenSpec::default());
             #[cfg(target_os = "macos")]
             if let Some(win) = app.get_webview_window("main") {
                 apply_corner_radius(&win);

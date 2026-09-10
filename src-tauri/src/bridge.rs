@@ -104,6 +104,14 @@ pub enum BridgeEvent {
     /// highlights, folds, visual range later), as a JSON string.
     /// From `runtime/md_decor.lua`.
     MdDecor { win: i64, json: String },
+    /// `:OpenInNewGneovimTab` / `_G.OpenInNewGneovimTab()`: open a new gui-tab
+    /// with its own nvim. `paths` open one Neovim tabpage each; `content` (for a
+    /// `[No Name]` buffer being moved) seeds the initial buffer's lines.
+    /// From `runtime/open_in_new_tab.lua`.
+    OpenNewTab {
+        paths: Vec<String>,
+        content: Option<Vec<String>>,
+    },
     /// nvim's stdio closed (it exited or the connection dropped).
     Gone(String),
 }
@@ -116,6 +124,18 @@ pub struct Region {
     pub end_row: i64,
     pub end_col: i64,
     pub replacement: Vec<String>,
+}
+
+/// Files / text for a freshly spawned nvim to open. Threaded from the shell's
+/// "new gui-window" path (`spawn_window`) into [`connect`].
+#[derive(Default, Clone)]
+pub struct OpenSpec {
+    /// Paths to open, one Neovim tabpage each (`nvim -p`).
+    pub paths: Vec<String>,
+    /// Lines to seed the initial `[No Name]` buffer with (a moved unnamed
+    /// buffer, from `:OpenInNewGneovimTab` with no args). Mutually exclusive
+    /// with `paths` in practice.
+    pub content: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +390,33 @@ impl Handler for NvHandler {
                     .to_string();
                 let _ = self.shared.tx.send(BridgeEvent::MdDecor { win, json });
             }
+            // [{ paths = [..]?, content = [..]? }]
+            "gnv_open_new_tab" => {
+                let field = |k: &str| {
+                    args.first().and_then(Value::as_map).and_then(|m| {
+                        m.iter()
+                            .find(|(mk, _)| mk.as_str() == Some(k))
+                            .map(|(_, v)| v)
+                    })
+                };
+                let paths = field("paths")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let content = field("content").and_then(Value::as_array).map(|a| {
+                    a.iter()
+                        .map(|v| v.as_str().unwrap_or("").to_string())
+                        .collect()
+                });
+                let _ = self
+                    .shared
+                    .tx
+                    .send(BridgeEvent::OpenNewTab { paths, content });
+            }
             "redraw" => {
                 let mut batch = self.shared.grid_batch.lock().unwrap();
                 for group in &args {
@@ -606,7 +653,10 @@ pub struct Bridge {
 
 /// Spawn `nvim --embed` and wire the bridge. Returns the bridge plus the child
 /// handle so the caller can keep it alive (and kill it) with the app.
-pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child), String> {
+pub async fn connect(
+    tx: UnboundedSender<BridgeEvent>,
+    open: OpenSpec,
+) -> Result<(Bridge, Child), String> {
     let bin = find_nvim().await;
     let nv = &crate::config::get().neovim;
     let init_args = nv.init_args();
@@ -627,6 +677,10 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
         .args(&extra_args)
         .kill_on_drop(true);
     cmd.envs(extra_env.iter().map(|(k, v)| (k, v)));
+    // `:OpenInNewGneovimTab file1 file2` -> one tabpage per file in this nvim.
+    if !open.paths.is_empty() {
+        cmd.arg("-p").args(&open.paths);
+    }
 
     let shared = Shared {
         tx,
@@ -742,6 +796,34 @@ pub async fn connect(tx: UnboundedSender<BridgeEvent>) -> Result<(Bridge, Child)
         .await
     {
         log::warn!("md_decor.lua injection failed: {e}");
+    }
+
+    // `:OpenInNewGneovimTab` + `_G.OpenInNewGneovimTab()`: move / open buffers
+    // into a new gui-tab. Injected glue; its `gnv_open_new_tab` rpcnotify must
+    // match `handle_notify`'s arm and `BridgeEvent::OpenNewTab`.
+    if let Err(e) = nvim
+        .exec_lua(
+            include_str!("runtime/open_in_new_tab.lua"),
+            vec![chan.into()],
+        )
+        .await
+    {
+        log::warn!("open_in_new_tab.lua injection failed: {e}");
+    }
+
+    // A moved `[No Name]` buffer (`:OpenInNewGneovimTab` with no args, on a
+    // buffer with no file): seed the initial buffer with its carried-over text.
+    if let Some(lines) = open.content {
+        let arr = Value::Array(lines.into_iter().map(Value::from).collect());
+        if let Err(e) = nvim
+            .exec_lua(
+                "local l = ...\nvim.api.nvim_buf_set_lines(0, 0, -1, false, l)",
+                vec![arr],
+            )
+            .await
+        {
+            log::warn!("open_in_new_tab: seeding moved buffer failed: {e}");
+        }
     }
 
     // No buffer is attached here. Islands attach their window's buffer on
