@@ -62,8 +62,8 @@ It reads the results those produce with built-in calls and forwards them:
 
 - conceal: a union of three reads, because no single Neovim API reports conceal from every source. `synconcealed(lnum, col)` walked over the viewport gives `:syntax` conceal. `vim.treesitter.query.get(lang, 'highlights')` iterated over the viewport, collecting captures whose `conceal` metadata is set, gives treesitter conceal (the base language tree and every injected one). `nvim_buf_get_extmarks(buf, -1, a, b, { details = true })` filtered to marks with a `conceal` field gives render-markdown style extmark conceal.
 - highlights: `nvim_buf_get_extmarks(buf, -1, a, b, { details = true })` plus `nvim_get_hl` (later slice)
+- visual range: `nvim_get_mode()` for the kind (charwise, linewise, blockwise, and the select-mode variants), `getpos("v")` and `getpos(".")` for the two ends. Only emitted when the island's window is the current window.
 - folds: `foldclosed` / `foldclosedend` / `foldtextresult` (later slice)
-- visual range: `mode()`, `getpos("v")`, `getpos(".")` (later slice)
 
 The treesitter read is the same `highlights.scm` query the treesitter highlighter itself runs; `md_decor.lua` reads its `conceal` metadata, it does not decide what to conceal. Change `foldexpr` or swap the markdown plugin and the island follows with no code change, because it only reads live state.
 
@@ -93,7 +93,7 @@ This one path covers both mount and live toggle on.
 
 ### Payload and coordinates
 
-`gnv_md_decor` carries `(win, json)` where `json` is `vim.json.encode` of `{ first, last, conceal: [ [row, startByte, endByte, text], ... ] }` in absolute buffer coordinates.
+`gnv_md_decor` carries `(win, json)` where `json` is `vim.json.encode` of `{ first, last, conceal: [ [row, startByte, endByte, text], ... ], visual: [ [row, startByte, endByte], ... ] }` in absolute buffer coordinates.
 Columns are byte offsets; the client converts to UTF-16 with `byteToCol` against its own copy of the line.
 Sending a JSON string keeps every later slice from needing a new Rust type: extend the Lua table, add a key handler in `Island.applyDecor`.
 
@@ -117,6 +117,20 @@ Known limits of this slice:
 - the padded rows outside Neovim's own viewport rely on `parser:parse({first,last})` having run; `md_decor.lua` calls it, but a brand new buffer can be one debounce behind on those rows.
 - the treesitter read iterates every highlight capture in the viewport per debounced push, and `synconcealed` walks every byte of every viewport line. Fine for prose; a pathological long minified line or a huge injected code block would be the worst case.
 - under fast typing a payload can be one debounce interval stale; the next `TextChanged` corrects it.
+
+### Visual range, what is implemented
+
+`collect_visual` runs only when the island's window is the current window and `nvim_get_mode()` is a visual or select mode.
+It normalises the `getpos("v")` and `getpos(".")` ends, then emits one `{ row, startByte, endByte }` run per line, clamped to the padded viewport:
+
+- charwise: the first line starts at the anchor column, the last line ends just past the character under the far end (`strpart` gives that character's byte length), inner lines are full width.
+- linewise: every line full width.
+- blockwise: the column band `[min, max]` on every line, right edge inclusive by the same `strpart` rule.
+
+The client renders each run as a `Decoration.mark` with class `cm-nvim-visual`, a neutral background wash, added to the same decoration set as conceal. Marks may overlap the conceal replaces (a hidden marker inside the selection) and each other, so no dedup is needed.
+Leaving visual mode fires `ModeChanged`, the next push carries an empty `visual`, and the wash clears.
+
+Known limits: the character-under-cursor byte width fix covers multibyte, but `selection=exclusive`, `virtualedit`, and ragged blockwise right edges are not modelled. The real `Visual` highlight colour is not resolved yet; the wash is a fixed tint until the highlight slice.
 
 ## Files
 

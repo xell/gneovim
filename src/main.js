@@ -666,10 +666,11 @@ const nvimCursorField = StateField.define({
   provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
 });
 
-// Display-bridge decorations (conceal now; highlight / fold / visual later).
-// A field, not a compartment: replace decorations affect layout and want the
-// StateField.provide path, and mapping through edits keeps them roughly right
-// between the ~20ms debounced payloads.
+// Display-bridge decorations (conceal + visual range now; highlight / fold
+// later). A field, not a compartment: replace decorations affect layout and
+// want the StateField.provide path, and mapping through edits keeps them
+// roughly right between the ~20ms debounced payloads.
+const VISUAL_MARK = Decoration.mark({ class: "cm-nvim-visual" });
 const setIslandDecor = StateEffect.define();
 const islandDecorField = StateField.define({
   create: () => Decoration.none,
@@ -825,32 +826,36 @@ class Island {
     });
   }
   // Display bridge (runtime/md_decor.lua). `d` is the parsed payload:
-  // { first, last, conceal: [ [row, startByte, endByte, text], ... ] } in
-  // absolute buffer coordinates. Later slices add highlight / fold / visual
-  // keys. Decorations are view-only, so nothing here reaches nvim_edit.
+  // { first, last, conceal: [[row, startByte, endByte, text], ...],
+  //   visual: [[row, startByte, endByte], ...] } in absolute buffer
+  // coordinates. Later slices add highlight / fold keys. Decorations are
+  // view-only, so nothing here reaches nvim_edit.
   setDecor(d) {
     this.decor = d;
     this.applyDecor();
   }
+  // byte range [sc, ec) on buffer row `row` -> CM [from, to), or null.
+  _range(row, sc, ec) {
+    const doc = this.view.state.doc;
+    if (row < 0 || row >= doc.lines) return null;
+    const line = doc.line(row + 1);
+    const from = line.from + byteToCol(line.text, sc);
+    const to = Math.min(line.from + byteToCol(line.text, ec), line.to);
+    return to > from ? { from, to } : null;
+  }
   applyDecor() {
     const d = this.decor;
-    const doc = this.view.state.doc;
+    // conceal: replace decorations, which may not overlap each other.
     const spans = [];
     for (const [row, sc, ec, text] of d?.conceal ?? []) {
-      if (row < 0 || row >= doc.lines) continue;
-      const line = doc.line(row + 1);
-      const from = line.from + byteToCol(line.text, sc);
-      const to = Math.min(line.from + byteToCol(line.text, ec), line.to);
-      if (to <= from) continue;
-      spans.push({ from, to, text });
+      const r = this._range(row, sc, ec);
+      if (r) spans.push({ ...r, text });
     }
-    // replace decorations may not overlap; sort and drop any that do (rare, two
-    // plugins concealing the same run). The payload is small.
     spans.sort((a, b) => a.from - b.from || a.to - b.to);
     const ranges = [];
     let end = -1;
     for (const s of spans) {
-      if (s.from < end) continue;
+      if (s.from < end) continue; // drop an overlap (two sources, same run)
       end = s.to;
       ranges.push(
         (s.text
@@ -859,9 +864,16 @@ class Island {
         ).range(s.from, s.to),
       );
     }
+    // visual/select range: a background mark, may overlap anything.
+    for (const [row, sc, ec] of d?.visual ?? []) {
+      const r = this._range(row, sc, ec);
+      if (r) ranges.push(VISUAL_MARK.range(r.from, r.to));
+    }
     // most debounced payloads on a plain buffer carry nothing; skip the no-op
     if (!ranges.length && !this.view.state.field(islandDecorField).size) return;
-    this.view.dispatch({ effects: setIslandDecor.of(Decoration.set(ranges)) });
+    this.view.dispatch({
+      effects: setIslandDecor.of(Decoration.set(ranges, true)),
+    });
   }
   destroy() {
     if (this._gutterRaf) cancelAnimationFrame(this._gutterRaf);

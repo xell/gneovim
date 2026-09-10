@@ -150,6 +150,54 @@ local function collect_conceal(win, buf, first, last)
   return out
 end
 
+-- The visual / select range for `win`, as { {row, start_byte, end_byte}, ... }
+-- per line, clamped to the padded viewport. Only meaningful when `win` is the
+-- current window and it is in a visual or select mode.
+local function collect_visual(win, first, last)
+  if win ~= vim.api.nvim_get_current_win() then
+    return {}
+  end
+  local mc = vim.api.nvim_get_mode().mode:sub(1, 1)
+  local linewise = mc == 'V' or mc == 'S'
+  local blockwise = mc == '\22' or mc == '\19'
+  if not (linewise or blockwise or mc == 'v' or mc == 's') then
+    return {}
+  end
+
+  local a, b = vim.fn.getpos('v'), vim.fn.getpos('.') -- {bufnum, lnum, col, off}
+  local sl, sc, el, ec = a[2], a[3], b[2], b[3]
+  if sl > el or (sl == el and sc > ec) then
+    sl, sc, el, ec = el, ec, sl, sc
+  end
+
+  local lo = math.max(sl - 1, first) -- 0-based rows
+  local hi = math.min(el - 1, last)
+  if hi < lo then
+    return {}
+  end
+  local lines = vim.api.nvim_buf_get_lines(0, lo, hi + 1, false)
+  local lb, rb = math.min(sc, ec), math.max(sc, ec)
+  local runs = {}
+  for i, line in ipairs(lines) do
+    local row = lo + i - 1
+    local s0, e0
+    if linewise then
+      s0, e0 = 0, #line
+    elseif blockwise then
+      s0, e0 = lb - 1, rb - 1 + #vim.fn.strpart(line, rb - 1, 1, true)
+    else
+      s0 = (row == sl - 1) and (sc - 1) or 0
+      e0 = (row == el - 1) and (ec - 1 + #vim.fn.strpart(line, ec - 1, 1, true)) or #line
+    end
+    s0 = math.max(s0, 0)
+    e0 = math.min(e0, #line)
+    if e0 > s0 then
+      runs[#runs + 1] = { row, s0, e0 }
+    end
+  end
+  return runs
+end
+
 local function push(win)
   local buf = vim.api.nvim_win_get_buf(win)
   local info = vim.fn.getwininfo(win)[1]
@@ -163,6 +211,7 @@ local function push(win)
     first = first,
     last = last,
     conceal = collect_conceal(win, buf, first, last),
+    visual = collect_visual(win, first, last),
   }
   pcall(vim.rpcnotify, chan, 'gnv_md_decor', win, vim.json.encode(payload))
 end
