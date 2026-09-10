@@ -118,7 +118,7 @@ body {
 /* Neovim's visual / select range, mirrored from the display bridge. Neutral
    wash until the highlight slice can resolve the real Visual group colour. */
 .island .cm-nvim-visual {
-  background: color-mix(in srgb, var(--fg) 17%, transparent);
+  background: var(--visual-bg, color-mix(in srgb, var(--fg) 17%, transparent));
 }
 /* a closed fold, collapsed to one placeholder line */
 .island .cm-nvim-fold {

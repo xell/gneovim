@@ -348,6 +348,64 @@ const winGutter = new Map();
 let livePreviewDefault = true; // from gnv_config [markdown] live_preview_default
 let modeName_ = "n";
 
+// ---------------------------------------------------------------------------
+// island highlight groups: Neovim resolves every treesitter capture / hl_group
+// to concrete attrs (md_decor.lua `hl.defs`); we turn each into one CSS rule in
+// a shared <style>, and mark the runs with the matching class. Names -> a short
+// stable class, so `@markup.strong.markdown_inline` does not go in the DOM.
+// ---------------------------------------------------------------------------
+const hlClassBy = new Map(); // group name -> "cm-h-<n>"
+const hlDefs = new Map(); // group name -> attrs (accumulated across payloads)
+let hlStyleEl = null;
+function hlClass(group) {
+  let c = hlClassBy.get(group);
+  if (!c) {
+    c = "cm-h-" + hlClassBy.size;
+    hlClassBy.set(group, c);
+  }
+  return c;
+}
+function rebuildHlStyle() {
+  let css = "";
+  for (const [group, a] of hlDefs) {
+    let fg = a.fg;
+    let bg = a.bg;
+    if (a.reverse) [fg, bg] = [bg || "var(--bg)", fg || "var(--fg)"];
+    // fg == bg is deliberate camouflage (diagnostic underline groups): drop
+    // both so only the squiggle shows, matching the grid renderer's hlCss.
+    if (fg && fg === bg) fg = bg = null;
+    const p = [];
+    if (fg) p.push(`color:${fg}`);
+    if (bg) p.push(`background-color:${bg}`);
+    if (a.bold) p.push("font-weight:700");
+    if (a.italic) p.push("font-style:italic");
+    const dec = [];
+    if (a.underline) dec.push("underline");
+    if (a.undercurl) dec.push("underline wavy");
+    if (a.strikethrough) dec.push("line-through");
+    if (dec.length) {
+      p.push(`text-decoration:${dec.join(" ")}`);
+      if (a.sp) p.push(`text-decoration-color:${a.sp}`);
+    }
+    if (p.length) css += `.island .${hlClass(group)}{${p.join(";")}}\n`;
+  }
+  if (!hlStyleEl) {
+    hlStyleEl = document.createElement("style");
+    document.head.append(hlStyleEl);
+  }
+  hlStyleEl.textContent = css;
+}
+function mergeHlDefs(defs) {
+  let changed = false;
+  for (const [group, a] of Object.entries(defs)) {
+    if (JSON.stringify(hlDefs.get(group)) !== JSON.stringify(a)) {
+      hlDefs.set(group, a);
+      changed = true;
+    }
+  }
+  if (changed) rebuildHlStyle();
+}
+
 function gw(id) {
   let g = grids.get(id);
   if (!g) {
@@ -843,12 +901,16 @@ class Island {
     });
   }
   // Display bridge (runtime/md_decor.lua). `d` is the parsed payload:
-  // { first, last, conceal: [[row, startByte, endByte, text], ...],
-  //   visual: [[row, startByte, endByte], ...],
-  //   folds:  [[startRow, endRow, text], ...] } in absolute buffer
-  // coordinates. Decorations are view-only, so nothing here reaches nvim_edit.
+  // { first, last, conceal: [[row, sByte, eByte, text], ...],
+  //   visual: [[row, sByte, eByte], ...], folds: [[sRow, eRow, text], ...],
+  //   hl: { runs: [[row, sByte, eByte, group], ...], defs: {...} },
+  //   visual_hl } in absolute buffer coordinates. Decorations are view-only,
+  //   so nothing here reaches nvim_edit. `hl.defs` is merged globally by the
+  //   listener; this only consumes `hl.runs`.
   setDecor(d) {
     this.decor = d;
+    if (d?.visual_hl) this.el.style.setProperty("--visual-bg", d.visual_hl);
+    else this.el.style.removeProperty("--visual-bg");
     this.applyDecor();
   }
   // byte range [sc, ec) on buffer row `row` -> CM [from, to), or null.
@@ -906,6 +968,14 @@ class Island {
           block: true,
         }).range(f.from, f.to),
       );
+    }
+    // highlights: one mark per treesitter capture / hl_group extmark run. They
+    // overlap freely; CM nests the spans and CSS resolves, like a browser.
+    for (const [row, sc, ec, group] of d?.hl?.runs ?? []) {
+      const r = this._range(row, sc, ec);
+      if (r && !inFold(r.from, r.to)) {
+        ranges.push(Decoration.mark({ class: hlClass(group) }).range(r.from, r.to));
+      }
     }
     // visual/select range: a background mark, may overlap anything.
     for (const [row, sc, ec] of d?.visual ?? []) {
@@ -1209,6 +1279,10 @@ function renderGridOps(ops) {
         // every cell's colour may have changed: rebuild all rows of every grid
         for (const g of grids.values()) g.fullDirty = true;
         dirty = new Set(grids.keys());
+        // island highlight groups are stale too; md_decor.lua re-resolves and
+        // re-pushes on ColorScheme, drop what we have so the merge takes.
+        hlDefs.clear();
+        if (hlStyleEl) hlStyleEl.textContent = "";
         break;
       case "hl":
         hlAttrs.set(o.id, o.attr || {});
@@ -1386,8 +1460,10 @@ addEventListener("error", (e) => {
       islands.get(e.payload.win)?.setGutter(e.payload);
     }),
     listen(ev("md_decor"), (e) => {
+      const d = JSON.parse(e.payload.json);
+      if (d.hl?.defs) mergeHlDefs(d.hl.defs);
       const isl = islands.get(e.payload.win);
-      if (isl) isl.setDecor(JSON.parse(e.payload.json));
+      if (isl) isl.setDecor(d);
     }),
     listen(ev("gone"), (e) => showGone(e.payload)),
   ]);

@@ -6,20 +6,56 @@
 -- markdown-live-preview window into its CodeMirror island. This script does not
 -- reimplement conceal, folds, treesitter, syntax, or render-markdown.nvim. It
 -- reads their results with built-in calls (synconcealed, the treesitter
--- highlights query, nvim_buf_get_extmarks, and later nvim_get_hl / foldclosed
--- / getpos) and forwards a compact payload.
+-- highlights query, nvim_buf_get_extmarks, nvim_get_hl, foldclosed, getpos)
+-- and forwards a compact payload.
 --
--- First slice: inline conceal only. synconcealed() is :syntax-only on every
--- Neovim version, so conceal is a union of three reads: synconcealed() for
--- :syntax, the treesitter highlights-query `conceal` metadata for treesitter,
--- and extmark `conceal` for render-markdown and friends. Highlights, folds and
--- the visual range extend the payload in later slices.
+-- Payload keys, all viewport-limited and absolute buffer coordinates:
+--   conceal : union of synconcealed() (:syntax), the treesitter highlights
+--             query `conceal` metadata, and extmark `conceal`.
+--   visual  : the visual / select range.
+--   folds   : closed folds (foldclosed / foldtextresult).
+--   hl      : { runs, defs } - every treesitter capture and hl_group extmark
+--             over the viewport, plus the resolved attrs for each group.
 --
 -- Args: (channel).
 
 local chan = ...
 
 local PAD = 40 -- extra buffer rows queried around the window viewport
+
+-- Highlight groups resolved this session, cleared on ColorScheme.
+local hl_cache = {}
+-- Per-window highlight snapshot, to skip the capture walk on a bare cursor move.
+local hl_by_win = {}
+
+local function hex(n)
+  return n and string.format('#%06x', n) or nil
+end
+
+-- Resolve a highlight group name to a compact attr table (or false), memoised.
+local function resolve_hl(group)
+  local c = hl_cache[group]
+  if c ~= nil then
+    return c
+  end
+  local ok, h = pcall(vim.api.nvim_get_hl, 0, { name = group, link = false })
+  if not ok or type(h) ~= 'table' or vim.tbl_isempty(h) then
+    hl_cache[group] = false
+    return false
+  end
+  hl_cache[group] = {
+    fg = hex(h.fg),
+    bg = hex(h.bg),
+    sp = hex(h.sp),
+    bold = h.bold or nil,
+    italic = h.italic or nil,
+    underline = h.underline or nil,
+    undercurl = h.undercurl or nil,
+    strikethrough = h.strikethrough or nil,
+    reverse = h.reverse or nil,
+  }
+  return hl_cache[group]
+end
 
 local function preview_on(win)
   if not vim.api.nvim_win_is_valid(win) then
@@ -225,6 +261,70 @@ local function collect_folds(win, first, last)
   return folds
 end
 
+-- Every treesitter capture and every hl_group extmark over the padded viewport,
+-- as { runs = { {row, sc, ec, group}, ... }, defs = { [group] = attrs } }.
+-- Single line runs only; a multi line capture (a raw code block) is left to the
+-- structural styling. Faithful mirror: no priority resolution, the client
+-- stacks the marks and CSS decides, same as a browser rendering treesitter.
+-- capture names that never carry a visible highlight
+local HL_SKIP = { spell = true, nospell = true, conceal = true, none = true, nocombine = true }
+
+local function collect_highlights(win, buf, first, last)
+  local runs, seen = {}, {}
+  local function add(row, sc, ec, group)
+    if group and ec > sc then
+      runs[#runs + 1] = { row, sc, ec, group }
+      seen[group] = true
+    end
+  end
+
+  pcall(function()
+    local parser = vim.treesitter.get_parser(buf)
+    if not parser then
+      return
+    end
+    parser:parse({ first, last })
+    local function walk(ltree)
+      local q = vim.treesitter.query.get(ltree:lang(), 'highlights')
+      if q then
+        for _, tstree in pairs(ltree:trees()) do
+          for id, node in q:iter_captures(tstree:root(), buf, first, last + 1) do
+            local name = q.captures[id]
+            if name and name:sub(1, 1) ~= '_' and not HL_SKIP[name] then
+              local sr, sc, er, ec = node:range()
+              if sr == er then
+                add(sr, sc, ec, '@' .. name)
+              end
+            end
+          end
+        end
+      end
+      for _, child in pairs(ltree:children()) do
+        walk(child)
+      end
+    end
+    walk(parser)
+  end)
+
+  local marks =
+    vim.api.nvim_buf_get_extmarks(buf, -1, { first, 0 }, { last, -1 }, { details = true })
+  for _, mk in ipairs(marks) do
+    local row, col, d = mk[2], mk[3], mk[4]
+    if d and d.hl_group and d.end_row == row and d.end_col and d.end_col > col then
+      add(row, col, d.end_col, d.hl_group)
+    end
+  end
+
+  local defs = {}
+  for group in pairs(seen) do
+    local a = resolve_hl(group)
+    if a then
+      defs[group] = a
+    end
+  end
+  return { runs = runs, defs = defs }
+end
+
 local function push(win)
   local buf = vim.api.nvim_win_get_buf(win)
   local info = vim.fn.getwininfo(win)[1]
@@ -234,12 +334,33 @@ local function push(win)
   local n = vim.api.nvim_buf_line_count(buf)
   local first = math.max((info.topline or 1) - 1 - PAD, 0)
   local last = math.min((info.botline or info.topline or 1) + PAD, n - 1)
+
+  -- Highlights are the heavy part and only change on edit / scroll / colours,
+  -- not on a bare cursor move; reuse the last snapshot when nothing moved.
+  local tick = vim.api.nvim_buf_get_changedtick(buf)
+  local c = hl_by_win[win]
+  local hl
+  if c and c.tick == tick and c.first == first and c.last == last then
+    hl = c.value
+  else
+    hl = collect_highlights(win, buf, first, last)
+    hl_by_win[win] = { tick = tick, first = first, last = last, value = hl }
+  end
+
   local payload = {
     first = first,
     last = last,
     conceal = collect_conceal(win, buf, first, last),
     visual = collect_visual(win, first, last),
     folds = collect_folds(win, first, last),
+    hl = hl,
+    visual_hl = (function()
+      local v = resolve_hl('Visual')
+      if not v then
+        return nil
+      end
+      return v.reverse and v.fg or v.bg
+    end)(),
   }
   pcall(vim.rpcnotify, chan, 'gnv_md_decor', win, vim.json.encode(payload))
 end
@@ -286,4 +407,12 @@ vim.api.nvim_create_autocmd('OptionSet', {
   -- foldlevel / foldenable catch the bulk fold commands (`zR` `zM` `zi` ...).
   pattern = { 'conceallevel', 'concealcursor', 'foldlevel', 'foldenable' },
   callback = schedule,
+})
+vim.api.nvim_create_autocmd('ColorScheme', {
+  group = grp,
+  callback = function()
+    hl_cache = {}
+    hl_by_win = {}
+    schedule()
+  end,
 })
