@@ -732,6 +732,20 @@ class FoldWidget extends WidgetType {
 //
 // Both are defined before nvimCursorField so cursorDeco reads the current sets.
 const VISUAL_MARK = Decoration.mark({ class: "cm-nvim-visual" });
+// Structural styling (heading size, code fence, blockquote): Decoration.line
+// per affected line, not a multi-line replace. Point decorations at line.from,
+// so they map trivially and carry none of the fold class of risk (see the
+// "Decoration safety rules" note in docs/markdown-island.md). One instance per
+// class, reused, so pushes that touch the same lines diff to a no-op.
+const lineDecoBy = new Map();
+function lineDeco(cls) {
+  let d = lineDecoBy.get(cls);
+  if (!d) {
+    d = Decoration.line({ attributes: { class: cls } });
+    lineDecoBy.set(cls, d);
+  }
+  return d;
+}
 const setIslandDecor = StateEffect.define();
 const islandDecorField = StateField.define({
   create: () => Decoration.none,
@@ -979,8 +993,9 @@ class Island {
   // { first, last, conceal: [[row, sByte, eByte, text], ...],
   //   visual: [[row, sByte, eByte], ...], folds: [[sRow, eRow, text], ...],
   //   hl: { runs: [[row, sByte, eByte, group], ...], defs: {...} },
-  //   visual_hl } in absolute buffer coordinates. Decorations are view-only,
-  //   so nothing here reaches nvim_edit. `hl.defs` is merged globally by the
+  //   heads: [[sRow, eRow, level], ...], codes: [[sRow, eRow], ...],
+  //   quotes: [[sRow, eRow], ...], visual_hl } in absolute buffer coordinates.
+  //   Decorations are view-only, so nothing here reaches nvim_edit. `hl.defs` is merged globally by the
   //   listener; this only consumes `hl.runs`.
   setDecor(d) {
     this.decor = d;
@@ -1048,6 +1063,21 @@ class Island {
       const r = this._range(row, sc, ec);
       if (r && !inFold(r.from, r.to)) ranges.push(VISUAL_MARK.range(r.from, r.to));
     }
+    // structure: heading size / code fence / blockquote, one Decoration.line
+    // per affected line (see lineDeco above for why not a multi-line replace).
+    const addLines = (sr, er, cls) => {
+      const s = Math.max(sr, 0);
+      const e = Math.min(er, doc.lines - 1);
+      const deco = lineDeco(cls);
+      for (let r = s; r <= e; r++) {
+        const lf = doc.line(r + 1).from;
+        if (!inFold(lf, lf + 1)) ranges.push(deco.range(lf));
+      }
+    };
+    for (const [sr, er, level] of d?.heads ?? [])
+      addLines(sr, er, `cm-h${Math.min(Math.max(level, 1), 6)}`);
+    for (const [sr, er] of d?.codes ?? []) addLines(sr, er, "cm-code-block");
+    for (const [sr, er] of d?.quotes ?? []) addLines(sr, er, "cm-blockquote");
     // folds go in their own never-mapped field (see islandFoldField).
     const foldSet = Decoration.set(
       foldSpans.map((f) =>

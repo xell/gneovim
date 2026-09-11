@@ -134,6 +134,45 @@ body {
   cursor: default;
 }
 
+/* structural styling: one Decoration.line class per markdown block kind */
+.island .cm-h1,
+.island .cm-h2,
+.island .cm-h3,
+.island .cm-h4,
+.island .cm-h5,
+.island .cm-h6 {
+  font-weight: 700;
+}
+.island .cm-h1 {
+  font-size: 1.8em;
+}
+.island .cm-h2 {
+  font-size: 1.5em;
+}
+.island .cm-h3 {
+  font-size: 1.3em;
+}
+.island .cm-h4 {
+  font-size: 1.15em;
+}
+.island .cm-h5 {
+  font-size: 1.05em;
+}
+.island .cm-h6 {
+  font-size: 1em;
+  color: color-mix(in srgb, var(--fg) 75%, transparent);
+}
+.island .cm-code-block {
+  font-family: var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace);
+  font-size: 0.9em;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+.island .cm-blockquote {
+  border-left: 3px solid color-mix(in srgb, var(--fg) 30%, transparent);
+  padding-left: 0.8em;
+  color: color-mix(in srgb, var(--fg) 75%, transparent);
+}
+
 /* hidden IME/keyboard sink for grid windows: a real <textarea> at the cursor so
    the OS IME candidate window anchors correctly. Text is transparent; the IME
    draws its own preview. */

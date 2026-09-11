@@ -234,6 +234,72 @@ local function collect_visual(win, first, last)
   return runs
 end
 
+local HEAD_MARKER_LEVEL = {
+  atx_h1_marker = 1,
+  atx_h2_marker = 2,
+  atx_h3_marker = 3,
+  atx_h4_marker = 4,
+  atx_h5_marker = 5,
+  atx_h6_marker = 6,
+}
+
+-- Markdown block structure over the padded viewport: headings (with level),
+-- fenced / indented code blocks, and block quotes, each as {startRow, endRow}
+-- (0-based, inclusive), headings with a third level element. Read straight off
+-- the base markdown tree by node *type*, not a highlights query: these are
+-- structural, not colour, and want the whole block's line range.
+local function collect_structure(buf, first, last)
+  local heads, codes, quotes = {}, {}, {}
+  pcall(function()
+    local parser = vim.treesitter.get_parser(buf, 'markdown')
+    if not parser then
+      return
+    end
+    local trees = parser:parse({ first, last })
+    local root = trees[1] and trees[1]:root()
+    if not root then
+      return
+    end
+    local function last_row(er, ec)
+      return ec == 0 and math.max(er - 1, 0) or er
+    end
+    local function walk(node)
+      local sr, _, er, ec = node:range()
+      if sr > last or last_row(er, ec) < first then
+        return -- outside the padded viewport; prune the subtree
+      end
+      local t = node:type()
+      if t == 'atx_heading' then
+        local level = 1
+        for child in node:iter_children() do
+          level = HEAD_MARKER_LEVEL[child:type()] or level
+        end
+        heads[#heads + 1] = { sr, last_row(er, ec), level }
+        return
+      elseif t == 'setext_heading' then
+        local level = 1
+        for child in node:iter_children() do
+          if child:type() == 'setext_h2_underline' then
+            level = 2
+          end
+        end
+        heads[#heads + 1] = { sr, last_row(er, ec), level }
+        return
+      elseif t == 'fenced_code_block' or t == 'indented_code_block' then
+        codes[#codes + 1] = { sr, last_row(er, ec) }
+        return -- no headings/quotes nest inside code content
+      elseif t == 'block_quote' then
+        quotes[#quotes + 1] = { sr, last_row(er, ec) }
+      end
+      for child in node:iter_children() do
+        walk(child)
+      end
+    end
+    walk(root)
+  end)
+  return heads, codes, quotes
+end
+
 -- Closed folds overlapping the padded viewport, as { {startRow, endRow, text},
 -- ... } (0-based rows, inclusive). `text` is `foldtextresult`, trimmed of the
 -- trailing fill run. There is no fold autocmd, so this re-runs on the same
@@ -347,6 +413,7 @@ local function push(win)
     hl_by_win[win] = { tick = tick, first = first, last = last, value = hl }
   end
 
+  local heads, codes, quotes = collect_structure(buf, first, last)
   local payload = {
     first = first,
     last = last,
@@ -354,6 +421,9 @@ local function push(win)
     visual = collect_visual(win, first, last),
     folds = collect_folds(win, first, last),
     hl = hl,
+    heads = heads,
+    codes = codes,
+    quotes = quotes,
     visual_hl = (function()
       local v = resolve_hl('Visual')
       if not v then

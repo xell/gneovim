@@ -103,7 +103,7 @@ This one path covers both mount and live toggle on.
 
 ### Payload and coordinates
 
-`gnv_md_decor` carries `(win, json)` where `json` is `vim.json.encode` of `{ first, last, conceal: [ [row, startByte, endByte, text], ... ], visual: [ [row, startByte, endByte], ... ], folds: [ [startRow, endRow, text], ... ], hl: { runs: [ [row, startByte, endByte, group], ... ], defs: { group: attrs } }, visual_hl }` in absolute buffer coordinates.
+`gnv_md_decor` carries `(win, json)` where `json` is `vim.json.encode` of `{ first, last, conceal: [ [row, startByte, endByte, text], ... ], visual: [ [row, startByte, endByte], ... ], folds: [ [startRow, endRow, text], ... ], hl: { runs: [ [row, startByte, endByte, group], ... ], defs: { group: attrs } }, heads: [ [startRow, endRow, level], ... ], codes: [ [startRow, endRow], ... ], quotes: [ [startRow, endRow], ... ], visual_hl }` in absolute buffer coordinates.
 Columns are byte offsets; the client converts to UTF-16 with `byteToCol` against its own copy of the line.
 Sending a JSON string keeps every later slice from needing a new Rust type: extend the Lua table, add a key handler in `Island.applyDecor`.
 
@@ -173,6 +173,14 @@ The client renders each fold as one plain (non-block) `Decoration.replace` from 
 When the cursor is on a closed fold, Neovim reports it on the fold's first line, which is inside the replace range, so the cursor decoration would be swallowed and vanish. `cursorDeco` checks `islandFoldField` for a fold covering the cursor position and instead renders a block cursor at the fold's left edge with `side: -1`. `islandFoldField` is defined before `nvimCursorField` so `cursorDeco` reads the current fold set within the same transaction that adds a fold.
 
 Trigger gap: Neovim has no fold autocmd. `zR` / `zM` / `zi` are caught by `OptionSet foldlevel,foldenable`; a `zc` that moves the cursor to the fold start is caught by `CursorMoved`; a bare `zo` with a stationary cursor is only caught by the `CursorHold` backstop (after `updatetime`) or the next cursor move or scroll.
+
+### Structural styling, what is implemented
+
+`collect_structure` reads the base markdown tree (not a highlights query) and walks it by node type over the padded viewport: `atx_heading` and `setext_heading` (level from the marker child, `atx_h1_marker`..`atx_h6_marker`, or `setext_h2_underline` for level 2), `fenced_code_block` and `indented_code_block` (not recursed into, code content is not structurally interesting), `block_quote`. Each becomes `{ startRow, endRow }`, headings with a third `level` element.
+
+The client turns each into one `Decoration.line({ attributes: { class } })` per affected line (`cm-h1`..`cm-h6`, `cm-code-block`, `cm-blockquote`), reusing one decoration instance per class so an unchanged push diffs to nothing. Line decorations at the same position combine their classes, so a heading inside a blockquote gets both. They live in `islandDecorField` alongside conceal and highlights: unlike a fold, a line decoration is a point anchored at `line.from`, so mapping it through edits is exactly what `tr.changes.mapPos` already does internally and carries none of the fold class of risk (see the safety rules below, this is the case study for the rule "prefer `Decoration.line` over a multi line replace"). A line inside a closed fold is skipped, same `inFold` guard as conceal and highlights.
+
+Font size and background are the only things this touches; it does not add heading icons, bullet glyphs, or table formatting, which would need virtual text.
 
 ## Decoration safety rules
 
