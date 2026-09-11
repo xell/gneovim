@@ -338,12 +338,26 @@ end
 -- capture names that never carry a visible highlight
 local HL_SKIP = { spell = true, nospell = true, conceal = true, none = true, nocombine = true }
 
-local function collect_highlights(win, buf, first, last)
-  local runs, seen, codespans = {}, {}, {}
-  local function add(row, sc, ec, group)
+-- Baseline layer priorities, matching Neovim's own compositing order (:syntax
+-- and treesitter lowest, extmarks above that at their own priority, :match /
+-- matchadd() always on top). Used only to order overlapping *groups'* CSS
+-- rules so the higher layer's colour wins when two decorations cover the same
+-- character; it is not a per-run z-index, groups get one priority each.
+local PRIO_TREESITTER = 100
+local PRIO_EXTMARK = 4096
+local PRIO_MATCH = 10000
+
+local function collect_highlights(win, buf, first, last, marks)
+  local runs, seen, codespans, virt = {}, {}, {}, {}
+  local function note(group, prio)
+    if group then
+      seen[group] = math.max(seen[group] or 0, prio or 0)
+    end
+  end
+  local function add(row, sc, ec, group, prio)
     if group and ec > sc then
       runs[#runs + 1] = { row, sc, ec, group }
-      seen[group] = true
+      note(group, prio)
     end
   end
 
@@ -362,7 +376,7 @@ local function collect_highlights(win, buf, first, last)
             if name and name:sub(1, 1) ~= '_' and not HL_SKIP[name] then
               local sr, sc, er, ec = node:range()
               if sr == er then
-                add(sr, sc, ec, '@' .. name)
+                add(sr, sc, ec, '@' .. name, PRIO_TREESITTER)
                 -- inline code span: flagged separately so the client can give
                 -- it a monospace face, which no highlight group attribute
                 -- carries.
@@ -381,55 +395,132 @@ local function collect_highlights(win, buf, first, last)
     walk(parser)
   end)
 
-  local marks =
-    vim.api.nvim_buf_get_extmarks(buf, -1, { first, 0 }, { last, -1 }, { details = true })
   for _, mk in ipairs(marks) do
     local row, col, d = mk[2], mk[3], mk[4]
-    if d and d.hl_group and d.end_row == row and d.end_col and d.end_col > col then
-      add(row, col, d.end_col, d.hl_group)
+    if d then
+      if d.hl_group and d.end_row == row and d.end_col and d.end_col > col then
+        add(row, col, d.end_col, d.hl_group, d.priority or PRIO_EXTMARK)
+      end
+      -- overlay virt_text: hop.nvim's jump-target letters and similar. Not a
+      -- buffer edit and not colour on existing text, it is new content drawn
+      -- over the top, so it needs its own client-side widget, unlike conceal
+      -- or highlights. Only 'overlay' is handled; 'eol' / 'inline' /
+      -- 'right_align' and virt_text_win_col-positioned marks (screen column,
+      -- not buffer column) are a later pass.
+      if d.virt_text and d.virt_text_pos == 'overlay' and row >= first and row <= last then
+        local segs, hide = {}, 0
+        for _, seg in ipairs(d.virt_text) do
+          local text, grp = seg[1], seg[2]
+          if text and text ~= '' then
+            hide = hide + #text
+            note(grp, d.priority or PRIO_EXTMARK)
+            segs[#segs + 1] = { text, grp }
+          end
+        end
+        if hide > 0 then
+          virt[#virt + 1] = { row, col, hide, segs }
+        end
+      end
     end
   end
 
   -- :match / matchadd() / matchaddpos() overlays (easymotion, quick-scope,
   -- and any plugin that recolors this way instead of extmarks or :syntax).
-  -- Not seen by any of the above; getmatches() is the only read for it.
-  pcall(function()
-    for _, m in ipairs(vim.fn.getmatches(win)) do
-      if m.pos1 then
-        -- matchaddpos(): up to 8 literal positions, each {lnum[, col[, len]]}
-        for i = 1, 8 do
-          local p = m['pos' .. i]
-          if not p then
-            break
+  -- Not seen by any of the above; getmatches() is the only read for it. Each
+  -- match gets its own pcall: one bad entry (matchbufline requires its 5th
+  -- arg to be an unambiguous Dict, a bare Lua {} converts to an empty List and
+  -- errors) must not abort every match after it in the list, which a single
+  -- pcall around the whole loop silently did.
+  local ok, all_matches = pcall(vim.fn.getmatches, win)
+  if ok then
+    for _, m in ipairs(all_matches) do
+      pcall(function()
+        if m.pos1 then
+          -- matchaddpos(): up to 8 literal positions, each {lnum[, col[, len]]}
+          for i = 1, 8 do
+            local p = m['pos' .. i]
+            if not p then
+              break
+            end
+            local row = (p[1] or 0) - 1
+            if row >= first and row <= last then
+              local sc = (p[2] or 1) - 1
+              add(row, sc, sc + (p[3] or 1), m.group, PRIO_MATCH + (m.priority or 0))
+            end
           end
-          local row = (p[1] or 0) - 1
-          if row >= first and row <= last then
-            local sc = (p[2] or 1) - 1
-            add(row, sc, sc + (p[3] or 1), m.group)
+        elseif m.pattern and m.pattern ~= '' then
+          -- matchadd(): resolve the pattern the same way Neovim would, over
+          -- the padded viewport only.
+          local hits =
+            vim.fn.matchbufline(buf, m.pattern, first + 1, last + 1, vim.empty_dict())
+          for _, hit in ipairs(hits) do
+            add(
+              hit.lnum - 1,
+              hit.byteidx,
+              hit.byteidx + #hit.text,
+              m.group,
+              PRIO_MATCH + (m.priority or 0)
+            )
           end
         end
-      elseif m.pattern and m.pattern ~= '' then
-        -- matchadd(): resolve the pattern the same way Neovim would, over the
-        -- padded viewport only.
-        for _, hit in ipairs(vim.fn.matchbufline(buf, m.pattern, first + 1, last + 1, {})) do
-          add(hit.lnum - 1, hit.byteidx, hit.byteidx + #hit.text, m.group)
-        end
-      end
+      end)
     end
-  end)
+  end
 
+  -- `priority` rides in each group's own attrs (not just a side table): a
+  -- Lua table used as a JSON object has no defined key order, so the client
+  -- cannot infer relative priority from where a group lands in `defs`. It
+  -- sorts by this field itself before emitting CSS, so a higher layer's rule
+  -- is always written after a lower one's: two decorations covering the same
+  -- character (easymotion's dim "shade" under the whole line and its bright
+  -- "target" on one letter) are flattened onto one element client side, and
+  -- CSS gives the later same-specificity rule the win.
   local defs = {}
-  for group in pairs(seen) do
+  for group, prio in pairs(seen) do
     local a = resolve_hl(group)
     if a then
+      a.priority = prio
       defs[group] = a
     end
   end
-  return { runs = runs, defs = defs, codespans = codespans }
+  return { runs = runs, defs = defs, codespans = codespans, virt = virt }
+end
+
+-- Forward declared: `ensure_attached` below needs to call it, but `schedule`
+-- itself is only assigned further down (after `push`), once `flush` exists.
+local schedule
+
+-- Buffers with a live island get a second, low-level trigger alongside the
+-- VimL autocmds: `nvim_buf_attach`'s `on_lines` fires unconditionally on every
+-- real text change, including ones made *inside* a blocking call like
+-- getchar(). `TextChanged` / `TextChangedI` do not: a plugin that shows a
+-- prompt while blocked on getchar() (vim-easymotion's target-letter overlay,
+-- also a real setline() edit) changes the buffer and adds its matchaddpos()
+-- highlights, but neither fires until the blocking call returns, so this
+-- script's own debounced push never ran while the overlay was visible. The
+-- island then showed the letters (bridge.rs's own separate buffer attach,
+-- for content sync, does fire) with no colour, because collect_highlights
+-- never got a chance to read getmatches() during that window. One attach per
+-- buffer, lazily added the first time it is pushed for.
+local attached_bufs = {}
+local function ensure_attached(buf)
+  if attached_bufs[buf] then
+    return
+  end
+  attached_bufs[buf] = true
+  pcall(vim.api.nvim_buf_attach, buf, false, {
+    on_lines = function()
+      schedule()
+    end,
+    on_detach = function()
+      attached_bufs[buf] = nil
+    end,
+  })
 end
 
 local function push(win)
   local buf = vim.api.nvim_win_get_buf(win)
+  ensure_attached(buf)
   local info = vim.fn.getwininfo(win)[1]
   if not info then
     return
@@ -438,16 +529,85 @@ local function push(win)
   local first = math.max((info.topline or 1) - 1 - PAD, 0)
   local last = math.min((info.botline or info.topline or 1) + PAD, n - 1)
 
-  -- Highlights are the heavy part and only change on edit / scroll / colours,
-  -- not on a bare cursor move; reuse the last snapshot when nothing moved.
+  -- Highlights are the heavy part (a treesitter walk); reuse the last
+  -- snapshot when nothing collect_highlights reads has changed. `tick` and
+  -- the viewport range catch an edit or a scroll. Extmark or match content
+  -- can change with *no* buffer edit at all (hop.nvim's virt_text hints,
+  -- matchadd() from any plugin), which a tick-only cache would never
+  -- invalidate, so a fingerprint of both over the same viewport rides along
+  -- too. A plain count is not enough, confirmed live: hop.nvim clears its
+  -- N search-preview extmarks and creates N hint extmarks in the same breath,
+  -- so the count is unchanged across a very real content swap.
+  --
+  -- Extmark ids are monotonic only *within a namespace*, not across a
+  -- buffer: two different (freshly created) namespaces both start counting
+  -- from 1, so hop.nvim's preview marks (namespace A, ids 1..N) and its
+  -- hint marks (namespace B, ids 1..N, at the same jump-target positions)
+  -- can carry an identical id sum, confirmed live. A row/col-only fold-in
+  -- does not help either: both sets sit at the same buffer positions. What
+  -- actually differs is the mark's own content (hl_group vs. virt_text), so
+  -- the fingerprint hashes that in too. This is computed from the same
+  -- details=true fetch collect_highlights itself needs, fetched once here
+  -- and passed down, rather than queried twice.
   local tick = vim.api.nvim_buf_get_changedtick(buf)
+  local mcount, msum = 0, 0
+  for _, m in ipairs(vim.fn.getmatches(win)) do
+    mcount = mcount + 1
+    msum = msum + (m.id or 0)
+  end
+  local marks =
+    vim.api.nvim_buf_get_extmarks(buf, -1, { first, 0 }, { last, -1 }, { details = true })
+  local ecount, esum = 0, 0
+  for _, mk in ipairs(marks) do
+    ecount = ecount + 1
+    local h = (mk[1] or 0) * 1000003 + (mk[2] or 0) * 131 + (mk[3] or 0)
+    local d = mk[4]
+    if d then
+      h = h + (d.priority or 0)
+      if d.hl_group then
+        for i = 1, #d.hl_group do
+          h = h + d.hl_group:byte(i)
+        end
+      end
+      if d.virt_text then
+        h = h + 97
+        for _, seg in ipairs(d.virt_text) do
+          local t = seg[1]
+          if t then
+            for i = 1, #t do
+              h = h + t:byte(i)
+            end
+          end
+        end
+      end
+    end
+    esum = esum + h
+  end
   local c = hl_by_win[win]
   local hl
-  if c and c.tick == tick and c.first == first and c.last == last then
+  if
+    c
+    and c.tick == tick
+    and c.first == first
+    and c.last == last
+    and c.mcount == mcount
+    and c.msum == msum
+    and c.ecount == ecount
+    and c.esum == esum
+  then
     hl = c.value
   else
-    hl = collect_highlights(win, buf, first, last)
-    hl_by_win[win] = { tick = tick, first = first, last = last, value = hl }
+    hl = collect_highlights(win, buf, first, last, marks)
+    hl_by_win[win] = {
+      tick = tick,
+      first = first,
+      last = last,
+      mcount = mcount,
+      msum = msum,
+      ecount = ecount,
+      esum = esum,
+      value = hl,
+    }
   end
 
   local heads, codes, quotes = collect_structure(buf, first, last)
@@ -483,7 +643,7 @@ local function flush()
 end
 
 -- Debounced: many of the trigger events fire in bursts (holding `j`, a paste).
-local function schedule()
+schedule = function()
   if pending then
     return
   end
@@ -521,5 +681,21 @@ vim.api.nvim_create_autocmd('ColorScheme', {
     hl_cache = {}
     hl_by_win = {}
     schedule()
+  end,
+})
+
+-- General trigger for display-only changes with no buffer edit and no autocmd
+-- of their own, made while Neovim is blocked on a synchronous input wait
+-- (hop.nvim's hint letters: pure virt_text extmarks, no setline()). Verified
+-- live: this callback, and the vim.defer_fn timer schedule() sets up, both do
+-- run during a blocking getchar() / getcharstr(). A decoration provider fires
+-- on every redraw of every window, which is why: it is the same mechanism
+-- treesitter's own highlighter uses to stay live. schedule() is a single
+-- boolean check once a push is already pending, so the extra call volume
+-- costs nothing measurable.
+vim.api.nvim_set_decoration_provider(vim.api.nvim_create_namespace('gnv_md_decor_watch'), {
+  on_win = function()
+    schedule()
+    return false
   end,
 })

@@ -367,7 +367,17 @@ function hlClass(group) {
 }
 function rebuildHlStyle() {
   let css = "";
-  for (const [group, a] of hlDefs) {
+  // Lowest priority first, so a higher layer's rule is written *later* in the
+  // stylesheet: when two decorations cover the same character (a "shade" mark
+  // spanning a whole line under a brighter "target" mark on one letter of it,
+  // easymotion's own pattern) they land on the same flattened element client
+  // side, and CSS gives the later same-specificity rule the win. Map
+  // iteration order is otherwise just payload arrival order, which does not
+  // reflect which layer should show through.
+  const sorted = [...hlDefs].sort(
+    (a, b) => (a[1].priority ?? 0) - (b[1].priority ?? 0),
+  );
+  for (const [group, a] of sorted) {
     let fg = a.fg;
     let bg = a.bg;
     if (a.reverse) [fg, bg] = [bg || "var(--bg)", fg || "var(--fg)"];
@@ -527,6 +537,16 @@ gridCursorEl.id = "grid-cursor";
 gridCursorEl.hidden = true;
 viewportEl.append(gridCursorEl);
 let cursorGrid = 1;
+// Last gnv_cursor payload (buffer row/col/mode), kept even while cursorGrid
+// points elsewhere. gnv_cursor (the buffer position feed) and grid_cursor_goto
+// (which grid owns it) are two independent streams; if a grid_cursor_goto that
+// hands the island back its grid arrives *after* the gnv_cursor event for the
+// same move (a message/prompt grid can transiently own grid_cursor_goto during
+// a blocking getchar(), e.g. easymotion's "Target key:" prompt), the island
+// misses the update and its cursor stays hidden until an unrelated move
+// re-fires both. Re-applying the cached payload when the island regains its
+// grid closes that gap without depending on event arrival order.
+let lastCursorPayload = null;
 let modeInfo = []; // from mode_info_set, indexed by mode_change idx
 let cursorStyleEnabled = false;
 let curMode = null; // modeInfo entry for the current mode
@@ -713,6 +733,31 @@ class HeadingIconWidget extends WidgetType {
   toDOM() {
     const s = document.createElement("span");
     s.className = `cm-heading-icon cm-heading-icon-${this.level}`;
+    return s;
+  }
+}
+// An overlay virt_text extmark (hop.nvim's jump-target letters and similar):
+// new content drawn in place of the buffer text it covers, not a recolouring
+// of it. Each segment gets the same hlClass() as any other highlight group.
+class OverlayWidget extends WidgetType {
+  constructor(segs) {
+    super();
+    this.segs = segs;
+  }
+  eq(o) {
+    return (
+      o.segs.length === this.segs.length &&
+      o.segs.every(([t, g], i) => t === this.segs[i][0] && g === this.segs[i][1])
+    );
+  }
+  toDOM() {
+    const s = document.createElement("span");
+    for (const [text, group] of this.segs) {
+      const t = document.createElement("span");
+      if (group) t.className = hlClass(group);
+      t.textContent = text;
+      s.append(t);
+    }
     return s;
   }
 }
@@ -1014,11 +1059,12 @@ class Island {
   // { first, last, conceal: [[row, sByte, eByte, text], ...],
   //   visual: [[row, sByte, eByte], ...], folds: [[sRow, eRow, text], ...],
   //   hl: { runs: [[row, sByte, eByte, group], ...], defs: {...},
-  //     codespans: [[row, sByte, eByte], ...] },
+  //     codespans: [[row, sByte, eByte], ...],
+  //     virt: [[row, col, hideBytes, [[text, group], ...]], ...] },
   //   heads: [[sRow, eRow, level], ...], codes: [[sRow, eRow], ...],
   //   quotes: [[sRow, eRow], ...], visual_hl } in absolute buffer coordinates.
   //   Decorations are view-only, so nothing here reaches nvim_edit. `hl.defs` is merged globally by the
-  //   listener; this only consumes `hl.runs`.
+  //   listener; this only consumes `hl.runs` / `hl.virt`.
   setDecor(d) {
     this.decor = d;
     if (d?.visual_hl) this.el.style.setProperty("--visual-bg", d.visual_hl);
@@ -1093,6 +1139,13 @@ class Island {
         spans.push({ from, to, deco: CONCEAL_HIDE });
       }
     }
+    // overlay virt_text (hop.nvim's jump letters, etc): pushed ahead of plain
+    // conceal so an interactive overlay wins a tie over Neovim's own conceal.
+    for (const [row, col, hide, segs] of d?.hl?.virt ?? []) {
+      const r = this._range(row, col, col + hide);
+      if (r && !inFold(r.from, r.to))
+        spans.push({ ...r, deco: Decoration.replace({ widget: new OverlayWidget(segs) }) });
+    }
     for (const [row, sc, ec, text] of d?.conceal ?? []) {
       const r = this._range(row, sc, ec);
       if (r && !inFold(r.from, r.to))
@@ -1165,7 +1218,23 @@ class Island {
       }
     }
     if (!noFoldChange) effects.push(setIslandFolds.of(foldSet));
-    if (effects.length) this.view.dispatch({ effects });
+    if (effects.length) {
+      this.view.dispatch({ effects });
+      // WKWebView will not composite a freshly updated absolutely-positioned
+      // subtree until an unrelated event (scroll/resize) nudges it; the grid
+      // renderer hits the same thing (see forceRepaint's other call site).
+      // Usually masked because typing/scrolling keeps the compositor busy,
+      // but a decoration that arrives after the webview has gone idle (hop.nvim:
+      // type the search string, hit Enter, the hint letters push lands after
+      // that, nothing else touches the page) can sit applied-but-unpainted
+      // until something else forces a reflow, e.g. opening devtools.
+      // forceRepaint toggles display:none, which would blur .cm-content (an
+      // island descendant) if it currently holds focus; restore it right after
+      // so the toggle costs nothing even mid insert-mode typing or IME.
+      const hadFocus = this.view.hasFocus;
+      forceRepaint(this.el);
+      if (hadFocus) this.view.focus();
+    }
   }
   destroy() {
     if (this._gutterRaf) cancelAnimationFrame(this._gutterRaf);
@@ -1405,8 +1474,18 @@ function renderGridOps(ops) {
         if (o.grid !== cursorGrid) {
           const prev = islandForGrid(cursorGrid);
           cursorGrid = o.grid;
+          const next = islandForGrid(o.grid);
           // focus left an island: drop its now-stale block cursor decoration
-          if (prev && prev !== islandForGrid(o.grid)) prev.clearCursor();
+          if (prev && prev !== next) prev.clearCursor();
+          // (re)gained an island's grid: replay the last known buffer
+          // position immediately rather than waiting for a fresh gnv_cursor
+          // event, which may not come if Neovim sees nothing further changed
+          if (next && next !== prev && lastCursorPayload)
+            next.applyCursor(
+              lastCursorPayload.row,
+              lastCursorPayload.col,
+              lastCursorPayload.mode,
+            );
         }
         break;
       case "win_pos":
@@ -1647,7 +1726,10 @@ addEventListener("error", (e) => {
     }),
     listen(ev("cursor"), (e) => {
       // CursorMoved reports the *global* cursor wherever focus is; route it to
-      // the island that owns the focused grid, if any.
+      // the island that owns the focused grid, if any. Cache it regardless, so
+      // a grid_cursor_goto that hands the island its grid back *after* this
+      // event can replay it (see lastCursorPayload).
+      lastCursorPayload = e.payload;
       const isl = islandForGrid(cursorGrid);
       if (isl) isl.applyCursor(e.payload.row, e.payload.col, e.payload.mode);
     }),
