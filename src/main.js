@@ -699,6 +699,27 @@ class ConcealWidget extends WidgetType {
     return s;
   }
 }
+// Replaces a concealed ATX "#.. " run on an H1-H3 line. Not a Neovim conceal:
+// the island hides these itself, independent of conceallevel, as part of the
+// heading size / icon styling (see applyDecor). H4-H6 just hide, no icon.
+class HeadingIconWidget extends WidgetType {
+  constructor(level) {
+    super();
+    this.level = level;
+  }
+  eq(o) {
+    return o.level === this.level;
+  }
+  toDOM() {
+    const s = document.createElement("span");
+    s.className = `cm-heading-icon cm-heading-icon-${this.level}`;
+    return s;
+  }
+}
+// A plain hidden run with no replacement text: blockquote "> " markers (the
+// cm-blockquote line decoration already draws the bar) and H4-H6 markers.
+// One shared instance; identical specs compare equal so it never re-renders.
+const CONCEAL_HIDE = Decoration.replace({});
 // A closed Neovim fold: one placeholder line (foldtextresult) replacing the
 // whole folded range. Display only; open the fold from Neovim (`zo`). A span,
 // not a div: this is an inline (non-block) replace widget, CSS makes it a line.
@@ -992,7 +1013,8 @@ class Island {
   // Display bridge (runtime/md_decor.lua). `d` is the parsed payload:
   // { first, last, conceal: [[row, sByte, eByte, text], ...],
   //   visual: [[row, sByte, eByte], ...], folds: [[sRow, eRow, text], ...],
-  //   hl: { runs: [[row, sByte, eByte, group], ...], defs: {...} },
+  //   hl: { runs: [[row, sByte, eByte, group], ...], defs: {...},
+  //     codespans: [[row, sByte, eByte], ...] },
   //   heads: [[sRow, eRow, level], ...], codes: [[sRow, eRow], ...],
   //   quotes: [[sRow, eRow], ...], visual_hl } in absolute buffer coordinates.
   //   Decorations are view-only, so nothing here reaches nvim_edit. `hl.defs` is merged globally by the
@@ -1032,10 +1054,52 @@ class Island {
       foldSpans.some((f) => a < f.to && b > f.from);
 
     // conceal: inline replace decorations, which may not overlap each other.
+    // Neovim's own conceal, our heading-marker icon, and our blockquote-marker
+    // hiding all go through one dedup pass. Ours are pushed first so they win
+    // a tie (stable sort) if Neovim also happens to conceal the same run.
+    // Both skip the line the cursor is currently on in this island, so the
+    // raw "#.. " / "> " is there to edit, regardless of concealcursor.
+    const curRow = this.view.state.field(nvimCursorField, false)?.pos?.row;
     const spans = [];
+    for (const [sr, , level] of d?.heads ?? []) {
+      if (sr < 0 || sr >= doc.lines || sr === curRow) continue;
+      const line = doc.line(sr + 1);
+      const m = /^(#{1,6})(\s+)/.exec(line.text); // setext headings have no marker on this line
+      if (!m) continue;
+      const from = line.from;
+      const to = from + m[0].length;
+      if (inFold(from, to)) continue;
+      const lvl = Math.min(Math.max(level, 1), 6);
+      spans.push({
+        from,
+        to,
+        deco:
+          lvl <= 3
+            ? Decoration.replace({ widget: new HeadingIconWidget(lvl) })
+            : CONCEAL_HIDE,
+      });
+    }
+    for (const [sr, er] of d?.quotes ?? []) {
+      const s = Math.max(sr, 0);
+      const e = Math.min(er, doc.lines - 1);
+      for (let r = s; r <= e; r++) {
+        if (r === curRow) continue;
+        const line = doc.line(r + 1);
+        const m = /^(?:[ \t]*>[ \t]?)+/.exec(line.text);
+        if (!m || !m[0]) continue;
+        const from = line.from;
+        const to = from + m[0].length;
+        if (inFold(from, to)) continue;
+        spans.push({ from, to, deco: CONCEAL_HIDE });
+      }
+    }
     for (const [row, sc, ec, text] of d?.conceal ?? []) {
       const r = this._range(row, sc, ec);
-      if (r && !inFold(r.from, r.to)) spans.push({ ...r, text });
+      if (r && !inFold(r.from, r.to))
+        spans.push({
+          ...r,
+          deco: text ? Decoration.replace({ widget: new ConcealWidget(text) }) : CONCEAL_HIDE,
+        });
     }
     spans.sort((a, b) => a.from - b.from || a.to - b.to);
     const ranges = [];
@@ -1043,12 +1107,13 @@ class Island {
     for (const s of spans) {
       if (s.from < end) continue; // drop an overlap (two sources, same run)
       end = s.to;
-      ranges.push(
-        (s.text
-          ? Decoration.replace({ widget: new ConcealWidget(s.text) })
-          : Decoration.replace({})
-        ).range(s.from, s.to),
-      );
+      ranges.push(s.deco.range(s.from, s.to));
+    }
+    // inline `code`: monospace, no Neovim highlight attribute carries font.
+    for (const [row, sc, ec] of d?.hl?.codespans ?? []) {
+      const r = this._range(row, sc, ec);
+      if (r && !inFold(r.from, r.to))
+        ranges.push(Decoration.mark({ class: "cm-inline-code" }).range(r.from, r.to));
     }
     // highlights: one mark per treesitter capture / hl_group extmark run. They
     // overlap freely; CM nests the spans and CSS resolves, like a browser.

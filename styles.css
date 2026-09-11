@@ -172,6 +172,44 @@ body {
   padding-left: 0.8em;
   color: color-mix(in srgb, var(--fg) 75%, transparent);
 }
+/* inline `code`: the highlight mark gives colour, this gives the face no
+   Neovim highlight attribute carries. */
+.island .cm-inline-code {
+  font-family: var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace);
+  font-size: 0.9em;
+}
+
+/* H1-H3 marker icon, replacing the concealed "#.. " run. Source SVGs are solid
+   white; mask-image reads only their alpha and background-color supplies the
+   real colour, so one asset per level covers every theme. From zennotes
+   (assets/heading-{1,2,3}-indicator.svg, commit e4149083). Sized in em so it
+   scales with the heading's own cm-h1..h3 font-size. */
+.island .cm-heading-icon {
+  display: inline-block;
+  width: 0.6em;
+  height: 0.6em;
+  vertical-align: middle;
+  margin-right: 0.35em;
+  mask-repeat: no-repeat;
+  -webkit-mask-repeat: no-repeat;
+  mask-position: center;
+  -webkit-mask-position: center;
+  mask-size: contain;
+  -webkit-mask-size: contain;
+  background-color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+.island .cm-heading-icon-1 {
+  mask-image: url("assets/heading-1-indicator.svg");
+  -webkit-mask-image: url("assets/heading-1-indicator.svg");
+}
+.island .cm-heading-icon-2 {
+  mask-image: url("assets/heading-2-indicator.svg");
+  -webkit-mask-image: url("assets/heading-2-indicator.svg");
+}
+.island .cm-heading-icon-3 {
+  mask-image: url("assets/heading-3-indicator.svg");
+  -webkit-mask-image: url("assets/heading-3-indicator.svg");
+}
 
 /* hidden IME/keyboard sink for grid windows: a real <textarea> at the cursor so
    the OS IME candidate window anchors correctly. Text is transparent; the IME

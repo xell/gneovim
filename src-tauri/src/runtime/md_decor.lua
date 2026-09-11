@@ -336,7 +336,7 @@ end
 local HL_SKIP = { spell = true, nospell = true, conceal = true, none = true, nocombine = true }
 
 local function collect_highlights(win, buf, first, last)
-  local runs, seen = {}, {}
+  local runs, seen, codespans = {}, {}, {}
   local function add(row, sc, ec, group)
     if group and ec > sc then
       runs[#runs + 1] = { row, sc, ec, group }
@@ -360,6 +360,12 @@ local function collect_highlights(win, buf, first, last)
               local sr, sc, er, ec = node:range()
               if sr == er then
                 add(sr, sc, ec, '@' .. name)
+                -- inline code span: flagged separately so the client can give
+                -- it a monospace face, which no highlight group attribute
+                -- carries.
+                if node:type() == 'code_span' then
+                  codespans[#codespans + 1] = { sr, sc, ec }
+                end
               end
             end
           end
@@ -388,7 +394,7 @@ local function collect_highlights(win, buf, first, last)
       defs[group] = a
     end
   end
-  return { runs = runs, defs = defs }
+  return { runs = runs, defs = defs, codespans = codespans }
 end
 
 local function push(win)
