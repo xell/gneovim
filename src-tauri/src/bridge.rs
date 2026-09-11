@@ -6,7 +6,7 @@
 //! forwards those to the webview and calls the `Bridge` methods for the reverse
 //! direction.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, AtomicI64, Ordering},
     Arc, OnceLock,
@@ -20,11 +20,18 @@ use nvim_rs::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc::UnboundedSender, Mutex};
 
 pub type NWriter = Compat<ChildStdin>;
 pub type Nvim = Neovim<NWriter>;
+
+// How long `connect()` waits for the whole post-spawn handshake (every
+// nvim.command / exec_lua up to returning a usable Bridge) before giving up.
+// Generous: a cold start with a heavy user config is normally well under a
+// second. See the comment at its call site in `connect` for what this guards.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 // Apply edit regions to a specific buffer (regions already sorted bottom-up so
 // earlier offsets stay valid). The island buffer is not always the current one.
@@ -675,7 +682,10 @@ pub async fn connect(
         .args(&init_args)
         .args(&shada_args)
         .args(&extra_args)
-        .kill_on_drop(true);
+        .kill_on_drop(true)
+        // Inherited by default, i.e. invisible: capture it instead so a stuck
+        // startup (see CONNECT_TIMEOUT below) can show the user why.
+        .stderr(std::process::Stdio::piped());
     cmd.envs(extra_env.iter().map(|(k, v)| (k, v)));
     // `:OpenInNewGneovimTab file1 file2` -> one tabpage per file in this nvim.
     if !open.paths.is_empty() {
@@ -694,7 +704,7 @@ pub async fn connect(
         shared: shared.clone(),
     };
 
-    let (nvim, io, child) = create::new_child_cmd(&mut cmd, handler)
+    let (nvim, io, mut child) = create::new_child_cmd(&mut cmd, handler)
         .await
         .map_err(|e| format!("spawn nvim ({bin}): {e}"))?;
 
@@ -711,132 +721,190 @@ pub async fn connect(
         });
     }
 
-    // No scene is staged here: the renderer draws whatever windows and buffers
-    // the launch args (or the user) produce. Filetype detection is left to the
-    // user's config.
-    //
-    // A bare `-u NONE` nvim ships Neovim 0.10+'s built-in colorscheme with
-    // background=dark. gneovim is a light prose surface, so force the light
-    // palette for that case only. With a real user config, respect whatever
-    // background / colorscheme it sets.
-    if crate::config::get().neovim.is_bare() {
-        nvim.command("set background=light").await.ok();
+    // A terminal nvim that hits a startup error (a lazy.nvim plugin missing a
+    // dependency, say) prints it and sits at a "Press ENTER" prompt; a human
+    // clears it and nvim finishes starting, error and all. This headless embed
+    // has no terminal to show that prompt on and no one to answer it, so nvim
+    // just sits there, and every request below would otherwise hang forever
+    // with nothing in the log to say why. Capture stderr (inherited, so
+    // invisible, by default) for CONNECT_TIMEOUT to quote back if that happens;
+    // kept for the process's whole life, not just startup, in case a later
+    // crash needs the same context.
+    let stderr_tail: Arc<std::sync::Mutex<VecDeque<String>>> =
+        Arc::new(std::sync::Mutex::new(VecDeque::new()));
+    if let Some(stderr) = child.stderr.take() {
+        let tail = stderr_tail.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let mut buf = tail.lock().unwrap();
+                if buf.len() >= 40 {
+                    buf.pop_front();
+                }
+                buf.push_back(line);
+            }
+        });
     }
-    // The GUI feeds mouse events via nvim_input_mouse; make sure nvim acts on
-    // them even if a user config cleared 'mouse'.
-    nvim.command("set mouse=a").await.ok();
 
-    // Autocmds in one augroup, targeted at our channel.
-    let api = nvim.get_api_info().await.map_err(err)?;
-    let chan = api.first().and_then(Value::as_i64).ok_or("no channel id")?;
+    // Everything from here on is one or more round trips to nvim; if it never
+    // answers (the stuck-prompt case above, or anything else), this would hang
+    // forever with the caller none the wiser. `bridge_for` in lib.rs already
+    // gives up waiting after 5s and every gui-window would sit blank with no
+    // explanation. Time the whole handshake instead, and fold the captured
+    // stderr into the error so "why" is visible from the very first symptom
+    // instead of requiring exactly this investigation to find again.
+    let handshake = async move {
+        // No scene is staged here: the renderer draws whatever windows and
+        // buffers the launch args (or the user) produce. Filetype detection is
+        // left to the user's config.
+        //
+        // A bare `-u NONE` nvim ships Neovim 0.10+'s built-in colorscheme with
+        // background=dark. gneovim is a light prose surface, so force the light
+        // palette for that case only. With a real user config, respect whatever
+        // background / colorscheme it sets.
+        if crate::config::get().neovim.is_bare() {
+            nvim.command("set background=light").await.ok();
+        }
+        // The GUI feeds mouse events via nvim_input_mouse; make sure nvim acts
+        // on them even if a user config cleared 'mouse'.
+        nvim.command("set mouse=a").await.ok();
 
-    // Wire the + and * registers to the macOS pasteboard through this channel
-    // (no reliance on pbcopy/pbpaste, which a bundled app cannot find on PATH).
-    nvim.command(&format!(
-        "let g:clipboard = {{\
-           'name': 'gneovim',\
-           'copy': {{\
-             '+': {{lines, rt -> rpcnotify({chan}, 'gnv_clip_set', '+', lines, rt)}},\
-             '*': {{lines, rt -> rpcnotify({chan}, 'gnv_clip_set', '*', lines, rt)}}}},\
-           'paste': {{\
-             '+': {{-> rpcrequest({chan}, 'gnv_clip_get', '+')}},\
-             '*': {{-> rpcrequest({chan}, 'gnv_clip_get', '*')}}}}}}"
-    ))
-    .await
-    .ok();
-    nvim.command("augroup gnv | autocmd! | augroup END")
+        // Autocmds in one augroup, targeted at our channel.
+        let api = nvim.get_api_info().await.map_err(err)?;
+        let chan = api.first().and_then(Value::as_i64).ok_or("no channel id")?;
+
+        // Wire the + and * registers to the macOS pasteboard through this
+        // channel (no reliance on pbcopy/pbpaste, which a bundled app cannot
+        // find on PATH).
+        nvim.command(&format!(
+            "let g:clipboard = {{\
+               'name': 'gneovim',\
+               'copy': {{\
+                 '+': {{lines, rt -> rpcnotify({chan}, 'gnv_clip_set', '+', lines, rt)}},\
+                 '*': {{lines, rt -> rpcnotify({chan}, 'gnv_clip_set', '*', lines, rt)}}}},\
+               'paste': {{\
+                 '+': {{-> rpcrequest({chan}, 'gnv_clip_get', '+')}},\
+                 '*': {{-> rpcrequest({chan}, 'gnv_clip_get', '*')}}}}}}"
+        ))
         .await
-        .map_err(err)?;
-    for spec in [
-        format!(
-            "autocmd gnv CursorMoved,CursorMovedI,ModeChanged,TextChanged,TextChangedI * \
-             call rpcnotify({chan}, 'gnv_cursor', line('.') - 1, charcol('.') - 1, mode())"
-        ),
-        format!(
-            "autocmd gnv CmdlineEnter,CmdlineChanged * \
-             call rpcnotify({chan}, 'gnv_cmdline', getcmdtype(), getcmdline(), getcmdpos())"
-        ),
-        format!("autocmd gnv CmdlineLeave * call rpcnotify({chan}, 'gnv_cmdline_hide')"),
-        format!(
-            "autocmd gnv BufWinEnter,FileType,WinEnter,WinNew,WinClosed * \
-             call rpcnotify({chan}, 'gnv_winft', win_getid(), bufnr(), &filetype)"
-        ),
-        format!(
-            "autocmd gnv OptionSet guifont,guifontwide,linespace \
-             call rpcnotify({chan}, 'gnv_guiopt', expand('<amatch>'), v:option_new)"
-        ),
-    ] {
-        nvim.command(&spec).await.map_err(err)?;
-    }
+        .ok();
+        nvim.command("augroup gnv | autocmd! | augroup END")
+            .await
+            .map_err(err)?;
+        for spec in [
+            format!(
+                "autocmd gnv CursorMoved,CursorMovedI,ModeChanged,TextChanged,TextChangedI * \
+                 call rpcnotify({chan}, 'gnv_cursor', line('.') - 1, charcol('.') - 1, mode())"
+            ),
+            format!(
+                "autocmd gnv CmdlineEnter,CmdlineChanged * \
+                 call rpcnotify({chan}, 'gnv_cmdline', getcmdtype(), getcmdline(), getcmdpos())"
+            ),
+            format!("autocmd gnv CmdlineLeave * call rpcnotify({chan}, 'gnv_cmdline_hide')"),
+            format!(
+                "autocmd gnv BufWinEnter,FileType,WinEnter,WinNew,WinClosed * \
+                 call rpcnotify({chan}, 'gnv_winft', win_getid(), bufnr(), &filetype)"
+            ),
+            format!(
+                "autocmd gnv OptionSet guifont,guifontwide,linespace \
+                 call rpcnotify({chan}, 'gnv_guiopt', expand('<amatch>'), v:option_new)"
+            ),
+        ] {
+            nvim.command(&spec).await.map_err(err)?;
+        }
 
-    // GUI-detection global + the :MarkdownLivePreview{On,Off,Toggle} commands.
-    // Injected, not a user plugin: it must match `handle_notify`'s
-    // `gnv_md_preview` arm. Set before `ui_start` so `g:gneovim` is present by
-    // the time a `UIEnter` autocmd in the user's config runs.
-    let md_default: i64 = crate::config::get().markdown.live_preview_default.into();
-    if let Err(e) = nvim
-        .exec_lua(
-            include_str!("runtime/md_preview.lua"),
-            vec![
-                chan.into(),
-                md_default.into(),
-                env!("CARGO_PKG_VERSION").into(),
-            ],
-        )
-        .await
-    {
-        log::warn!("md_preview.lua injection failed: {e}");
-    }
-
-    // The markdown-island display bridge (conceal now; highlights, folds and
-    // the visual range later). Its `gnv_md_decor` augroup is inert for grid
-    // windows: it reads `w:gnv_md_preview` (from md_preview.lua) per event.
-    if let Err(e) = nvim
-        .exec_lua(include_str!("runtime/md_decor.lua"), vec![chan.into()])
-        .await
-    {
-        log::warn!("md_decor.lua injection failed: {e}");
-    }
-
-    // `:OpenInNewGneovimTab` + `_G.OpenInNewGneovimTab()`: move / open buffers
-    // into a new gui-tab. Injected glue; its `gnv_open_new_tab` rpcnotify must
-    // match `handle_notify`'s arm and `BridgeEvent::OpenNewTab`.
-    if let Err(e) = nvim
-        .exec_lua(
-            include_str!("runtime/open_in_new_tab.lua"),
-            vec![chan.into()],
-        )
-        .await
-    {
-        log::warn!("open_in_new_tab.lua injection failed: {e}");
-    }
-
-    // A moved `[No Name]` buffer (`:OpenInNewGneovimTab` with no args, on a
-    // buffer with no file): seed the initial buffer with its carried-over text.
-    if let Some(lines) = open.content {
-        let arr = Value::Array(lines.into_iter().map(Value::from).collect());
+        // GUI-detection global + the :MarkdownLivePreview{On,Off,Toggle}
+        // commands. Injected, not a user plugin: it must match
+        // `handle_notify`'s `gnv_md_preview` arm. Set before `ui_start` so
+        // `g:gneovim` is present by the time a `UIEnter` autocmd in the user's
+        // config runs.
+        let md_default: i64 = crate::config::get().markdown.live_preview_default.into();
         if let Err(e) = nvim
             .exec_lua(
-                "local l = ...\nvim.api.nvim_buf_set_lines(0, 0, -1, false, l)",
-                vec![arr],
+                include_str!("runtime/md_preview.lua"),
+                vec![
+                    chan.into(),
+                    md_default.into(),
+                    env!("CARGO_PKG_VERSION").into(),
+                ],
             )
             .await
         {
-            log::warn!("open_in_new_tab: seeding moved buffer failed: {e}");
+            log::warn!("md_preview.lua injection failed: {e}");
+        }
+
+        // The markdown-island display bridge (conceal now; highlights, folds
+        // and the visual range later). Its `gnv_md_decor` augroup is inert for
+        // grid windows: it reads `w:gnv_md_preview` (from md_preview.lua) per
+        // event.
+        if let Err(e) = nvim
+            .exec_lua(include_str!("runtime/md_decor.lua"), vec![chan.into()])
+            .await
+        {
+            log::warn!("md_decor.lua injection failed: {e}");
+        }
+
+        // `:OpenInNewGneovimTab` + `_G.OpenInNewGneovimTab()`: move / open
+        // buffers into a new gui-tab. Injected glue; its `gnv_open_new_tab`
+        // rpcnotify must match `handle_notify`'s arm and
+        // `BridgeEvent::OpenNewTab`.
+        if let Err(e) = nvim
+            .exec_lua(
+                include_str!("runtime/open_in_new_tab.lua"),
+                vec![chan.into()],
+            )
+            .await
+        {
+            log::warn!("open_in_new_tab.lua injection failed: {e}");
+        }
+
+        // A moved `[No Name]` buffer (`:OpenInNewGneovimTab` with no args, on
+        // a buffer with no file): seed the initial buffer with its
+        // carried-over text.
+        if let Some(lines) = open.content {
+            let arr = Value::Array(lines.into_iter().map(Value::from).collect());
+            if let Err(e) = nvim
+                .exec_lua(
+                    "local l = ...\nvim.api.nvim_buf_set_lines(0, 0, -1, false, l)",
+                    vec![arr],
+                )
+                .await
+            {
+                log::warn!("open_in_new_tab: seeding moved buffer failed: {e}");
+            }
+        }
+
+        // No buffer is attached here. Islands attach their window's buffer on
+        // demand via `island_attach`; a session with no markdown window never
+        // attaches anything.
+
+        // NOTE: the UI is *not* attached here. `nvim_ui_attach` immediately
+        // emits a full redraw, and the webview has not registered its
+        // `listen()` handlers yet, so that first frame (every window's
+        // `grid_line`) would be lost with no way to make nvim resend it. The
+        // client calls `ui_start` once its listeners are live; see
+        // `Bridge::ui_start`.
+
+        Ok::<(Bridge, Child), String>((Bridge { nvim, shared, bufs }, child))
+    };
+
+    match tokio::time::timeout(CONNECT_TIMEOUT, handshake).await {
+        Ok(result) => result,
+        Err(_) => {
+            let tail: Vec<String> = stderr_tail.lock().unwrap().iter().cloned().collect();
+            let mut msg = format!(
+                "Neovim did not respond within {}s of starting; it is likely stuck at a \
+                 startup prompt this embedded session cannot answer (e.g. a config error \
+                 that a terminal nvim would show as \u{201c}Press ENTER to continue\u{201d}).",
+                CONNECT_TIMEOUT.as_secs()
+            );
+            if !tail.is_empty() {
+                msg.push_str("\n\nNeovim's own output:\n");
+                msg.push_str(&tail.join("\n"));
+            }
+            Err(msg)
         }
     }
-
-    // No buffer is attached here. Islands attach their window's buffer on
-    // demand via `island_attach`; a session with no markdown window never
-    // attaches anything.
-
-    // NOTE: the UI is *not* attached here. `nvim_ui_attach` immediately emits a
-    // full redraw, and the webview has not registered its `listen()` handlers
-    // yet, so that first frame (every window's `grid_line`) would be lost with
-    // no way to make nvim resend it. The client calls `ui_start` once its
-    // listeners are live; see `Bridge::ui_start`.
-
-    Ok((Bridge { nvim, shared, bufs }, child))
 }
 
 impl Bridge {

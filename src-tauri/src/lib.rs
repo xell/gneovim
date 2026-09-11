@@ -20,6 +20,12 @@ use tokio::process::Child;
 struct AppState {
     windows: Mutex<HashMap<String, WindowBridge>>,
     last_focused: Mutex<Option<String>>,
+    /// Label -> reason, for a window whose `bridge::connect` failed (a startup
+    /// timeout, most commonly). It never got an entry in `windows`, so without
+    /// this the quit / close confirmations see it as just another empty,
+    /// harmless window and say nothing about it. Cleared once the window is
+    /// destroyed.
+    failed: Mutex<HashMap<String, String>>,
 }
 
 struct WindowBridge {
@@ -219,6 +225,26 @@ fn guard_close(window: &tauri::Window) {
     let app = window.app_handle().clone();
     async_runtime::spawn(async move {
         let label = window.label().to_string();
+        // A window whose Neovim never started (see `AppState::failed`) has no
+        // bridge to wait for; `bridge_for` would spend its whole 5s retrying
+        // before giving up. Check this first, so Cmd+W is instant, and say why
+        // instead of just destroying the window with nothing shown at all.
+        let failure = app.state::<AppState>().failed.lock().unwrap().get(&label).cloned();
+        if let Some(reason) = failure {
+            if crate::config::get().window.confirm_close {
+                let title = window.title().unwrap_or_else(|_| "This window".into());
+                let first_line = reason.lines().next().unwrap_or(&reason);
+                warn_unsaved(
+                    &app,
+                    format!("\u{201c}{title}\u{201d} never started Neovim"),
+                    first_line.to_string(),
+                    &["Close"],
+                )
+                .await;
+            }
+            let _ = window.destroy();
+            return;
+        }
         let Ok(bridge) = bridge_for(&app, &label).await else {
             let _ = window.destroy();
             return;
@@ -281,10 +307,14 @@ static QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 fn guard_exit(app: &AppHandle) {
     let app = app.clone();
     async_runtime::spawn(async move {
-        let entries: Vec<(String, Bridge)> = {
+        let (entries, failed): (Vec<(String, Bridge)>, Vec<(String, String)>) = {
             let st = app.state::<AppState>();
             let g = st.windows.lock().unwrap();
-            g.iter().map(|(l, w)| (l.clone(), w.bridge.clone())).collect()
+            let f = st.failed.lock().unwrap();
+            (
+                g.iter().map(|(l, w)| (l.clone(), w.bridge.clone())).collect(),
+                f.iter().map(|(l, e)| (l.clone(), e.clone())).collect(),
+            )
         };
         let mut offenders: Vec<(String, Vec<String>)> = Vec::new();
         for (label, b) in &entries {
@@ -306,17 +336,36 @@ fn guard_exit(app: &AppHandle) {
                         b += bb;
                     }
                 }
-                let choice = warn_unsaved(
-                    &app,
-                    "Quit gneovim?".into(),
-                    format!(
-                        "This ends {}.\n{}",
-                        count(entries.len() as i64, "Neovim session"),
-                        stats_line((t, w, b))
-                    ),
-                    &["Cancel", "Quit"],
-                )
-                .await;
+                // A window whose Neovim never started (a timed out connect,
+                // most commonly a startup prompt this embed cannot answer, see
+                // `bridge::connect`) is not in `entries`: it holds no session
+                // to end. Left out, it silently vanishes into "This ends 0
+                // Neovim sessions", indistinguishable from just launching and
+                // quitting again; name it and its reason instead.
+                let mut informative = String::new();
+                if !failed.is_empty() {
+                    informative.push_str(&format!(
+                        "{} failed to start Neovim:\n",
+                        count(failed.len() as i64, "window")
+                    ));
+                    for (label, reason) in &failed {
+                        let title = app
+                            .get_webview_window(label)
+                            .and_then(|win| win.title().ok())
+                            .unwrap_or_else(|| label.clone());
+                        let first_line = reason.lines().next().unwrap_or(reason);
+                        informative.push_str(&format!("\u{2022} {title}: {first_line}\n"));
+                    }
+                    informative.push('\n');
+                }
+                informative.push_str(&format!(
+                    "This ends {}.\n{}",
+                    count(entries.len() as i64, "Neovim session"),
+                    stats_line((t, w, b))
+                ));
+                let choice =
+                    warn_unsaved(&app, "Quit gneovim?".into(), informative, &["Cancel", "Quit"])
+                        .await;
                 if choice != UnsavedChoice::Proceed {
                     return;
                 }
@@ -507,13 +556,34 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec) {
                     }
                     BridgeEvent::Gone(reason) => {
                         log::info!("{emit_label}: {reason}");
-                        // :q / :qa is the common case; drop the gui-window too.
-                        // destroy(), not close(): nvim is already gone, so the
-                        // Cmd+W CloseRequested guard has nothing to check.
-                        if let Some(w) = emit_app.get_webview_window(&emit_label) {
-                            let _ = w.destroy();
+                        // The io loop task (spawned right after `create::new_child_cmd`,
+                        // independent of whether `connect` itself later succeeds) sees
+                        // nvim's stdio close and sends this the moment `connect`'s own
+                        // CONNECT_TIMEOUT gives up and drops the child (`kill_on_drop`).
+                        // If that is what happened, `windows` never gained an entry for
+                        // this label: `spawn_bridge`'s `Err` arm already recorded *why*
+                        // in `failed` and showed it, and destroying the window here
+                        // would yank that message away before it could be read, and
+                        // this generic "connection lost" text is a strictly worse one
+                        // to show over it anyway. A window that *did* connect and later
+                        // lost nvim (:q, a crash) is unaffected: it is still in `windows`.
+                        let ever_connected = emit_app
+                            .state::<AppState>()
+                            .windows
+                            .lock()
+                            .unwrap()
+                            .contains_key(&emit_label);
+                        if ever_connected {
+                            // :q / :qa is the common case; drop the gui-window too.
+                            // destroy(), not close(): nvim is already gone, so the
+                            // Cmd+W CloseRequested guard has nothing to check.
+                            if let Some(w) = emit_app.get_webview_window(&emit_label) {
+                                let _ = w.destroy();
+                            }
+                            emit_app.emit(&ev("gone"), reason)
+                        } else {
+                            Ok(())
                         }
-                        emit_app.emit(&ev("gone"), reason)
                     }
                 };
                 if let Err(e) = r {
@@ -533,7 +603,25 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec) {
                 );
                 log::info!("bridge ready for window {label}");
             }
-            Err(e) => log::error!("bridge failed for window {label}: {e}"),
+            Err(e) => {
+                log::error!("bridge failed for window {label}: {e}");
+                // Remembered so Cmd+Q / Cmd+W's confirmation can say why this
+                // window is empty instead of treating it as just another
+                // harmless, session-less window; see `AppState::failed`.
+                app.state::<AppState>()
+                    .failed
+                    .lock()
+                    .unwrap()
+                    .insert(label.clone(), e.clone());
+                // Reuse the same "gone" overlay a later `:q`/crash shows
+                // (`showGone` in main.js): the window otherwise just sits
+                // blank forever with the reason visible only in this log line
+                // the user never sees. Unlike that later case, the window is
+                // not destroyed here: nothing was ever connected to lose, and
+                // the message (a config error the user needs to go fix) is
+                // worth leaving on screen to read.
+                let _ = app.emit(&format!("gnv://{label}/gone"), e);
+            }
         }
     });
 }
@@ -930,6 +1018,7 @@ pub fn run() {
             WindowEvent::Destroyed => {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.windows.lock().unwrap().remove(window.label());
+                    state.failed.lock().unwrap().remove(window.label());
                     log::info!("window {} closed", window.label());
                 }
                 // Closing a tab can collapse a group's tab bar; AppKit then
