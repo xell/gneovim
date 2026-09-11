@@ -765,24 +765,6 @@ class OverlayWidget extends WidgetType {
 // cm-blockquote line decoration already draws the bar) and H4-H6 markers.
 // One shared instance; identical specs compare equal so it never re-renders.
 const CONCEAL_HIDE = Decoration.replace({});
-// A closed Neovim fold: one placeholder line (foldtextresult) replacing the
-// whole folded range. Display only; open the fold from Neovim (`zo`). A span,
-// not a div: this is an inline (non-block) replace widget, CSS makes it a line.
-class FoldWidget extends WidgetType {
-  constructor(text) {
-    super();
-    this.text = text;
-  }
-  eq(o) {
-    return o.text === this.text;
-  }
-  toDOM() {
-    const s = document.createElement("span");
-    s.className = "cm-nvim-fold";
-    s.textContent = this.text || "···";
-    return s;
-  }
-}
 // Display-bridge decorations, in two fields.
 //
 // islandDecorField: conceal, highlights, visual range. Marks and short inline
@@ -865,10 +847,12 @@ function cursorDeco(state, pos) {
   const line = doc.line(Math.min(pos.row + 1, doc.lines));
   let from = Math.min(line.from + pos.col, line.to);
 
-  // A closed fold replaces its whole range with the FoldWidget; a cursor
-  // decoration placed inside would be swallowed and the cursor vanishes. Snap
-  // it to the fold's left edge and render it there with side -1 (before the
-  // replaced content).
+  // A closed fold hides its body (everything after its own first line); a
+  // cursor decoration placed inside that hidden span would be swallowed and
+  // the cursor vanishes. Neovim keeps a closed fold's reported cursor on its
+  // first line, which is never hidden, so this is mostly a defensive
+  // fallback; snaps to the fold's left edge with side -1 (before the hidden
+  // content) on the rare position it would otherwise land in.
   let onFold = false;
   const folds = state.field(islandFoldField, false);
   if (folds) {
@@ -1058,18 +1042,21 @@ class Island {
   }
   // Display bridge (runtime/md_decor.lua). `d` is the parsed payload:
   // { first, last, conceal: [[row, sByte, eByte, text], ...],
-  //   visual: [[row, sByte, eByte], ...], folds: [[sRow, eRow, text], ...],
+  //   visual: [[row, sByte, eByte], ...], folds: [[sRow, eRow], ...],
   //   hl: { runs: [[row, sByte, eByte, group], ...], defs: {...},
   //     codespans: [[row, sByte, eByte], ...],
   //     virt: [[row, col, hideBytes, [[text, group], ...]], ...] },
   //   heads: [[sRow, eRow, level], ...], codes: [[sRow, eRow], ...],
-  //   quotes: [[sRow, eRow], ...], visual_hl } in absolute buffer coordinates.
+  //   quotes: [[sRow, eRow], ...], visual_hl, accent_fg } in absolute buffer
+  //   coordinates.
   //   Decorations are view-only, so nothing here reaches nvim_edit. `hl.defs` is merged globally by the
   //   listener; this only consumes `hl.runs` / `hl.virt`.
   setDecor(d) {
     this.decor = d;
     if (d?.visual_hl) this.el.style.setProperty("--visual-bg", d.visual_hl);
     else this.el.style.removeProperty("--visual-bg");
+    if (d?.accent_fg) this.el.style.setProperty("--accent", d.accent_fg);
+    else this.el.style.removeProperty("--accent");
     this.applyDecor();
   }
   // byte range [sc, ec) on buffer row `row` -> CM [from, to), or null.
@@ -1085,17 +1072,22 @@ class Island {
     const d = this.decor;
     const doc = this.view.state.doc;
 
-    // folds first: a closed fold is one inline replace over the whole range.
-    // Anything inside it (conceal, visual, hl) is dropped, a replace may not
-    // nest. End at the last folded line's `.to` (before its newline) so the
-    // range stays within the buffer and the trailing newline keeps the next
-    // line flowing normally.
+    // folds first: a closed fold hides everything from the end of its own
+    // first line onward through the end of its last line. The first line is
+    // not touched here at all, so every normal decoration on it (structural
+    // styling, highlights, conceal) still applies exactly as if it were not
+    // folded; foldLines below only adds one text-colour mark to it, the sole
+    // visible sign that the fold is closed. End at the last folded line's
+    // `.to` (before its newline) so the range stays within the buffer and
+    // the trailing newline keeps the next line flowing normally.
     const foldSpans = [];
-    for (const [sr, er, text] of d?.folds ?? []) {
+    const foldLines = [];
+    for (const [sr, er] of d?.folds ?? []) {
       if (sr < 0 || sr >= doc.lines) continue;
-      const from = doc.line(sr + 1).from;
+      const first = doc.line(sr + 1);
       const to = doc.line(Math.min(er + 1, doc.lines)).to;
-      if (to > from) foldSpans.push({ from, to, text });
+      if (first.to > first.from) foldLines.push({ from: first.from, to: first.to });
+      if (to > first.to) foldSpans.push({ from: first.to, to });
     }
     const inFold = (a, b) =>
       foldSpans.some((f) => a < f.to && b > f.from);
@@ -1186,6 +1178,13 @@ class Island {
       const r = this._range(row, sc, ec);
       if (r && !inFold(r.from, r.to)) ranges.push(VISUAL_MARK.range(r.from, r.to));
     }
+    // A closed fold's own first line: everything else about it is untouched
+    // (see foldLines above), this is the only visual difference from the
+    // same line unfolded. `!important` in the CSS rule, since this must win
+    // over whatever colour a highlight mark on the same text already gives
+    // it, regardless of which one CodeMirror happens to nest innermost.
+    for (const f of foldLines)
+      ranges.push(Decoration.mark({ class: "cm-fold-closed" }).range(f.from, f.to));
     // structure: heading size / code fence / blockquote, one Decoration.line
     // per affected line (see lineDeco above for why not a multi-line replace).
     const addLines = (sr, er, cls) => {
@@ -1201,11 +1200,12 @@ class Island {
       addLines(sr, er, `cm-h${Math.min(Math.max(level, 1), 6)}`);
     for (const [sr, er] of d?.codes ?? []) addLines(sr, er, "cm-code-block");
     for (const [sr, er] of d?.quotes ?? []) addLines(sr, er, "cm-blockquote");
-    // folds go in their own never-mapped field (see islandFoldField).
+    // folds go in their own never-mapped field (see islandFoldField). A
+    // closed fold's body is hidden outright, the same no-widget replace as
+    // conceal, not a summary widget: the fold's first line, left untouched
+    // above, is the only visible representative of the whole range.
     const foldSet = Decoration.set(
-      foldSpans.map((f) =>
-        Decoration.replace({ widget: new FoldWidget(f.text) }).range(f.from, f.to),
-      ),
+      foldSpans.map((f) => CONCEAL_HIDE.range(f.from, f.to)),
     );
 
     const st = this.view.state;

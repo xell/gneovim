@@ -133,18 +133,14 @@ body {
 .island .cm-nvim-visual {
   background: var(--visual-bg, color-mix(in srgb, var(--fg) 17%, transparent));
 }
-/* a closed fold, collapsed to one placeholder line (inline replace widget) */
-.island .cm-nvim-fold {
-  display: block;
-  font-family: var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace);
-  font-size: 0.85em;
-  color: color-mix(in srgb, var(--fg) 55%, transparent);
-  background: color-mix(in srgb, var(--fg) 6%, transparent);
-  padding: 0 0.6ch;
-  white-space: pre;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: default;
+/* A closed fold's own first line, otherwise rendered exactly as it would be
+   unfolded (heading size, icon, structural background, all untouched): the
+   accent colour (--accent, Special's fg, see md_decor.lua) is the only cue
+   that it is closed, not a summary line or a placeholder widget. !important:
+   must win over whatever colour a highlight mark already gives this text,
+   regardless of which mark CodeMirror happens to nest innermost. */
+.island .cm-fold-closed {
+  color: var(--accent, inherit) !important;
 }
 
 /* structural styling: one Decoration.line class per markdown block kind */

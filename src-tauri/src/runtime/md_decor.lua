@@ -331,8 +331,11 @@ local function collect_folds(win, first, last)
         l = l + 1
       else
         local fe = vim.fn.foldclosedend(l)
-        local text = (tostring(vim.fn.foldtextresult(fc)):gsub('[%s%-%.·•_=]+$', ''))
-        folds[#folds + 1] = { fc - 1, fe - 1, text }
+        -- No foldtextresult(): the client shows the fold's own first line
+        -- exactly as it would unfolded and only recolours its text, it does
+        -- not render a summary line, so the fold's own text has nothing to
+        -- read it for.
+        folds[#folds + 1] = { fc - 1, fe - 1 }
         l = fe + 1
       end
     end
@@ -643,6 +646,17 @@ local function push(win)
         return nil
       end
       return v.reverse and v.fg or v.bg
+    end)(),
+    -- Neovim colorschemes have no shared naming convention beyond the
+    -- built-in default groups (:help highlight-default), which is the
+    -- closest thing to a template: nearly every colorscheme colours or
+    -- sanely links them, since Neovim's own UI falls back to them.
+    -- 'Special' is gneovim's chosen accent source; the client publishes it
+    -- as --accent. A closed fold's own first line (see collect_folds) uses
+    -- it as a text colour, the only cue that it is closed.
+    accent_fg = (function()
+      local a = resolve_hl('Special')
+      return a and a.fg or nil
     end)(),
   }
   pcall(vim.rpcnotify, chan, 'gnv_md_decor', win, vim.json.encode(payload))
