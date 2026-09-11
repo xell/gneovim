@@ -809,6 +809,18 @@ pub async fn connect(
                 "autocmd gnv OptionSet guifont,guifontwide,linespace \
                  call rpcnotify({chan}, 'gnv_guiopt', expand('<amatch>'), v:option_new)"
             ),
+            // Every `nvim_ui_try_resize` (the webview's ResizeObserver on any
+            // real size change: a window drag, opening/closing devtools) sends
+            // grid 1 a `grid_resize` immediately followed by a `grid_clear`,
+            // which blanks the tabline row client side. Neovim only refills it
+            // if it considers the tabline's own text dirty; from its side nvim's
+            // own text often has not changed (same tabs, same names), so no
+            // fresh `grid_line` for that row ever arrives and the client is left
+            // holding blanked cells with no natural repaint. `redrawtabline`
+            // (not a forced `redraw!`, which reportedly clears every grid, see
+            // multigrid-renderer.md) forces Neovim to recompute and resend just
+            // that row regardless of whether it thinks it is dirty.
+            "autocmd gnv VimResized * redrawtabline".into(),
         ] {
             nvim.command(&spec).await.map_err(err)?;
         }

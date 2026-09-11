@@ -23,7 +23,20 @@ body {
 #viewport {
   position: absolute;
   inset: 0;
-  overflow: hidden;
+  /* Not `hidden`: every child (grids, islands) is `position: absolute` and
+     all real scrolling happens inside an island's own .cm-scroller, so this
+     box should never scroll at all. `overflow: hidden` still leaves it a
+     scroll container WebKit can programmatically scroll (the "bring the
+     focused/selected node into view" auto-scroll, which still runs against a
+     hidden-overflow ancestor); `clip` removes scroll-container semantics
+     entirely, so there is nothing left for that auto-scroll to act on. See
+     docs/multigrid-renderer.md for the bug this fixes (the grid 1 tabline
+     row clipped out of view when CodeMirror moved the cursor to a DOM node
+     far outside any previously rendered viewport, e.g. `gg` in a long
+     island) and why a reactive JS scroll-reset was tried and reverted (it
+     fights CodeMirror's own getBoundingClientRect-based scroll math against
+     the same ancestor, visible as the whole window "shaking" on `j` / `k`). */
+  overflow: clip;
 }
 
 #gone {
