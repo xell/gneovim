@@ -71,6 +71,23 @@ local function preview_on(win)
   return ok and v == 1
 end
 
+-- The row 'concealcursor' says should stay revealed for `win` right now, or
+-- nil if none (the current mode is named in 'concealcursor', so even the
+-- cursor line conceals normally). Shared by every source that mirrors
+-- Neovim's own conceal-like hiding: real conceal (collect_conceal) plus the
+-- client-side heading-marker / blockquote-marker hiding, which is otherwise
+-- not real conceal at all and would not honour this option on its own.
+local function conceal_guard_row(win)
+  local mc = vim.api.nvim_get_mode().mode:sub(1, 1):lower()
+  if mc == '\22' then
+    mc = 'v'
+  end
+  if not tostring(vim.wo[win].concealcursor):find(mc, 1, true) then
+    return vim.api.nvim_win_get_cursor(win)[1] - 1
+  end
+  return nil
+end
+
 -- Inline conceal runs for `win` over the padded viewport, as
 -- { {row, start_byte, end_byte, text}, ... } in absolute buffer coordinates
 -- (byte columns; the client converts to UTF-16 against its own copy).
@@ -102,14 +119,7 @@ local function collect_conceal(win, buf, first, last)
 
   -- Conceal is suppressed on the window's own cursor line unless 'concealcursor'
   -- names the current mode.
-  local guard_row
-  local mc = vim.api.nvim_get_mode().mode:sub(1, 1):lower()
-  if mc == '\22' then
-    mc = 'v'
-  end
-  if not tostring(vim.wo[win].concealcursor):find(mc, 1, true) then
-    guard_row = vim.api.nvim_win_get_cursor(win)[1] - 1
-  end
+  local guard_row = conceal_guard_row(win)
 
   local out = {}
   local function add(row, sc, ec, text)
@@ -621,6 +631,12 @@ local function push(win)
     heads = heads,
     codes = codes,
     quotes = quotes,
+    -- -1 (no valid row is negative) rather than omitting the key when there is
+    -- no guard, so the client has one plain number to compare against instead
+    -- of an optional field. See conceal_guard_row: the heading-marker and
+    -- blockquote-marker hiding client side is not real conceal and would
+    -- otherwise ignore 'concealcursor' entirely.
+    guard_row = conceal_guard_row(win) or -1,
     visual_hl = (function()
       local v = resolve_hl('Visual')
       if not v then

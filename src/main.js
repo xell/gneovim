@@ -1103,12 +1103,16 @@ class Island {
     // Neovim's own conceal, our heading-marker icon, and our blockquote-marker
     // hiding all go through one dedup pass. Ours are pushed first so they win
     // a tie (stable sort) if Neovim also happens to conceal the same run.
-    // Both skip the line the cursor is currently on in this island, so the
-    // raw "#.. " / "> " is there to edit, regardless of concealcursor.
-    const curRow = this.view.state.field(nvimCursorField, false)?.pos?.row;
+    // Both skip guardRow, the same row real conceal is guarded against server
+    // side (md_decor.lua's conceal_guard_row): -1 when 'concealcursor' names
+    // the current mode, meaning nothing is guarded and even the cursor line
+    // conceals normally, otherwise the cursor's row. Neither marker hiding is
+    // real conceal, so without reading this they would always reveal the
+    // cursor line regardless of concealcursor, ignoring the option entirely.
+    const guardRow = d?.guard_row ?? -1;
     const spans = [];
     for (const [sr, , level] of d?.heads ?? []) {
-      if (sr < 0 || sr >= doc.lines || sr === curRow) continue;
+      if (sr < 0 || sr >= doc.lines || sr === guardRow) continue;
       const line = doc.line(sr + 1);
       const m = /^(#{1,6})(\s+)/.exec(line.text); // setext headings have no marker on this line
       if (!m) continue;
@@ -1129,7 +1133,7 @@ class Island {
       const s = Math.max(sr, 0);
       const e = Math.min(er, doc.lines - 1);
       for (let r = s; r <= e; r++) {
-        if (r === curRow) continue;
+        if (r === guardRow) continue;
         const line = doc.line(r + 1);
         const m = /^(?:[ \t]*>[ \t]?)+/.exec(line.text);
         if (!m || !m[0]) continue;
