@@ -488,10 +488,54 @@ const islandForGrid = (gid) => islands.get(gridToWin.get(gid));
 
 function place(el, p) {
   el.style.left = `${p.scol * cellW + originX}px`;
-  el.style.top = `${p.srow * cellH}px`;
+  el.style.top = `${floatTopPx(p) ?? p.srow * cellH}px`;
   el.style.width = `${p.w * cellW}px`;
   el.style.height = `${p.h * cellH}px`;
   if (p.zindex != null) el.style.zIndex = p.zindex;
+}
+
+// Exact pixel top for a float anchored inside an island (see the "win_float"
+// case: srow*cellH assumes every anchor-grid row is one uniform cellH tall,
+// which islands actively defeat with heading/code-block reflow). Resolved
+// here rather than eagerly when the win_float op arrives: that op lands
+// interleaved with a burst of other ops for the same redraw (the popup's own
+// grid gets built via a run of "line"/"resize" ops in the same batch, up to
+// three win_float updates as it's sized). Reading layout there, mid-batch,
+// forces the browser to lay out a subtree that isn't finished being written
+// to yet -- verified live as a visible flicker of the word under the popup.
+// place() already runs once per batch, after every op in it has landed, so
+// resolving it here costs one read instead of interleaving several.
+function floatTopPx(p) {
+  const fa = p.floatAnchor;
+  if (!fa) return null;
+  // Two ways a completion/signature-help float reaches here:
+  // - window-relative, nvim's own ins-completion pum: agrid is that window's
+  //   own grid id, arow already in its row space.
+  // - editor-relative, `nvim_open_win{relative='editor'}` (e.g. nvim-cmp):
+  //   agrid is 1 (the whole screen) and arow is an absolute screen row, not
+  //   any window's row space. Translate it through whichever window's
+  //   rectangle it actually falls in -- in practice always the one holding
+  //   the cursor, since that's who a completion float is anchored to
+  //   regardless of how the plugin opened its window -- by subtracting that
+  //   window's own on-screen top row.
+  let agrid = fa.agrid;
+  let arow = fa.arow;
+  if (agrid === 1) {
+    const wp = winPos.get(cursorGrid);
+    if (!wp || arow == null || arow < wp.srow || arow >= wp.srow + wp.h) return null;
+    agrid = cursorGrid;
+    arow = arow - wp.srow;
+  }
+  const aIsl = islandForGrid(agrid);
+  const baseRow = (grids.get(agrid) || {}).cursor?.row;
+  const delta = baseRow != null ? Math.round(arow ?? 0) - baseRow : null;
+  if (!aIsl || (delta !== 0 && delta !== 1)) return null;
+  const head = aIsl.view.state.selection.main.head;
+  const coords = aIsl.view.coordsAtPos(head);
+  if (!coords) return null;
+  const vTop = viewportEl.getBoundingClientRect().top;
+  const edge = (delta === 1 ? coords.bottom : coords.top) - vTop;
+  return fa.anchorS ? edge - p.h * cellH : edge;
 }
 
 function layout() {
@@ -1533,6 +1577,25 @@ function renderGridOps(ops) {
         const anchor = o.anchor || "NW"; // which float corner sits at (row,col)
         if (anchor[0] === "S") srow -= h;
         if (anchor[1] === "E") scol -= w;
+        // srow*cellH assumes every anchor-grid row is one uniform cellH tall.
+        // True for a plain grid, false inside an island: markdown decorations
+        // give headings, code fences, etc. non-uniform line heights, so a
+        // heading anywhere above the anchor row throws this off (a completion
+        // popup lands noticeably higher than the line it was triggered on).
+        // floatTopPx (see place()) covers the one case that actually matters
+        // -- a float anchored at the cursor's own row or the row directly
+        // below it, i.e. a completion or signature-help popup -- with an
+        // exact pixel lookup through CodeMirror instead, resolved lazily once
+        // the whole batch's ops have landed. Anything else (arow further
+        // away) falls back to the row math above; column is left alone too,
+        // it would need mapping a screen column through the island's own
+        // conceal/rendering and isn't what was reported broken.
+        //
+        // agrid, not cursorGrid: the trigger (e.g. C-x C-k) doesn't move the
+        // cursor, so this redraw may carry no fresh "cursor" op at all and
+        // the global cursorGrid pointer is left stale from whatever grid last
+        // actually had a cursor move. floatTopPx reads the anchor grid's own
+        // last-known `.cursor` row instead, which is set regardless.
         winPos.set(o.grid, {
           srow: Math.round(srow),
           scol: Math.round(scol),
@@ -1540,6 +1603,7 @@ function renderGridOps(ops) {
           h,
           float: true,
           zindex: o.zindex ?? 50,
+          floatAnchor: { agrid: o.agrid, arow: o.arow, anchorS: anchor[0] === "S" },
         });
         if (o.win != null) gridToWin.set(o.grid, o.win);
         layoutDirty = true;

@@ -692,13 +692,30 @@ vim.api.nvim_create_autocmd({
   'TextChanged',
   'TextChangedI',
   'WinScrolled',
-  'ModeChanged',
   'WinEnter',
   'BufWinEnter',
   -- backstop: a lone `zo` / `zc` with a stationary cursor fires no other event.
   'CursorHold',
   'CursorHoldI',
 }, { group = grp, callback = schedule })
+-- ModeChanged also fires for insert-completion's pum-visible sub-modes ('i'
+-- <-> 'ic' <-> 'ix', :h mode()): opening, closing, or cycling the completion
+-- menu, on every keystroke. Nothing this module renders depends on pum
+-- visibility (conceal/highlight/fold state is unrelated), so without this
+-- filter a full decor recompute lands mid-completion and visibly repaints
+-- the word being completed. Real mode changes (Insert<->Normal, Visual, ...)
+-- still schedule normally.
+local ins_compl_mode = { i = true, ic = true, ix = true }
+vim.api.nvim_create_autocmd('ModeChanged', {
+  group = grp,
+  callback = function()
+    local e = vim.v.event
+    if ins_compl_mode[e.old_mode] and ins_compl_mode[e.new_mode] then
+      return
+    end
+    schedule()
+  end,
+})
 vim.api.nvim_create_autocmd('OptionSet', {
   group = grp,
   -- foldlevel / foldenable catch the bulk fold commands (`zR` `zM` `zi` ...).
