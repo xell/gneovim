@@ -32,6 +32,16 @@ That produced a bar that flickered at the far left of the current line on every 
 Driving the caret only from `setNvimCursor` (the `gnv_cursor` feed) removes that class of bug.
 Under fast typing the decoration can trail one character for a single frame until the cursor feed arrives; it never jumps to the line edge.
 
+## Buffer sync: minimal edits
+
+`nvim_buf_attach` reports at line granularity (`on_lines(buf, tick, firstline, lastline, new_lastline)` plus the new line text), so a naive translation would replace the whole changed line range on every edit, even a single keystroke.
+`applyBufLines` computes that line-range replace first, then strips the common prefix and common suffix between the old span and the new text before dispatching, so a one character keystroke becomes a one character insertion.
+
+This matters beyond tidiness. A CodeMirror decoration maps through a change by shrinking or dropping whatever the change actually touches, so a whole-line replace drops every decoration on that line (conceal, highlight marks) for one push cycle: `**bold**` before the cursor lost its conceal and bold on every keystroke, changing width and shaking the line, until the minimal-edit fix landed alongside the cursor-field fix above.
+The minimal edit leaves decorations outside the actual change untouched.
+
+Verified against fifteen cases (single-char insert and delete, multi-line paste, `:%s`, `J`, `dap`, `o` / `gO`, buffer-boundary edits, and a full `:e` reload both unchanged and fully different): the computed change always reconstructs the target text exactly, and an unchanged `:e` now produces an empty change that `applyBufLines` skips rather than dispatches.
+
 ## The number column
 
 `runtime/md_preview.lua` also mirrors each markdown window's `number`, `relativenumber`, `numberwidth`, `signcolumn`, `foldcolumn` to the client, on `OptionSet` for those names and on the window events, with a `win_gutters` pull for first attach.
@@ -163,6 +173,16 @@ The client renders each fold as one plain (non-block) `Decoration.replace` from 
 When the cursor is on a closed fold, Neovim reports it on the fold's first line, which is inside the replace range, so the cursor decoration would be swallowed and vanish. `cursorDeco` checks `islandFoldField` for a fold covering the cursor position and instead renders a block cursor at the fold's left edge with `side: -1`. `islandFoldField` is defined before `nvimCursorField` so `cursorDeco` reads the current fold set within the same transaction that adds a fold.
 
 Trigger gap: Neovim has no fold autocmd. `zR` / `zM` / `zi` are caught by `OptionSet foldlevel,foldenable`; a `zc` that moves the cursor to the fold start is caught by `CursorMoved`; a bare `zo` with a stationary cursor is only caught by the `CursorHold` backstop (after `updatetime`) or the next cursor move or scroll.
+
+## Decoration safety rules
+
+Learned the hard way from the fold implementation (three rounds: a freeze that survived `:e`, a flash-every-keystroke overcorrection, then a layout-jump-every-keystroke overcorrection, before landing on the rule below). Keep these in mind for every future decoration, in particular the structural styling slice (heading sizes, code fence backgrounds, blockquote bars).
+
+- A decoration that stays within one line is safe to map through edits. `Decoration.mark` and a single line `Decoration.replace` (conceal, highlights, the visual range) map correctly with `RangeSet.map(tr.changes)`: CodeMirror shrinks or drops whatever the change touches and shifts the rest. This is the default, low risk case, and it is what keeps decorations from flickering on every keystroke.
+- A decoration that spans multiple lines is a different, higher risk case. The closed fold replace (`[firstLine.from, lastLine.to]`) corrupted `RangeSet.map` into a state where every later map threw, aborting the transaction, so Neovim's buffer echo never landed and the island froze for good; `:e` and a forced re-attach could not recover because they hit the same throw. Isolate any future multi line decoration into its own `StateField`, never call `RangeSet.map` on it, and map it by hand with `tr.changes.mapPos` on each end instead (see `islandFoldField`).
+- Prefer `Decoration.line()` over a multi line `Decoration.replace` when the goal is per-line styling, not content replacement. A heading size, a code fence background, and a blockquote bar do not need to hide or swap any text, only add a class to each affected line. `Decoration.line` decorations are anchored at `line.from`, map trivially, and do not carry the fold class of risk at all. Reach for `Decoration.replace` only when content must actually disappear or be swapped for a widget, as conceal and folds do.
+- `islandDecorField` (conceal, highlights, visual) and `islandFoldField` (folds) stay separate `StateField`s so a problem in one can never corrupt the other, and each uses the mapping strategy that fits what it holds.
+- Recovery stays in place regardless of the above. `islandDecorField`'s map is wrapped in `try` and drops to `Decoration.none` rather than throwing; `applyReset` clears both fields before its full-doc replace, so a forced re-attach (`:MarkdownLivePreviewOff` / on, or the `island desync` catch in `applyBufLines`) can always recover even from an unanticipated case.
 
 ## Files
 
