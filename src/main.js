@@ -945,6 +945,7 @@ class Island {
     this.gutter = null; // last { number, relativenumber, numberwidth, ... }
     this._gutterRaf = 0;
     this.decor = null; // last md_decor payload (parsed)
+    this._lastViewport = null; // last {topline,botline,linecount} scrollTo saw
     this.el = document.createElement("div");
     this.el.className = "island";
     this.el.hidden = true;
@@ -1372,6 +1373,11 @@ class Island {
     updateImeFocus();
   }
   applyReset(m) {
+    // A reset can reuse this same Island for a new buffer (reconcileIslands
+    // re-attaching on a buffer switch); the new buffer's first scrollTo must
+    // not be skipped just because its topline/botline/linecount happen to
+    // match whatever the old buffer last scrolled to.
+    this._lastViewport = null;
     // clear decorations before the full-doc replace: if a stale set is what is
     // making dispatches throw, mapping it through this huge change would keep
     // the island wedged even across `:e` / a forced re-attach.
@@ -1387,6 +1393,24 @@ class Island {
     this.applyCursor(m.row, m.col, m.mode);
   }
   scrollTo(topline, botline, linecount) {
+    // win_viewport fires on every redraw touching this window, including a
+    // bare cursor move that never actually scrolls (curline/curcol ride
+    // along in the same event); Neovim resends the same topline/botline it
+    // already sent. EditorView.scrollIntoView isn't a no-op just because the
+    // target is already visible though: it still re-measures and re-aligns,
+    // and if that lands in the same tick as a decoration change on the line
+    // being aligned to (the cursor widget arriving at or leaving an
+    // otherwise-empty line), it can compute against a height CodeMirror
+    // hasn't finished settling into, one real (if small) corrective scroll
+    // and then a snap back, which is the "shake". Confirmed live: only ever
+    // on the exact line scrollIntoView re-aligns to on every single call,
+    // topline itself (line 1 when the window is already at the top of the
+    // buffer), never elsewhere. Skipping the call entirely when nothing
+    // about the viewport actually changed removes the redundant re-align
+    // that the race depends on, not just for this one case.
+    const key = `${topline}/${botline}/${linecount}`;
+    if (this._lastViewport === key) return;
+    this._lastViewport = key;
     const doc = this.view.state.doc;
     // Neovim scrolled for a monospace window `p.h` rows tall, but our box is
     // that many *monospace cells* tall and CM lines are taller, so it fits

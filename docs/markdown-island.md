@@ -32,6 +32,22 @@ That produced a bar that flickered at the far left of the current line on every 
 Driving the caret only from `setNvimCursor` (the `gnv_cursor` feed) removes that class of bug.
 Under fast typing the decoration can trail one character for a single frame until the cursor feed arrives; it never jumps to the line edge.
 
+### The empty-line cursor widget and the "shake"
+
+The EOL cursor widget (`.nvim-cursor-eol`, used when the cursor sits on an empty line or at end of line) needs `position: absolute` (anchored by `.island .cm-line { position: relative }`), not the more obvious `display: inline-block`.
+CodeMirror measures each line's own actual rendered DOM height for its internal scroll math (virtualization, keeping the viewport anchored), not a fixed CSS `line-height`.
+As ordinary in-flow content, the widget's own box height feeds into that measurement, so any mismatch between its height and whatever height CodeMirror already expects for that line, in either direction, changes the line's measured height the moment the widget arrives at or leaves it.
+That is one half of what showed up as the whole window "shaking" on plain `j` / `k`: a real, if tiny, corrective scroll fired to keep the viewport visually anchored while the line above or below it changed size.
+Matching the line's own `line-height` exactly made it worse, not better (the mismatch just moved to every line instead of only empty ones); a shorter fixed height had the same problem in the other direction.
+`position: absolute` removes the widget from the line's flow entirely, so its own height can never affect the line's measured height regardless of what it is.
+
+The other half was `Island.scrollTo`, called from the `win_viewport` grid op unconditionally on every redraw touching the window, including a bare cursor move that never actually scrolls (`win_viewport` carries `curline` / `curcol` too, so Neovim resends the same `topline` / `botline` on a plain `j` / `k`).
+`EditorView.scrollIntoView` is not a no-op just because its target is already visible: it still re-measures and re-aligns.
+When that re-measure lands in the same tick as the cursor widget arriving at or leaving the exact line being aligned to, `topline` itself, it can compute against a height CodeMirror has not finished settling into: one small corrective scroll, then a snap back.
+That is why only the very top line of a long, already-scrolled buffer shook, never the middle: `scrollTo` always re-aligns to `topline`, so only a decoration change landing on `topline` itself can race it.
+Fixed by having `scrollTo` track the last `{topline, botline, linecount}` it saw and skip the dispatch entirely when nothing about the viewport actually changed, removing the redundant re-align the race depended on.
+Reset that tracked state in `applyReset`, since a buffer switch reuses the same `Island` and must not skip its new buffer's first real scroll just because the numbers happen to coincide with the old buffer's last ones.
+
 ## Buffer sync: minimal edits
 
 `nvim_buf_attach` reports at line granularity (`on_lines(buf, tick, firstline, lastline, new_lastline)` plus the new line text), so a naive translation would replace the whole changed line range on every edit, even a single keystroke.

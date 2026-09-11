@@ -269,8 +269,33 @@ body {
   border-radius: 1px;
 }
 .nvim-cursor-eol {
-  display: inline-block;
+  /* CodeMirror measures each line's own actual rendered DOM height for its
+     internal scroll math (virtualization, keeping the viewport anchored),
+     not a fixed CSS line-height. As a normal (in-flow) inline-block, this
+     widget's own box height feeds into that measurement, so any mismatch
+     between its height and whatever height CM already expects for this
+     line, in *either* direction, changes the line's measured height the
+     moment the widget arrives or leaves it. That is the "shake": a real,
+     if tiny, scroll fired to keep the viewport visually anchored while the
+     line above or below it changes size. Tried matching line-height (too
+     tall, widened the mismatch to every line) and a shorter fixed height
+     (too short) first; both still changed the line's height, just by a
+     different amount. `position: absolute` is the actual fix: it removes
+     the widget from the line's flow entirely, so its own height can no
+     longer affect the line's measured height at all, regardless of what it
+     is. Un-set top/left/right/bottom (the default `auto`) keeps it exactly
+     where it would have sat in normal flow, so no manual positioning is
+     needed; `.island .cm-line { position: relative }` below is what makes
+     that "would have sat" positioning context the line itself, not some
+     unrelated ancestor. */
+  position: absolute;
   width: 0.5ch;
+  height: 1em;
+}
+/* The positioning context .nvim-cursor-eol's `position: absolute` anchors
+   to; see the comment there. */
+.island .cm-line {
+  position: relative;
 }
 /* insert-mode bar caret inside the island */
 .nvim-cursor-bar {
