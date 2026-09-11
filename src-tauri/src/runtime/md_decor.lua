@@ -4,18 +4,21 @@
 --
 -- Purpose: mirror Neovim's *already computed* per-window display state for a
 -- markdown-live-preview window into its CodeMirror island. This script does not
--- reimplement conceal, folds, treesitter, syntax, or render-markdown.nvim. It
--- reads their results with built-in calls (synconcealed, the treesitter
--- highlights query, nvim_buf_get_extmarks, nvim_get_hl, foldclosed, getpos)
--- and forwards a compact payload.
+-- reimplement conceal, folds, treesitter, syntax, matches, or render-markdown.nvim.
+-- It reads their results with built-in calls (synconcealed, the treesitter
+-- highlights query, nvim_buf_get_extmarks, getmatches, nvim_get_hl, foldclosed,
+-- getpos) and forwards a compact payload.
 --
 -- Payload keys, all viewport-limited and absolute buffer coordinates:
 --   conceal : union of synconcealed() (:syntax), the treesitter highlights
 --             query `conceal` metadata, and extmark `conceal`.
 --   visual  : the visual / select range.
 --   folds   : closed folds (foldclosed / foldtextresult).
---   hl      : { runs, defs } - every treesitter capture and hl_group extmark
---             over the viewport, plus the resolved attrs for each group.
+--   hl      : { runs, defs } - union of every treesitter capture, hl_group
+--             extmark, and :match / matchadd() / matchaddpos() overlay
+--             (getmatches()) over the viewport, plus the resolved attrs for
+--             each group. The last is how plugins like vim-easymotion and
+--             quick-scope colour a window without extmarks or :syntax.
 --
 -- Args: (channel).
 
@@ -386,6 +389,34 @@ local function collect_highlights(win, buf, first, last)
       add(row, col, d.end_col, d.hl_group)
     end
   end
+
+  -- :match / matchadd() / matchaddpos() overlays (easymotion, quick-scope,
+  -- and any plugin that recolors this way instead of extmarks or :syntax).
+  -- Not seen by any of the above; getmatches() is the only read for it.
+  pcall(function()
+    for _, m in ipairs(vim.fn.getmatches(win)) do
+      if m.pos1 then
+        -- matchaddpos(): up to 8 literal positions, each {lnum[, col[, len]]}
+        for i = 1, 8 do
+          local p = m['pos' .. i]
+          if not p then
+            break
+          end
+          local row = (p[1] or 0) - 1
+          if row >= first and row <= last then
+            local sc = (p[2] or 1) - 1
+            add(row, sc, sc + (p[3] or 1), m.group)
+          end
+        end
+      elseif m.pattern and m.pattern ~= '' then
+        -- matchadd(): resolve the pattern the same way Neovim would, over the
+        -- padded viewport only.
+        for _, hit in ipairs(vim.fn.matchbufline(buf, m.pattern, first + 1, last + 1, {})) do
+          add(hit.lnum - 1, hit.byteidx, hit.byteidx + #hit.text, m.group)
+        end
+      end
+    end
+  end)
 
   local defs = {}
   for group in pairs(seen) do
