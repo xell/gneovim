@@ -771,16 +771,26 @@ class ConcealWidget extends WidgetType {
 // the island hides these itself, independent of conceallevel, as part of the
 // heading size / icon styling (see applyDecor). H4-H6 just hide, no icon.
 class HeadingIconWidget extends WidgetType {
-  constructor(level) {
+  constructor(level, cursorMode = null) {
     super();
     this.level = level;
+    this.cursorMode = cursorMode;
   }
   eq(o) {
-    return o.level === this.level;
+    return o.level === this.level && o.cursorMode === this.cursorMode;
   }
   toDOM() {
     const s = document.createElement("span");
-    s.className = `cm-heading-icon cm-heading-icon-${this.level}`;
+    const cursorClass =
+      this.cursorMode == null
+        ? ""
+        : this.cursorMode[0] === "i"
+          ? " cm-heading-icon-cursor-bar"
+          : " cm-heading-icon-cursor-block";
+    s.className = `cm-heading-icon${cursorClass}`;
+    const glyph = document.createElement("span");
+    glyph.className = `cm-heading-icon-glyph cm-heading-icon-${this.level}`;
+    s.append(glyph);
     return s;
   }
 }
@@ -1520,12 +1530,19 @@ class Island {
       const to = from + m[0].length;
       if (inFold(from, to)) continue;
       const lvl = Math.min(Math.max(level, 1), 6);
+      // The heading icon replaces the first source character. When conceal
+      // stays active on the cursor line, the ordinary cursor decoration would
+      // be swallowed by that replace, so the icon paints its cursor state.
+      const cursorMode =
+        this._nvimCursor?.row === sr && this._nvimCursor.col === 0
+          ? this.mode
+          : null;
       spans.push({
         from,
         to,
         deco:
           lvl <= 3
-            ? Decoration.replace({ widget: new HeadingIconWidget(lvl) })
+            ? Decoration.replace({ widget: new HeadingIconWidget(lvl, cursorMode) })
             : CONCEAL_HIDE,
       });
     }

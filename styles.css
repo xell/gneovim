@@ -226,10 +226,16 @@ body {
    scales with the heading's own cm-h1..h3 font-size. */
 .island .cm-heading-icon {
   display: inline-block;
+  position: relative;
   width: 0.6em;
   height: 0.6em;
   vertical-align: middle;
   margin-right: 0.35em;
+}
+.island .cm-heading-icon-glyph {
+  display: block;
+  width: 100%;
+  height: 100%;
   mask-repeat: no-repeat;
   -webkit-mask-repeat: no-repeat;
   mask-position: center;
@@ -249,6 +255,33 @@ body {
 .island .cm-heading-icon-3 {
   mask-image: url("assets/heading-3-indicator.svg");
   -webkit-mask-image: url("assets/heading-3-indicator.svg");
+}
+/* The icon replaces the first "#" of an H1-H3 marker. When conceal stays
+   active there, it also stands in for the otherwise hidden Neovim cursor. */
+.island .cm-heading-icon-cursor-block {
+  /* Keep the widget's small icon box out of line measurement, but paint a
+     1.2em cursor behind it: 75% of the heading's 1.6em line height. */
+  z-index: 0;
+}
+.island .cm-heading-icon-cursor-block::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: -0.2em;
+  right: -0.1em;
+  bottom: -0.2em;
+  left: -0.1em;
+  background-color: var(--fg);
+  border-radius: 1px;
+}
+.island .cm-heading-icon-cursor-block .cm-heading-icon-glyph {
+  /* The cursor is a solid rectangle; the masked glyph gets the inverse
+     background colour, making the heading indicator read as reverse video. */
+  background-color: var(--bg);
+}
+.island .cm-heading-icon-cursor-bar {
+  border-left: 2px solid var(--fg);
+  margin-left: -2px;
 }
 
 /* hidden IME/keyboard sink for grid windows: a real <textarea> at the cursor so
