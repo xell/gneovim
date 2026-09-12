@@ -2013,7 +2013,7 @@ function renderGridOps(ops) {
           // (re)gained an island's grid: replay the last known buffer
           // position immediately rather than waiting for a fresh gnv_cursor
           // event, which may not come if Neovim sees nothing further changed
-          if (next && next !== prev && lastCursorPayload)
+          if (next && next !== prev && lastCursorPayload?.win === next.winId)
             next.applyCursor(
               lastCursorPayload.row,
               lastCursorPayload.col,
@@ -2103,7 +2103,7 @@ function renderGridOps(ops) {
           // than the latest cursor event. Re-seat from the authoritative cursor
           // payload instead, so a stale viewport never overwrites a temporary
           // external-editor selection.
-          if (cursorGrid === o.grid && lastCursorPayload)
+          if (cursorGrid === o.grid && lastCursorPayload?.win === isl.winId)
             isl.applyCursor(
               lastCursorPayload.row,
               lastCursorPayload.col,
@@ -2288,12 +2288,12 @@ addEventListener("error", (e) => {
         if (isl.bufnr === buf) isl.applyBufLines(firstline, lastline, linedata);
     }),
     listen(ev("cursor"), (e) => {
-      // CursorMoved reports the *global* cursor wherever focus is; route it to
-      // the island that owns the focused grid, if any. Cache it regardless, so
-      // a grid_cursor_goto that hands the island its grid back *after* this
-      // event can replay it (see lastCursorPayload).
+      // CursorMoved reports the current window explicitly. Never infer its
+      // buffer from cursorGrid: a redraw can deliver this notification before
+      // its grid_cursor_goto, which previously applied another window's row to
+      // the island and scrolled it to that clamped position.
       lastCursorPayload = e.payload;
-      const isl = islandForGrid(cursorGrid);
+      const isl = islands.get(e.payload.win);
       if (isl)
         isl.applyCursor(
           e.payload.row,

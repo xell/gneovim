@@ -69,6 +69,9 @@ pub struct LinesPayload {
 
 #[derive(Clone, Serialize)]
 pub struct CursorPayload {
+    /// Window that owns this cursor position. Cursor rows and columns are
+    /// meaningful only in that window's buffer.
+    pub win: i64,
     pub row: i64,
     pub col: i64,
     pub mode: String,
@@ -316,14 +319,16 @@ impl Handler for NvHandler {
                 }));
             }
             "gnv_cursor" => {
-                let row = args.first().and_then(Value::as_i64).unwrap_or(0);
-                let col = args.get(1).and_then(Value::as_i64).unwrap_or(0);
-                let mode = args.get(2).and_then(Value::as_str).unwrap_or("n").to_string();
-                let scrolloff = args.get(3).and_then(Value::as_i64).unwrap_or(0);
+                let win = args.first().and_then(Value::as_i64).unwrap_or(0);
+                let row = args.get(1).and_then(Value::as_i64).unwrap_or(0);
+                let col = args.get(2).and_then(Value::as_i64).unwrap_or(0);
+                let mode = args.get(3).and_then(Value::as_str).unwrap_or("n").to_string();
+                let scrolloff = args.get(4).and_then(Value::as_i64).unwrap_or(0);
                 let _ = self
                     .shared
                     .tx
                     .send(BridgeEvent::Cursor(CursorPayload {
+                        win,
                         row,
                         col,
                         mode,
@@ -804,11 +809,11 @@ pub async fn connect(
         for spec in [
             format!(
                 "autocmd gnv CursorMoved,CursorMovedI,ModeChanged,TextChanged,TextChangedI * \
-                 call rpcnotify({chan}, 'gnv_cursor', line('.') - 1, charcol('.') - 1, mode(), &scrolloff)"
+                 call rpcnotify({chan}, 'gnv_cursor', win_getid(), line('.') - 1, charcol('.') - 1, mode(), &scrolloff)"
             ),
             format!(
                 "autocmd gnv OptionSet scrolloff \
-                 call rpcnotify({chan}, 'gnv_cursor', line('.') - 1, charcol('.') - 1, mode(), &scrolloff)"
+                 call rpcnotify({chan}, 'gnv_cursor', win_getid(), line('.') - 1, charcol('.') - 1, mode(), &scrolloff)"
             ),
             format!(
                 "autocmd gnv CmdlineEnter,CmdlineChanged * \
