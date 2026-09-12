@@ -1828,6 +1828,7 @@ addEventListener("error", (e) => {
     listen(ev("cmdline"), () => {}),
     listen(ev("cmdline_hide"), () => {}),
     listen(ev("focus"), () => repaintNow()),
+    listen(ev("look_up"), () => islandLookup()),
     listen(ev("guiopt"), (e) => applyGuiOpt(e.payload.name, e.payload.value)),
     listen(ev("md_preview"), (e) => {
       const { win, state } = e.payload;
@@ -2042,6 +2043,42 @@ function keyToNvim(e) {
 
   if (mods || named || base === "lt") return `<${mods}${base}>`;
   return base;
+}
+
+function islandLookup() {
+  const isl = islandForGrid(cursorGrid);
+  if (!isl) {
+    jlog("look up: no focused island");
+    return false;
+  }
+  const pos = isl.view.state.selection.main.head;
+  const line = isl.view.state.doc.lineAt(pos);
+  const col = pos - line.from;
+  const segments = new Intl.Segmenter(undefined, { granularity: "word" }).segment(line.text);
+  let word = null;
+  let from = pos;
+  for (const segment of segments) {
+    const end = segment.index + segment.segment.length;
+    if (segment.isWordLike && segment.index <= col && col <= end) {
+      word = segment.segment;
+      from = line.from + segment.index;
+      break;
+    }
+  }
+  if (!word) {
+    jlog("look up: no word at cursor");
+    return false;
+  }
+  const coords = isl.view.coordsAtPos(from);
+  if (!coords) {
+    jlog("look up: no cursor coordinates");
+    return false;
+  }
+  jlog(`look up: island sent ${JSON.stringify(word)}`);
+  invoke("show_definition", { text: word, x: coords.left, y: coords.bottom }).catch((err) =>
+    jlog("show_definition failed: " + err),
+  );
+  return true;
 }
 
 addEventListener("keydown", (e) => {

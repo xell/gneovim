@@ -78,6 +78,199 @@ fn apply_corner_radius(win: &tauri::WebviewWindow) {
     }
 }
 
+/// Give Globe-Control shortcuts first refusal before a focused WKWebView can
+/// turn them into DOM key events.
+///
+/// The Globe/Fn modifier exists in NSEvent's flags but is not exposed to
+/// KeyboardEvent, so this has to live above the webview rather than in
+/// `keyToNvim`. Globe-Control uses `performKeyEquivalent:`, with the menu as
+/// its whitelist. Every other event continues through to the focused surface
+/// unchanged.
+#[cfg(target_os = "macos")]
+fn install_native_shortcut_monitor() {
+    use std::ptr;
+
+    use block2::RcBlock;
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSEvent, NSEventMask, NSEventModifierFlags};
+
+    let monitor = RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
+        // The monitor runs on AppKit's main thread. A local monitor sees the
+        // original event before the responder chain and can return null to
+        // consume an event that the Window menu handled.
+        let event = unsafe { event.as_ref() };
+        let flags = event.modifierFlags();
+        let window_shortcut =
+            flags.contains(NSEventModifierFlags::Function | NSEventModifierFlags::Control);
+        if window_shortcut {
+            let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+            if let Some(menu) = app.mainMenu() {
+                if menu.performKeyEquivalent(event) {
+                    return ptr::null_mut();
+                }
+            }
+        }
+        event as *const NSEvent as *mut NSEvent
+    });
+
+    // Keep AppKit's monitor token alive for the process lifetime. Dropping the
+    // returned Retained object unregisters the monitor, which would silently
+    // leave every shortcut to WKWebView.
+    let token = unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+            NSEventMask::KeyDown,
+            &monitor,
+        )
+    };
+    std::mem::forget(token);
+    log::info!("native shortcut monitor installed");
+}
+
+/// WKWebView consumes Command-Control-D in `performKeyEquivalent:` before
+/// AppKit reaches its local event monitors or Tauri's menu callback. Carbon's
+/// application hot-key event is delivered before that webview dispatch.
+#[cfg(target_os = "macos")]
+mod lookup_hotkey {
+    use std::{
+        ffi::c_void,
+        ptr,
+        sync::{Mutex, OnceLock},
+    };
+
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    use tauri::{AppHandle, Emitter};
+
+    const NO_ERR: i32 = 0;
+    const KEY_D: u32 = 2;
+    const CMD_KEY: u32 = 1 << 8;
+    const CONTROL_KEY: u32 = 1 << 12;
+    const EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
+    const EVENT_HOT_KEY_PRESSED: u32 = 6;
+    const LOOKUP_HOTKEY_ID: u32 = 1;
+    const LOOKUP_SIGNATURE: u32 = u32::from_be_bytes(*b"gnvL");
+
+    #[repr(C)]
+    struct EventTypeSpec {
+        event_class: u32,
+        event_kind: u32,
+    }
+
+    #[repr(C)]
+    struct EventHotKeyId {
+        signature: u32,
+        id: u32,
+    }
+
+    type EventHandlerCallRef = *mut c_void;
+    type EventRef = *mut c_void;
+    type EventHandlerRef = *mut c_void;
+    type EventHotKeyRef = *mut c_void;
+    type EventTargetRef = *mut c_void;
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        fn GetApplicationEventTarget() -> EventTargetRef;
+        fn InstallEventHandler(
+            target: EventTargetRef,
+            handler: extern "C" fn(EventHandlerCallRef, EventRef, *mut c_void) -> i32,
+            num_types: u32,
+            types: *const EventTypeSpec,
+            user_data: *mut c_void,
+            handler_ref: *mut EventHandlerRef,
+        ) -> i32;
+        fn RegisterEventHotKey(
+            key_code: u32,
+            modifiers: u32,
+            hot_key_id: EventHotKeyId,
+            target: EventTargetRef,
+            options: u32,
+            hot_key_ref: *mut EventHotKeyRef,
+        ) -> i32;
+        fn UnregisterEventHotKey(hot_key: EventHotKeyRef) -> i32;
+    }
+
+    static APP: OnceLock<AppHandle> = OnceLock::new();
+    static HOTKEY: Mutex<Option<usize>> = Mutex::new(None);
+
+    extern "C" fn handle_lookup(
+        _next: EventHandlerCallRef,
+        _event: EventRef,
+        _user_data: *mut c_void,
+    ) -> i32 {
+        // The registration is application-wide, so do nothing while another
+        // application is active. It must not claim this shortcut globally.
+        let mtm = MainThreadMarker::new().expect("Carbon invoked off the main thread");
+        if !NSApplication::sharedApplication(mtm).isActive() {
+            return NO_ERR;
+        }
+        if let Some(app) = APP.get() {
+            if let Some(label) = super::recipient_window(app) {
+                log::info!("look up: Carbon shortcut selected for {label}");
+                let _ = app.emit(&format!("gnv://{label}/look_up"), ());
+            }
+        }
+        NO_ERR
+    }
+
+    pub(super) fn install(app: AppHandle) {
+        APP.set(app).expect("Look Up hot key installed twice");
+        let event = EventTypeSpec {
+            event_class: EVENT_CLASS_KEYBOARD,
+            event_kind: EVENT_HOT_KEY_PRESSED,
+        };
+        let mut handler = ptr::null_mut();
+        let status = unsafe {
+            InstallEventHandler(
+                GetApplicationEventTarget(),
+                handle_lookup,
+                1,
+                &event,
+                ptr::null_mut(),
+                &mut handler,
+            )
+        };
+        assert_eq!(status, NO_ERR, "could not install Look Up hot-key handler");
+        log::info!("look up: Carbon hot-key handler installed");
+    }
+
+    /// Carbon hot keys are global registrations. Register only while a
+    /// Gneovim window has focus so another application keeps Command-Control-D
+    /// when it is active.
+    pub(super) fn set_active(active: bool) {
+        let mut registered = HOTKEY.lock().unwrap();
+        if !active {
+            if let Some(hotkey) = registered.take() {
+                let status = unsafe { UnregisterEventHotKey(hotkey as EventHotKeyRef) };
+                if status != NO_ERR {
+                    log::warn!("could not unregister Command-Control-D: {status}");
+                }
+            }
+            return;
+        }
+        if registered.is_some() {
+            return;
+        }
+        let mut hotkey = ptr::null_mut();
+        let status = unsafe {
+            RegisterEventHotKey(
+                KEY_D,
+                CMD_KEY | CONTROL_KEY,
+                EventHotKeyId {
+                    signature: LOOKUP_SIGNATURE,
+                    id: LOOKUP_HOTKEY_ID,
+                },
+                GetApplicationEventTarget(),
+                0,
+                &mut hotkey,
+            )
+        };
+        assert_eq!(status, NO_ERR, "could not register Command-Control-D");
+        *registered = Some(hotkey as usize);
+        log::info!("look up: Carbon hot key installed");
+    }
+}
+
 
 /// x of the close-button frame origin, in points. AppKit's default is ~7; we
 /// shift the whole cluster right a touch so it clears the 26 pt corner
@@ -649,6 +842,67 @@ async fn nvim_input(app: AppHandle, window: tauri::Window, keys: String) -> Resu
     bridge_for(&app, window.label()).await?.input(&keys).await
 }
 
+/// Present macOS Look Up for text from the markdown island. CodeMirror's
+/// selection intentionally does not mirror Neovim Visual mode, so WKWebView
+/// cannot perform this shortcut itself. AppKit accepts the text independently
+/// of the web selection and anchors its popover at the island cursor.
+#[tauri::command]
+fn show_definition(
+    app: AppHandle,
+    window: tauri::Window,
+    text: String,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSWindow;
+        use objc2_foundation::{NSAttributedString, NSPoint, NSString};
+
+        let label = window.label().to_string();
+        let webview = app
+            .get_webview_window(&label)
+            .ok_or_else(|| format!("no webview for window {label}"))?;
+        log::info!("look up: received text={text:?} at {x:.1},{y:.1} for {label}");
+        let ptr = webview
+            .ns_window()
+            .map_err(|e| format!("no native window: {e}"))?;
+        if ptr.is_null() {
+            return Err("no native window".into());
+        }
+        // A raw pointer is not Send, while Tauri's main-thread closure is. The
+        // numeric address is only converted back on that main-thread callback;
+        // the app owns the live window for the synchronous callback.
+        let ptr = ptr as usize;
+        webview
+            .run_on_main_thread(move || {
+                // Tauri owns this live NSWindow pointer for the duration of
+                // run_on_main_thread.
+                let ns_window = unsafe { &*(ptr as *const NSWindow) };
+                let Some(view) = ns_window.contentView() else {
+                    return;
+                };
+                let word = NSString::from_str(&text);
+                let attributed = NSAttributedString::from_nsstring(&word);
+                let bounds = view.bounds();
+                // DOM coordinates start at the webview's upper-left corner;
+                // AppKit content-view coordinates start at the lower-left.
+                let point = NSPoint {
+                    x,
+                    y: bounds.size.height - y,
+                };
+                view.showDefinitionForAttributedString_atPoint(Some(&attributed), point);
+                log::info!("look up: AppKit definition request sent");
+            })
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, window, text, x, y);
+        Err("Look Up is only available on macOS".into())
+    }
+}
+
 #[tauri::command]
 async fn nvim_cursor_set(
     app: AppHandle,
@@ -825,6 +1079,15 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let paste = MenuItem::with_id(app, "gnv:paste", "Paste", true, Some("CmdOrCtrl+V"))?;
     let select_all =
         MenuItem::with_id(app, "gnv:select_all", "Select All", true, Some("CmdOrCtrl+A"))?;
+    // This must be an AppKit menu accelerator, not a DOM keydown handler:
+    // WKWebView does not reliably deliver Cmd-Ctrl-D to JavaScript.
+    let look_up = MenuItem::with_id(
+        app,
+        "gnv:look_up",
+        "Look Up",
+        true,
+        Some("CmdOrCtrl+Ctrl+D"),
+    )?;
 
     // The predefined Quit is `sel!(terminate:)`, which tao does not intercept
     // (no applicationShouldTerminate:), so RunEvent::ExitRequested never fires
@@ -867,6 +1130,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                     &paste,
                     &PredefinedMenuItem::separator(app)?,
                     &select_all,
+                    &look_up,
                 ])?;
             }
             _ => {}
@@ -961,6 +1225,7 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             nvim_input,
+            show_definition,
             nvim_cursor_set,
             nvim_edit,
             nvim_mouse,
@@ -999,6 +1264,12 @@ pub fn run() {
             "gnv:select_all" => {
                 focused_bridge(app, |b| async move { b.input("\x1bggVG").await })
             }
+            "gnv:look_up" => {
+                if let Some(label) = recipient_window(app) {
+                    log::info!("look up: native menu selected for {label}");
+                    let _ = app.emit(&format!("gnv://{label}/look_up"), ());
+                }
+            }
             "gnv:quit" => {
                 #[cfg(target_os = "macos")]
                 guard_exit(app);
@@ -1032,6 +1303,8 @@ pub fn run() {
                 if let Some(state) = window.try_state::<AppState>() {
                     *state.last_focused.lock().unwrap() = Some(window.label().to_string());
                 }
+                #[cfg(target_os = "macos")]
+                lookup_hotkey::set_active(true);
                 // Poke the webview over the same IPC path that gnv://.../grid
                 // uses (which is why V+move repaints a revealed tab).
                 let _ = window
@@ -1044,6 +1317,13 @@ pub fn run() {
                 }
             }
             #[cfg(target_os = "macos")]
+            WindowEvent::Focused(false) => {
+                // Command-Control-D is a Carbon application hot key, not a
+                // process-global shortcut. Release it when Gneovim loses
+                // focus so macOS and other applications keep their binding.
+                lookup_hotkey::set_active(false);
+            }
+            #[cfg(target_os = "macos")]
             WindowEvent::Resized(_) => {
                 if let Some(win) = window.app_handle().get_webview_window(window.label()) {
                     apply_traffic_light_inset(&win);
@@ -1054,9 +1334,13 @@ pub fn run() {
         .setup(|app| {
             spawn_bridge(app.handle().clone(), "main".to_string(), OpenSpec::default());
             #[cfg(target_os = "macos")]
-            if let Some(win) = app.get_webview_window("main") {
-                apply_corner_radius(&win);
-                apply_traffic_light_inset(&win);
+            {
+                install_native_shortcut_monitor();
+                lookup_hotkey::install(app.handle().clone());
+                if let Some(win) = app.get_webview_window("main") {
+                    apply_corner_radius(&win);
+                    apply_traffic_light_inset(&win);
+                }
             }
             Ok(())
         })
