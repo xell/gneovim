@@ -239,6 +239,14 @@ Learned the hard way from the fold implementation (three rounds: a freeze that s
 - `islandDecorField` (conceal, highlights, visual) and `islandFoldField` (folds) stay separate `StateField`s so a problem in one can never corrupt the other, and each uses the mapping strategy that fits what it holds.
 - Recovery stays in place regardless of the above. `islandDecorField`'s map is wrapped in `try` and drops to `Decoration.none` rather than throwing; `applyReset` clears both fields before its full-doc replace, so a forced re-attach (`:MarkdownLivePreviewOff` / on, or the `island desync` catch in `applyBufLines`) can always recover even from an unanticipated case.
 
+## Images
+
+A whole logical line containing `![alt](url)` gets a noneditable block `figure` widget immediately after the source line. Away from the cursor, its source line is replaced with a friendly label. When the cursor enters its line, the raw Markdown returns for direct editing, preserving the normal Neovim cursor, undo, grammar integration, and exact source position. Inline `![alt](url)` remains text, and `[text](url)` always remains a link even if its destination is an image.
+
+The widget contains a semantic `img`; it has no `figcaption` because the visible alt text on the source line is already the image label. `![label|600](url)` adds one optional width in CSS pixels. Its source label renders as `label (600px)`, while the image gets a `width: 600px` style and retains its intrinsic ratio. Remote `http` and `https` sources are passed directly to the webview. Local, relative sources are resolved against the current buffer name and passed through Tauri's asset protocol with `convertFileSrc`, not against the webview URL. The snapshot's existing `name` field is therefore also the image base path. `tauri.conf.json` enables that protocol for absolute paths because a Markdown file can be opened from anywhere, including `/private/tmp`; its CSP explicitly permits `asset:`, `http:`, and `https:` image sources.
+
+Image loading can change the widget height once, so images are width constrained to the island and capped at `60vh`. The widget is recreated only on a document or buffer path change, never on every cursor update.
+
 ## Files
 
 - `src/main.js`: `Island` class (`editableComp`, `gutterComp`, `applyCursor`, `applyBufLines`, `onUpdate`, `onComposeEnd`, `scrollTo`, `applyGutter`, `applyDecor`), `nvimCursorField` / `islandDecorField` / `islandFoldField`, `reconcileIslands`, `byteToCol`, `hlClass` / `mergeHlDefs`, the global `keydown` handler, the `md_decor` / `win_gutter` / `md_preview` listeners.

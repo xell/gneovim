@@ -126,6 +126,15 @@ body {
   background: color-mix(in srgb, var(--fg) 8%, transparent);
   font-weight: 600;
 }
+.island .cm-markdown-image {
+  margin: 0.55em 0.7em;
+}
+.island .cm-markdown-image img {
+  display: block;
+  max-height: 60vh;
+  max-width: 100%;
+  object-fit: contain;
+}
 .island .cm-content {
   /* the caret is our own nvim-cursor decoration; suppress the native one */
   caret-color: transparent;

@@ -5,7 +5,7 @@ import "../styles.css";
 import { EditorView, Decoration, WidgetType, lineNumbers } from "@codemirror/view";
 import { Annotation, StateEffect, StateField, Compartment } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
@@ -731,6 +731,7 @@ const setNvimCursor = StateEffect.define();
 // `guard_row` is supplied by md_decor.lua after applying Neovim's
 // 'concealcursor' rule. -1 means conceal remains active on the cursor line.
 const setTableConcealGuard = StateEffect.define();
+const setIslandImageBase = StateEffect.define();
 
 class BlockCursor extends WidgetType {
   toDOM() {
@@ -875,6 +876,127 @@ function addTableCursor(cell, textNode, cursor) {
       : "nvim-cursor nvim-cursor-block nvim-cursor-eol";
   range.insertNode(caret);
 }
+
+class MarkdownImageWidget extends WidgetType {
+  constructor(src, alt, width) {
+    super();
+    this.src = src;
+    this.alt = alt;
+    this.width = width;
+  }
+  eq(other) {
+    return other.src === this.src && other.alt === this.alt && other.width === this.width;
+  }
+  toDOM() {
+    const figure = document.createElement("figure");
+    figure.className = "cm-markdown-image";
+    figure.setAttribute("contenteditable", "false");
+    const image = document.createElement("img");
+    image.src = this.src;
+    image.alt = this.alt;
+    image.loading = "lazy";
+    if (this.width != null) image.style.width = `${this.width}px`;
+    figure.append(image);
+    return figure;
+  }
+}
+
+// A standalone image definition displays its friendly label until its own
+// source line becomes active. Then the raw Markdown returns for direct editing.
+class MarkdownImageSourceWidget extends WidgetType {
+  constructor(alt) {
+    super();
+    this.alt = alt;
+  }
+  eq(other) {
+    return other.alt === this.alt;
+  }
+  toDOM() {
+    const source = document.createElement("span");
+    source.className = "cm-markdown-image-source";
+    source.textContent = this.alt;
+    return source;
+  }
+}
+
+// Resolve a local Markdown image through Tauri's asset protocol. A Markdown
+// buffer is local and trusted, but a relative image must still be resolved
+// against that buffer's directory rather than the webview's URL.
+function imageSource(url, bufferName) {
+  if (/^https?:\/\//i.test(url) || url.startsWith("data:image/")) return url;
+  if (!bufferName.startsWith("/")) return null;
+  try {
+    const base = new URL(`file://${bufferName}`);
+    const local = new URL(url, base);
+    if (local.protocol !== "file:") return null;
+    return convertFileSrc(decodeURIComponent(local.pathname));
+  } catch {
+    return null;
+  }
+}
+
+function imageLabel(alt) {
+  const size = /^(.*)\|([1-9]\d*)$/.exec(alt);
+  if (!size) return { alt, caption: alt, width: null };
+  const width = Number(size[2]);
+  return Number.isSafeInteger(width)
+    ? { alt: size[1], caption: `${size[1]} (${width}px)`, width }
+    : { alt, caption: alt, width: null };
+}
+
+function imageDecorations(doc, bufferName, cursor) {
+  const ranges = [];
+  for (let number = 1; number <= doc.lines; number++) {
+    const line = doc.line(number);
+    // Only a whole logical line is promoted to a figure. `![alt](url)` inside
+    // prose deliberately remains ordinary Markdown text, and `[alt](url)`
+    // always remains a link even if the destination is an image.
+    const match = /^\s*!\[([^\]]*)\]\((?:<([^>]+)>|([^\s)]+))(?:\s+["'][^"']*["'])?\)\s*$/.exec(
+      line.text,
+    );
+    if (!match) continue;
+    const src = imageSource(match[2] || match[3], bufferName);
+    if (!src) continue;
+    const label = imageLabel(match[1]);
+    if (cursor?.row !== number - 1) {
+      ranges.push(
+        Decoration.replace({
+          widget: new MarkdownImageSourceWidget(label.caption),
+        }).range(line.from, line.to),
+      );
+    }
+    ranges.push(
+      Decoration.widget({
+        block: true,
+        side: 1,
+        widget: new MarkdownImageWidget(src, label.alt, label.width),
+      }).range(line.to),
+    );
+  }
+  return Decoration.set(ranges, true);
+}
+
+const markdownImageField = StateField.define({
+  create: (state) => ({
+    deco: imageDecorations(state.doc, "", null),
+    bufferName: "",
+    cursor: null,
+  }),
+  update(value, tr) {
+    let bufferName = value.bufferName;
+    let cursor = value.cursor;
+    for (const effect of tr.effects) if (effect.is(setIslandImageBase)) bufferName = effect.value;
+    for (const effect of tr.effects) if (effect.is(setNvimCursor)) cursor = effect.value;
+    return tr.docChanged || bufferName !== value.bufferName || cursor !== value.cursor
+      ? {
+          deco: imageDecorations(tr.state.doc, bufferName, cursor),
+          bufferName,
+          cursor,
+        }
+      : value;
+  },
+  provide: (field) => EditorView.decorations.from(field, (value) => value.deco),
+});
 
 function tableCells(text) {
   if (!text.includes("|")) return null;
@@ -1230,6 +1352,7 @@ class Island {
       extensions: [
         markdown(),
         markdownTableField,
+        markdownImageField,
         EditorView.lineWrapping,
         nvimCursorField,
         islandDecorField,
@@ -1755,6 +1878,7 @@ class Island {
       effects: [
         setIslandDecor.of(Decoration.none),
         setIslandFolds.of(Decoration.none),
+        setIslandImageBase.of(m.name || ""),
       ],
     });
     this.tx({
