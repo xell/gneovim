@@ -468,15 +468,15 @@ impl Handler for NvHandler {
 // ---------------------------------------------------------------------------
 
 /// A fresh snapshot of `win`'s buffer for the client to load into an island's
-/// CodeMirror. Cursor is read from `win` specifically (not the current window),
-/// as char positions to match the `gnv_cursor` autocmd feed.
+/// CodeMirror. Cursor is read from `win` specifically (not the current window).
+/// Columns are byte offsets, matching extmarks and `nvim_win_set_cursor`.
 async fn island_snapshot(nvim: &Nvim, win: i64, id: i64) -> Result<ResetPayload, String> {
     let buf = Buffer::new(Value::from(id), nvim.clone());
     let lines = buf.get_lines(0, -1, false).await.map_err(err)?;
     let cur = nvim
         .exec_lua(
             "local w = ...; return vim.api.nvim_win_call(w, function() \
-             return { vim.fn.line('.'), vim.fn.charcol('.'), vim.wo.scrolloff } end)",
+             return { vim.fn.line('.'), vim.fn.col('.'), vim.wo.scrolloff } end)",
             vec![Value::from(win)],
         )
         .await
@@ -809,11 +809,11 @@ pub async fn connect(
         for spec in [
             format!(
                 "autocmd gnv CursorMoved,CursorMovedI,ModeChanged,TextChanged,TextChangedI * \
-                 call rpcnotify({chan}, 'gnv_cursor', win_getid(), line('.') - 1, charcol('.') - 1, mode(), &scrolloff)"
+                 call rpcnotify({chan}, 'gnv_cursor', win_getid(), line('.') - 1, col('.') - 1, mode(), &scrolloff)"
             ),
             format!(
                 "autocmd gnv OptionSet scrolloff \
-                 call rpcnotify({chan}, 'gnv_cursor', win_getid(), line('.') - 1, charcol('.') - 1, mode(), &scrolloff)"
+                 call rpcnotify({chan}, 'gnv_cursor', win_getid(), line('.') - 1, col('.') - 1, mode(), &scrolloff)"
             ),
             format!(
                 "autocmd gnv CmdlineEnter,CmdlineChanged * \

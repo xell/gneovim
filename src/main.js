@@ -1418,6 +1418,7 @@ class Island {
     // correction keys, so serialize island cursor and key requests.
     this._nvimCursor = null; // { row, col }
     this._nvimInputQueue = Promise.resolve();
+    this._compositionSettling = false;
     this.el = document.createElement("div");
     this.el.className = "island";
     this.el.hidden = true;
@@ -1458,22 +1459,45 @@ class Island {
         }),
         EditorView.domEventHandlers({
           mousedown: (ev, v) => this.onMousedown(ev, v),
+          compositionstart: () => {
+            this.compose = {
+              text: this.view.state.doc.toString(),
+              sel: this.view.state.selection.main.head,
+            };
+            return false;
+          },
+          compositionend: (ev) => {
+            const committed = ev.data;
+            requestAnimationFrame(() => this.onComposeEnd(committed));
+            return false;
+          },
+          beforeinput: (ev) => {
+            // Safari can omit compositionend. CodeMirror recognizes the final
+            // insertText as its fallback completion signal; use that same
+            // signal after CM has finished reconciling its DOM observation.
+            if (this.compose && ev.inputType === "insertText") {
+              const committed = ev.data;
+              setTimeout(() => this.onComposeEnd(committed), 30);
+            } else if (
+              !this.compose &&
+              ev.inputType === "insertText" &&
+              ev.data
+            ) {
+              // Some macOS input sources emit full-width punctuation as a
+              // direct insertText with no composition. If CM accepts that DOM
+              // edit, onUpdate must use nvim_buf_set_text, which cannot advance
+              // Neovim's insert cursor. Route it as keyboard input instead.
+              ev.preventDefault();
+              this.queueNvimInput(ev.data.replace(/</g, "<lt>"));
+              return true;
+            }
+            return false;
+          },
         }),
       ],
       parent: this.el,
     });
     this.applyFontZoom(effectiveGuiFontSize() / guiFontBaseSize);
-    // The OS IME composes into .cm-content; on commit we hand the text to nvim
-    // via nvim_input (so nvim inserts it AND moves the cursor), then revert the
-    // local composition so nvim's buffer echo is the single source of truth.
-    const cd = this.view.contentDOM;
-    cd.addEventListener("compositionstart", () => {
-      this.compose = {
-        text: this.view.state.doc.toString(),
-        sel: this.view.state.selection.main.head,
-      };
-    });
-    cd.addEventListener("compositionend", (e) => this.onComposeEnd(e));
   }
   applyFontZoom(globalScale) {
     this.el.style.setProperty(
@@ -1811,6 +1835,9 @@ class Island {
     // separate path used by desktop editors through AXSelectedTextRange. Only
     // a collapsed selection is safe to represent with Neovim's one cursor.
     if (
+      this.compose ||
+      this.view.composing ||
+      this._compositionSettling ||
       u.docChanged ||
       !u.selectionSet ||
       u.transactions.some((tr) => tr.annotation(fromNvim) || tr.isUserEvent("select.pointer"))
@@ -1834,20 +1861,20 @@ class Island {
       .then(() => invoke("nvim_input", { keys }))
       .catch((e) => jlog("island input failed: " + e));
   }
-  onComposeEnd(e) {
+  onComposeEnd(committed) {
     const snap = this.compose;
     this.compose = null;
     if (!snap) return;
     const now = this.view.state.doc.toString();
-    const text = e.data || diffInserted(snap.text, now);
-    // revert the local composition; nvim's echo of nvim_input will re-add it
-    if (now !== snap.text) {
-      this.tx({
-        changes: { from: 0, to: now.length, insert: snap.text },
-        selection: { anchor: Math.min(snap.sel, snap.text.length) },
-      });
+    const text = committed || diffInserted(snap.text, now);
+    // Keep CodeMirror's settled composition in place. Neovim's line echo will
+    // be a no-op when it inserted the same text, or a minimal correction when a
+    // mapping changed it. Rolling the local text back first made CM measure two
+    // opposite document changes, causing the visible completion-time shake.
+    if (text) {
+      this._compositionSettling = true;
+      this.queueNvimInput(text.replace(/</g, "<lt>"));
     }
-    if (text) this.queueNvimInput(text.replace(/</g, "<lt>"));
   }
   onMousedown(ev, v) {
     const pos = v.posAtCoords({ x: ev.clientX, y: ev.clientY });
@@ -1905,6 +1932,12 @@ class Island {
     insert = insert.slice(p, insert.length - s);
     try {
       if (from !== to || insert) this.tx({ changes: { from, to, insert } });
+      // Cursor and buffer notifications are independent. A multibyte cursor can
+      // arrive while CM still has the old line and be clamped to its old end.
+      // Re-seat from the authoritative byte position after every line echo so
+      // WebKit starts the next inline composition at the visible nvim cursor.
+      this.syncSelectionToCursor();
+      this._compositionSettling = false;
     } catch (err) {
       jlog("island desync " + err);
       reconcileIslands(true);
@@ -1951,6 +1984,17 @@ class Island {
     });
     if (cursorChanged || scrolloffChanged) this.keepCursorInView();
     this.el.dataset.mode = mode;
+  }
+  syncSelectionToCursor() {
+    const cursor = this._nvimCursor;
+    if (!cursor || this.compose || this.view.composing) return;
+    const doc = this.view.state.doc;
+    const line = doc.line(Math.min(cursor.row + 1, doc.lines));
+    const anchor = Math.min(
+      line.from + byteToCol(line.text, cursor.col),
+      line.to,
+    );
+    this.tx({ selection: { anchor } });
   }
   keepCursorInView() {
     if (this._cursorScrollRaf) cancelAnimationFrame(this._cursorScrollRaf);
