@@ -110,6 +110,22 @@ body {
 .island .cm-scroller.cm-nvim-cursor-scroll::-webkit-scrollbar {
   display: none;
 }
+.island .cm-markdown-table {
+  border-collapse: collapse;
+  margin: 0.45em 0.7em;
+  max-width: 100%;
+}
+.island .cm-markdown-table th,
+.island .cm-markdown-table td {
+  border: 1px solid color-mix(in srgb, var(--fg) 28%, transparent);
+  padding: 0.2em 0.55em;
+  position: relative;
+  vertical-align: top;
+}
+.island .cm-markdown-table th {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  font-weight: 600;
+}
 .island .cm-content {
   /* the caret is our own nvim-cursor decoration; suppress the native one */
   caret-color: transparent;

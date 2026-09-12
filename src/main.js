@@ -728,6 +728,9 @@ function placeGridCursor() {
 
 const fromNvim = Annotation.define();
 const setNvimCursor = StateEffect.define();
+// `guard_row` is supplied by md_decor.lua after applying Neovim's
+// 'concealcursor' rule. -1 means conceal remains active on the cursor line.
+const setTableConcealGuard = StateEffect.define();
 
 class BlockCursor extends WidgetType {
   toDOM() {
@@ -805,6 +808,229 @@ class OverlayWidget extends WidgetType {
     return s;
   }
 }
+// A semantic presentation for the Markdown table source. The widget is
+// deliberately non-editable: edits must continue to target the Markdown
+// buffer, where CodeMirror can map them and Neovim remains authoritative.
+class MarkdownTableWidget extends WidgetType {
+  constructor(header, align, rows, cursor) {
+    super();
+    this.header = header;
+    this.align = align;
+    this.rows = rows;
+    this.cursor = cursor;
+    this.key = JSON.stringify([header, align, rows, cursor]);
+  }
+  eq(o) {
+    return o.key === this.key;
+  }
+  toDOM() {
+    const table = document.createElement("table");
+    table.className = "cm-markdown-table";
+    table.setAttribute("contenteditable", "false");
+    table.setAttribute("aria-label", "Markdown table");
+    const addRow = (parent, cells, tag, rowIndex) => {
+      const row = document.createElement("tr");
+      cells.forEach((text, i) => {
+        const cell = document.createElement(tag);
+        if (tag === "th") cell.scope = "col";
+        if (this.align[i]) cell.style.textAlign = this.align[i];
+        const textNode = document.createTextNode(text);
+        cell.append(textNode);
+        if (this.cursor?.row === rowIndex && this.cursor.cell === i)
+          addTableCursor(cell, textNode, this.cursor);
+        row.append(cell);
+      });
+      parent.append(row);
+    };
+    const head = document.createElement("thead");
+    addRow(head, this.header, "th", 0);
+    table.append(head);
+    const body = document.createElement("tbody");
+    this.rows.forEach((row, i) => addRow(body, row, "td", i + 1));
+    table.append(body);
+    return table;
+  }
+}
+
+function addTableCursor(cell, textNode, cursor) {
+  const offset = Math.min(cursor.offset, textNode.length);
+  const range = document.createRange();
+  if (cursor.mode[0] !== "i" && offset < textNode.length) {
+    // Normal-mode's cursor covers the character under it, precisely as the
+    // ordinary island cursor mark does. This stays in flow, but only changes
+    // paint properties and therefore cannot change the table's measurement.
+    range.setStart(textNode, offset);
+    range.setEnd(textNode, offset + 1);
+    const block = document.createElement("span");
+    block.className = "nvim-cursor nvim-cursor-block";
+    range.surroundContents(block);
+    return;
+  }
+  range.setStart(textNode, offset);
+  range.collapse(true);
+  const caret = document.createElement("span");
+  caret.className =
+    cursor.mode[0] === "i"
+      ? "nvim-cursor nvim-cursor-bar"
+      : "nvim-cursor nvim-cursor-block nvim-cursor-eol";
+  range.insertNode(caret);
+}
+
+function tableCells(text) {
+  if (!text.includes("|")) return null;
+  let row = text.trim();
+  if (row.startsWith("|")) row = row.slice(1);
+  if (row.endsWith("|")) row = row.slice(0, -1);
+  const cells = [];
+  let cell = "";
+  let escaped = false;
+  for (const ch of row) {
+    if (escaped) {
+      cell += ch;
+      escaped = false;
+    } else if (ch === "\\") escaped = true;
+    else if (ch === "|") {
+      cells.push(cell.trim());
+      cell = "";
+    } else cell += ch;
+  }
+  if (escaped) cell += "\\";
+  cells.push(cell.trim());
+  return cells;
+}
+
+// Locate a CodeMirror character offset in a source row within the text that
+// the corresponding HTML cell displays. Markdown's optional outer pipes and
+// padding are not displayed; an escaped character occupies one display slot.
+function tableCursorCell(text, column) {
+  let start = 0;
+  let end = text.length;
+  while (start < end && /\s/.test(text[start])) start++;
+  while (end > start && /\s/.test(text[end - 1])) end--;
+  if (text[start] === "|") start++;
+  if (text[end - 1] === "|") end--;
+
+  let cell = 0;
+  let cellStart = start;
+  let escaped = false;
+  const finishCell = (cellEnd) => {
+    let visibleStart = cellStart;
+    let visibleEnd = cellEnd;
+    while (visibleStart < visibleEnd && /\s/.test(text[visibleStart])) visibleStart++;
+    while (visibleEnd > visibleStart && /\s/.test(text[visibleEnd - 1])) visibleEnd--;
+    if (column <= visibleStart) return { cell, offset: 0 };
+    let offset = 0;
+    for (let i = visibleStart; i < Math.min(column, visibleEnd); i++) {
+      if (text[i] === "\\" && i + 1 < visibleEnd) i++;
+      offset++;
+    }
+    return { cell, offset };
+  };
+  for (let i = start; i <= end; i++) {
+    const boundary = i === end || (!escaped && text[i] === "|");
+    if (boundary) {
+      if (column <= i || i === end) return finishCell(i);
+      cell++;
+      cellStart = i + 1;
+    }
+    if (text[i] === "\\" && !escaped) escaped = true;
+    else escaped = false;
+  }
+  return { cell, offset: 0 };
+}
+
+function tableAlign(cells) {
+  const align = [];
+  for (const cell of cells) {
+    const spec = cell.trim();
+    if (!/^:?-{3,}:?$/.test(spec)) return null;
+    align.push(spec.startsWith(":") && spec.endsWith(":") ? "center" : spec.endsWith(":") ? "right" : "left");
+  }
+  return align;
+}
+
+function tableDecorations(doc, cursor, guardRow) {
+  const ranges = [];
+  let fence = null;
+  for (let n = 1; n < doc.lines; n++) {
+    const line = doc.line(n);
+    const fenceMatch = /^\s*(`{3,}|~{3,})/.exec(line.text);
+    if (fenceMatch) {
+      const fenceCharacter = fenceMatch[1][0];
+      if (fence == null) fence = fenceCharacter;
+      else if (fence === fenceCharacter) fence = null;
+      continue;
+    }
+    if (fence != null) continue;
+    const header = tableCells(line.text);
+    const delimiter = tableCells(doc.line(n + 1).text);
+    const align = header && delimiter && header.length === delimiter.length && tableAlign(delimiter);
+    if (!align) continue;
+    const rows = [];
+    let end = n + 1;
+    while (end < doc.lines) {
+      const cells = tableCells(doc.line(end + 1).text);
+      if (!cells || cells.length !== header.length) break;
+      rows.push(cells);
+      end++;
+    }
+    const last = doc.line(end);
+    const cursorOffset =
+      cursor && cursor.row >= 0 && cursor.row < doc.lines
+        ? (() => {
+            const cursorLine = doc.line(cursor.row + 1);
+            return Math.min(cursorLine.from + byteToCol(cursorLine.text, cursor.col), cursorLine.to);
+          })()
+        : null;
+    // A replacement hides any cursor decoration within its range. Reveal its
+    // source only when Neovim would reveal conceal on the cursor line. This
+    // makes tables follow 'concealcursor' just like every other Markdown
+    // presentation detail.
+    const revealForCursor =
+      guardRow !== -1 &&
+      cursorOffset != null &&
+      cursorOffset >= line.from &&
+      cursorOffset <= last.to;
+    if (!revealForCursor) {
+      let tableCursor = null;
+      if (cursorOffset != null && cursorOffset >= line.from && cursorOffset <= last.to) {
+        const sourceLine = doc.line(cursor.row + 1);
+        const sourceRow = cursor.row - (n - 1);
+        const target = tableCursorCell(sourceLine.text, cursorOffset - sourceLine.from);
+        // The delimiter has no displayed row of its own. Its cursor belongs to
+        // the matching header cell, which makes every source position visible.
+        tableCursor = {
+          row: sourceRow <= 1 ? 0 : sourceRow - 1,
+          ...target,
+          mode: cursor.mode,
+        };
+      }
+      ranges.push(
+        Decoration.replace({
+          block: true,
+          widget: new MarkdownTableWidget(header, align, rows, tableCursor),
+        }).range(line.from, last.to),
+      );
+    }
+    n = end;
+  }
+  return Decoration.set(ranges, true);
+}
+
+const markdownTableField = StateField.define({
+  create: (state) => ({ deco: tableDecorations(state.doc, null, null), cursor: null, guardRow: null }),
+  update(value, tr) {
+    let cursor = value.cursor;
+    let guardRow = value.guardRow;
+    for (const effect of tr.effects) if (effect.is(setNvimCursor)) cursor = effect.value;
+    for (const effect of tr.effects)
+      if (effect.is(setTableConcealGuard)) guardRow = effect.value;
+    return tr.docChanged || cursor !== value.cursor || guardRow !== value.guardRow
+      ? { deco: tableDecorations(tr.state.doc, cursor, guardRow), cursor, guardRow }
+      : value;
+  },
+  provide: (field) => EditorView.decorations.from(field, (value) => value.deco),
+});
 // A plain hidden run with no replacement text: blockquote "> " markers (the
 // cm-blockquote line decoration already draws the bar) and H4-H6 markers.
 // One shared instance; identical specs compare equal so it never re-renders.
@@ -1003,6 +1229,7 @@ class Island {
       // can lag a keystroke behind the buffer echo.
       extensions: [
         markdown(),
+        markdownTableField,
         EditorView.lineWrapping,
         nvimCursorField,
         islandDecorField,
@@ -1111,6 +1338,9 @@ class Island {
     else this.el.style.removeProperty("--visual-bg");
     if (d?.accent_fg) this.el.style.setProperty("--accent", d.accent_fg);
     else this.el.style.removeProperty("--accent");
+    this.view.dispatch({
+      effects: setTableConcealGuard.of(d?.guard_row ?? null),
+    });
     this.applyDecor();
   }
   // byte range [sc, ec) on buffer row `row` -> CM [from, to), or null.
