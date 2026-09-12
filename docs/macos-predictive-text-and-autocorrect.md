@@ -32,16 +32,15 @@ Neovim remains authoritative for buffer contents, cursor state, modes,
 mappings, abbreviations, completion plugins, and undo behavior. The browser is
 not an independently authoritative editor.
 
-The island already has dedicated IME handling:
+The island has dedicated IME handling. Composition changes stay local while
+the IME is active, then the committed text is sent through `nvim_input` without
+first rolling back CodeMirror's settled document. Safari's missing
+`compositionend` case and direct full-width punctuation require separate
+`beforeinput` handling. See `docs/macos-cjk-ime.md` for the current contract and
+its regression checklist.
 
-1. `compositionstart` saves a snapshot.
-2. Composition changes stay local while the IME is active.
-3. `compositionend` restores the snapshot and sends the committed text to
-   Neovim.
-4. Neovim's buffer echo supplies the final rendered state.
-
-This prevents a buffer echo from aborting a CJK IME composition. It does not
-automatically provide macOS inline predictions or normal autocorrect.
+That path prevents a buffer echo from aborting a CJK IME composition. It does
+not automatically provide macOS inline predictions or normal autocorrect.
 
 ## Why browser support alone is insufficient
 

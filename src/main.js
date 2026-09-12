@@ -1323,7 +1323,9 @@ function cursorDeco(state, pos) {
   if (!pos) return Decoration.none;
   const doc = state.doc;
   const line = doc.line(Math.min(pos.row + 1, doc.lines));
-  let from = Math.min(line.from + pos.col, line.to);
+  // Cursor payloads use Neovim byte columns. CodeMirror positions are UTF-16
+  // offsets, so convert here just as applyCursor does for its state selection.
+  let from = Math.min(line.from + byteToCol(line.text, pos.col), line.to);
 
   // A closed fold hides its body (everything after its own first line); a
   // cursor decoration placed inside that hidden span would be swallowed and
@@ -1860,6 +1862,32 @@ class Island {
     this._nvimInputQueue = this._nvimInputQueue
       .then(() => invoke("nvim_input", { keys }))
       .catch((e) => jlog("island input failed: " + e));
+  }
+  queueSemanticWord(row, col) {
+    this._nvimInputQueue = this._nvimInputQueue
+      .then(() => invoke("nvim_cursor_set", { win: this.winId, row, col }))
+      .catch((e) => jlog("island semantic word failed: " + e));
+  }
+  semanticWordTarget() {
+    const cursor = this._nvimCursor;
+    if (!cursor) return null;
+    const doc = this.view.state.doc;
+    const firstRow = Math.min(cursor.row, doc.lines - 1);
+    const firstLine = doc.line(firstRow + 1);
+    const firstCol = byteToCol(firstLine.text, cursor.col);
+    const segmenter = new Intl.Segmenter("zh", { granularity: "word" });
+    for (let row = firstRow; row < doc.lines; row++) {
+      const line = doc.line(row + 1);
+      const after = row === firstRow ? firstCol : -1;
+      for (const part of segmenter.segment(line.text)) {
+        if (part.index > after && part.segment.trim())
+          return {
+            row,
+            col: byteLen(line.text.slice(0, part.index)),
+          };
+      }
+    }
+    return null;
   }
   onComposeEnd(committed) {
     const snap = this.compose;
@@ -2720,9 +2748,36 @@ function handleFontZoom(e) {
   return true;
 }
 
+let islandNativeWPending = false;
 addEventListener("keydown", (e) => {
   if (imeComposing) return; // IME is mid-composition; let #ime + the OS handle it
   if (handleFontZoom(e)) return;
+  const isl = islandForGrid(cursorGrid);
+  const plain = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
+  if (
+    isl &&
+    isl.mode === "n" &&
+    plain &&
+    (/^[1-9]$/.test(e.key) ||
+      (islandNativeWPending && e.key === "0") ||
+      /^[dcy><=!gz"'\[]$/.test(e.key))
+  )
+    islandNativeWPending = true;
+  if (
+    isl &&
+    isl.mode === "n" &&
+    e.key === "w" &&
+    plain &&
+    !islandNativeWPending
+  ) {
+    const target = isl.semanticWordTarget();
+    if (target) {
+      e.preventDefault();
+      isl.queueSemanticWord(target.row, target.col);
+      return;
+    }
+  }
+  if (e.key === "w" || e.key === "Escape") islandNativeWPending = false;
   const keys = keyToNvim(e);
   if (keys === null) return; // mid-composition / lone modifier
   // grid window in insert mode: plain text goes into the #ime textarea for the
@@ -2734,7 +2789,6 @@ addEventListener("keydown", (e) => {
   )
     return;
   e.preventDefault();
-  const isl = islandForGrid(cursorGrid);
   if (isl) isl.queueNvimInput(keys);
   else invoke("nvim_input", { keys });
 });
