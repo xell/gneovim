@@ -52,7 +52,19 @@ let cellH = 17;
 let originX = 4; // left margin in px; the grid is letterboxed, see screenMetrics
 let gridLinespace = 0; // from :set linespace, added to the natural line box
 const GRID_FONT_FALLBACK = 'ui-monospace, "SF Mono", Menlo, monospace';
-const GRID_SIZE_FALLBACK = "13px";
+const GUI_FONT_DEFAULT = 14;
+const GRID_SIZE_FALLBACK = `${GUI_FONT_DEFAULT}px`;
+const FONT_ZOOM_STEP = 1;
+let guiFontBaseSize = GUI_FONT_DEFAULT;
+let guiFontZoom = 0;
+const effectiveGuiFontSize = () => Math.max(6, guiFontBaseSize + guiFontZoom);
+function applyFontZoom() {
+  const size = effectiveGuiFontSize();
+  const root = document.documentElement.style;
+  root.setProperty("--grid-font-size", `${size}px`);
+  root.setProperty("--ui-font-size", `${size}px`);
+  for (const island of islands.values()) island.applyFontZoom(size / guiFontBaseSize);
+}
 function measureCell() {
   const cs = getComputedStyle(document.documentElement);
   const fam = cs.getPropertyValue("--grid-font-family").trim() || GRID_FONT_FALLBACK;
@@ -94,8 +106,8 @@ function applyGuiOptRaw(name, value) {
       const fam = /[^\w-]/.test(f.family) ? `"${f.family}"` : f.family;
       root.setProperty("--grid-font-family", `${fam}, ${GRID_FONT_FALLBACK}`);
     } else root.removeProperty("--grid-font-family");
-    if (f && f.size) root.setProperty("--grid-font-size", `${f.size}px`);
-    else root.removeProperty("--grid-font-size");
+    guiFontBaseSize = f?.size || GUI_FONT_DEFAULT;
+    applyFontZoom();
   } else if (name === "linespace") {
     gridLinespace = Math.max(0, parseInt(value, 10) || 0);
   }
@@ -1325,6 +1337,7 @@ class Island {
     this.winId = winId;
     this.bufnr = null;
     this.mode = "n";
+    this.fontZoom = 0;
     this.editableComp = new Compartment();
     this.editable = true;
     this.gutterComp = new Compartment(); // number column, mirrored from Neovim
@@ -1385,6 +1398,7 @@ class Island {
       ],
       parent: this.el,
     });
+    this.applyFontZoom(effectiveGuiFontSize() / guiFontBaseSize);
     // The OS IME composes into .cm-content; on commit we hand the text to nvim
     // via nvim_input (so nvim inserts it AND moves the cursor), then revert the
     // local composition so nvim's buffer echo is the single source of truth.
@@ -1396,6 +1410,14 @@ class Island {
       };
     });
     cd.addEventListener("compositionend", (e) => this.onComposeEnd(e));
+  }
+  applyFontZoom(globalScale) {
+    this.el.style.setProperty(
+      "--island-font-size",
+      `${Math.max(6, 16 * globalScale + this.fontZoom)}px`,
+    );
+    this.view.requestMeasure();
+    this.keepCursorInView();
   }
   tx(spec) {
     this.view.dispatch({ ...spec, annotations: fromNvim.of(true) });
@@ -2536,8 +2558,28 @@ function islandLookup() {
   return true;
 }
 
+function handleFontZoom(e) {
+  if (!e.metaKey || e.ctrlKey) return false;
+  const action =
+    e.code === "Equal" ? 1 : e.code === "Minus" ? -1 : e.code === "Digit0" ? 0 : null;
+  if (action == null) return false;
+  e.preventDefault();
+  if (e.altKey) {
+    const island = islandForGrid(cursorGrid);
+    if (!island) return true;
+    island.fontZoom = action === 0 ? 0 : island.fontZoom + action * FONT_ZOOM_STEP;
+    island.applyFontZoom(effectiveGuiFontSize() / guiFontBaseSize);
+  } else {
+    guiFontZoom = action === 0 ? 0 : guiFontZoom + action * FONT_ZOOM_STEP;
+    applyFontZoom();
+    relayoutForFont();
+  }
+  return true;
+}
+
 addEventListener("keydown", (e) => {
   if (imeComposing) return; // IME is mid-composition; let #ime + the OS handle it
+  if (handleFontZoom(e)) return;
   const keys = keyToNvim(e);
   if (keys === null) return; // mid-composition / lone modifier
   // grid window in insert mode: plain text goes into the #ime textarea for the

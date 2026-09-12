@@ -50,7 +50,7 @@ body {
   text-align: center;
   background: var(--bg);
   color: var(--fg);
-  font: 13px/1.6 ui-monospace, Menlo, monospace;
+  font: var(--ui-font-size, 14px)/1.6 ui-monospace, Menlo, monospace;
 }
 
 /* monospace grid windows (non-markdown, verbatim Neovim).
@@ -59,7 +59,7 @@ body {
    the pixel math that positions windows, statuslines, and the cursor. */
 .grid {
   font-family: var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace);
-  font-size: var(--grid-font-size, 13px);
+  font-size: var(--grid-font-size, 14px);
   line-height: var(--cell-h, 17px);
   white-space: pre;
   overflow: hidden;
@@ -100,7 +100,7 @@ body {
    which beats inheritance from .cm-editor; override the scroller directly. */
 .island .cm-scroller {
   font-family: Georgia, "Iowan Old Style", Palatino, serif;
-  font-size: 16px;
+  font-size: var(--island-font-size, 16px);
   line-height: 1.6;
   overflow: auto;
 }
