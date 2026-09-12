@@ -743,6 +743,7 @@ const setNvimCursor = StateEffect.define();
 // `guard_row` is supplied by md_decor.lua after applying Neovim's
 // 'concealcursor' rule. -1 means conceal remains active on the cursor line.
 const setTableConcealGuard = StateEffect.define();
+const setTableHighlights = StateEffect.define();
 const setIslandImageBase = StateEffect.define();
 
 class BlockCursor extends WidgetType {
@@ -835,13 +836,14 @@ class OverlayWidget extends WidgetType {
 // deliberately non-editable: edits must continue to target the Markdown
 // buffer, where CodeMirror can map them and Neovim remains authoritative.
 class MarkdownTableWidget extends WidgetType {
-  constructor(header, align, rows, cursor) {
+  constructor(header, align, rows, cursor, highlights) {
     super();
     this.header = header;
     this.align = align;
     this.rows = rows;
     this.cursor = cursor;
-    this.key = JSON.stringify([header, align, rows, cursor]);
+    this.highlights = highlights;
+    this.key = JSON.stringify([header, align, rows, cursor, highlights]);
   }
   eq(o) {
     return o.key === this.key;
@@ -857,10 +859,13 @@ class MarkdownTableWidget extends WidgetType {
         const cell = document.createElement(tag);
         if (tag === "th") cell.scope = "col";
         if (this.align[i]) cell.style.textAlign = this.align[i];
-        const textNode = document.createTextNode(text);
-        cell.append(textNode);
+        appendTableText(
+          cell,
+          text,
+          this.highlights.filter(([r, c]) => r === rowIndex && c === i),
+        );
         if (this.cursor?.row === rowIndex && this.cursor.cell === i)
-          addTableCursor(cell, textNode, this.cursor);
+          addTableCursor(cell, this.cursor);
         row.append(cell);
       });
       parent.append(row);
@@ -875,8 +880,40 @@ class MarkdownTableWidget extends WidgetType {
   }
 }
 
-function addTableCursor(cell, textNode, cursor) {
-  const offset = Math.min(cursor.offset, textNode.length);
+function appendTableText(cell, text, highlights) {
+  let offset = 0;
+  for (const [, , start, length, group] of highlights.sort((a, b) => a[2] - b[2])) {
+    const from = Math.max(offset, Math.min(start, text.length));
+    const to = Math.max(from, Math.min(start + length, text.length));
+    if (from > offset) cell.append(document.createTextNode(text.slice(offset, from)));
+    if (to > from) {
+      const mark = document.createElement("span");
+      mark.className = hlClass(group);
+      mark.textContent = text.slice(from, to);
+      cell.append(mark);
+    }
+    offset = to;
+  }
+  if (offset < text.length) cell.append(document.createTextNode(text.slice(offset)));
+  if (!cell.childNodes.length) cell.append(document.createTextNode(""));
+}
+
+function addTableCursor(cell, cursor) {
+  let offset = cursor.offset;
+  let textNode = null;
+  for (const node of cell.childNodes) {
+    const length = node.textContent.length;
+    if (offset < length || node === cell.lastChild) {
+      textNode = node.nodeType === Node.TEXT_NODE ? node : node.firstChild;
+      break;
+    }
+    offset -= length;
+  }
+  if (!textNode) {
+    textNode = document.createTextNode("");
+    cell.append(textNode);
+  }
+  offset = Math.min(offset, textNode.length);
   const range = document.createRange();
   if (cursor.mode[0] !== "i" && offset < textNode.length) {
     // Normal-mode's cursor covers the character under it, precisely as the
@@ -1093,7 +1130,23 @@ function tableAlign(cells) {
   return align;
 }
 
-function tableDecorations(doc, cursor, guardRow) {
+function tableHighlightCells(doc, firstRow, lastRow, highlights) {
+  const out = [];
+  for (const [row, sc, ec, group] of highlights) {
+    if (row < firstRow || row > lastRow || row === firstRow + 1) continue;
+    const line = doc.line(row + 1);
+    const start = byteToCol(line.text, sc);
+    const end = byteToCol(line.text, ec);
+    const from = tableCursorCell(line.text, start);
+    const to = tableCursorCell(line.text, end);
+    if (from.cell !== to.cell) continue;
+    const displayRow = row === firstRow ? 0 : row - firstRow - 1;
+    out.push([displayRow, from.cell, from.offset, Math.max(1, to.offset - from.offset), group]);
+  }
+  return out;
+}
+
+function tableDecorations(doc, cursor, guardRow, highlights = []) {
   const ranges = [];
   let fence = null;
   for (let n = 1; n < doc.lines; n++) {
@@ -1149,10 +1202,11 @@ function tableDecorations(doc, cursor, guardRow) {
           mode: cursor.mode,
         };
       }
+      const tableHighlights = tableHighlightCells(doc, n - 1, end - 1, highlights);
       ranges.push(
         Decoration.replace({
           block: true,
-          widget: new MarkdownTableWidget(header, align, rows, tableCursor),
+          widget: new MarkdownTableWidget(header, align, rows, tableCursor, tableHighlights),
         }).range(line.from, last.to),
       );
     }
@@ -1162,15 +1216,25 @@ function tableDecorations(doc, cursor, guardRow) {
 }
 
 const markdownTableField = StateField.define({
-  create: (state) => ({ deco: tableDecorations(state.doc, null, null), cursor: null, guardRow: null }),
+  create: (state) => ({
+    deco: tableDecorations(state.doc, null, null),
+    cursor: null,
+    guardRow: null,
+    highlights: [],
+  }),
   update(value, tr) {
     let cursor = value.cursor;
     let guardRow = value.guardRow;
+    let highlights = value.highlights;
     for (const effect of tr.effects) if (effect.is(setNvimCursor)) cursor = effect.value;
     for (const effect of tr.effects)
       if (effect.is(setTableConcealGuard)) guardRow = effect.value;
-    return tr.docChanged || cursor !== value.cursor || guardRow !== value.guardRow
-      ? { deco: tableDecorations(tr.state.doc, cursor, guardRow), cursor, guardRow }
+    for (const effect of tr.effects) if (effect.is(setTableHighlights)) highlights = effect.value;
+    return tr.docChanged ||
+      cursor !== value.cursor ||
+      guardRow !== value.guardRow ||
+      highlights !== value.highlights
+      ? { deco: tableDecorations(tr.state.doc, cursor, guardRow, highlights), cursor, guardRow, highlights }
       : value;
   },
   provide: (field) => EditorView.decorations.from(field, (value) => value.deco),
@@ -1489,12 +1553,31 @@ class Island {
   //   listener; this only consumes `hl.runs` / `hl.virt`.
   setDecor(d) {
     this.decor = d;
+    this._easyMotionOverlay = (d?.hl?.runs ?? []).some(([, , , group]) =>
+      /^EasyMotion(?:Target|Shade)/.test(group),
+    );
+    if (this._easyMotionOverlay && this._pendingZeroScrolloff) {
+      clearTimeout(this._pendingZeroScrolloff);
+      this._pendingZeroScrolloff = 0;
+    }
     if (d?.visual_hl) this.el.style.setProperty("--visual-bg", d.visual_hl);
     else this.el.style.removeProperty("--visual-bg");
     if (d?.accent_fg) this.el.style.setProperty("--accent", d.accent_fg);
     else this.el.style.removeProperty("--accent");
+    // The table owns its own text nodes. Mirror target letters there; skip the
+    // whole-line shade run because it overlaps every cell and would otherwise
+    // swallow the more specific target run in this small inline renderer.
+    const tableHighlights = (d?.hl?.runs ?? []).filter(([, , , group]) =>
+      /^EasyMotionTarget/.test(group),
+    );
+    const tableHighlightsKey = JSON.stringify(tableHighlights);
+    const tableEffects = [setTableConcealGuard.of(d?.guard_row ?? null)];
+    if (this._tableHighlightsKey !== tableHighlightsKey) {
+      this._tableHighlightsKey = tableHighlightsKey;
+      tableEffects.push(setTableHighlights.of(tableHighlights));
+    }
     this.view.dispatch({
-      effects: setTableConcealGuard.of(d?.guard_row ?? null),
+      effects: tableEffects,
     });
     this.applyDecor();
   }
@@ -1831,6 +1914,22 @@ class Island {
     this.mode = mode;
     const nextScrolloff = Math.max(0, scrolloff);
     const scrolloffChanged = this.scrolloff !== nextScrolloff;
+    // EasyMotion's marker prompt temporarily sets its window's 'scrolloff' to
+    // zero, then restores it after the hint is chosen. It never moved the
+    // cursor, so feeding that short-lived zero to the pixel scrolloff code
+    // causes the distracting out-and-back jump. Wait long enough for the
+    // display bridge to identify the EasyMotion matches. A real :set
+    // scrolloff=0 has no such overlay and still applies normally.
+    if (scrolloffChanged && nextScrolloff === 0 && !this._easyMotionOverlay) {
+      clearTimeout(this._pendingZeroScrolloff);
+      this._pendingZeroScrolloff = setTimeout(() => {
+        this._pendingZeroScrolloff = 0;
+        if (!this._easyMotionOverlay) this.applyCursor(row, col, mode, 0);
+      }, 80);
+      return;
+    }
+    if (scrolloffChanged) clearTimeout(this._pendingZeroScrolloff);
+    this._pendingZeroScrolloff = 0;
     this.scrolloff = nextScrolloff;
     // if this island holds the cursor, keep its .cm-content focused so hasFocus
     // is reliable (needed for the insert-mode IME carve-out), in every mode
