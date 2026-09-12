@@ -55,10 +55,34 @@ local function notify(win, val)
   pcall(vim.rpcnotify, chan, 'gnv_md_preview', win, val)
 end
 
+-- A public integration point for user configuration. Gneovim itself has no
+-- dependency on any renderer plugin; listeners decide whether and how they
+-- react to this window entering or leaving the CM6 island.
+local function emit_changed(win, on)
+  local ok, err = pcall(vim.api.nvim_exec_autocmds, 'User', {
+    pattern = 'GneovimMarkdownPreviewChanged',
+    modeline = false,
+    data = {
+      win = win,
+      buf = vim.api.nvim_win_get_buf(win),
+      preview = on,
+    },
+  })
+  if not ok then
+    vim.schedule(function()
+      vim.notify('GneovimMarkdownPreviewChanged listener failed: ' .. tostring(err), vim.log.levels.WARN)
+    end)
+  end
+end
+
 local function set_preview(win, on)
   local v = on and 1 or 0
+  local previous = get_flag(win)
   set_flag(win, v)
   notify(win, v)
+  if previous ~= v then
+    emit_changed(win, on)
+  end
 end
 
 -- Mirror a markdown window's gutter options into the GUI so its CM island can

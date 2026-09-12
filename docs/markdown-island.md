@@ -5,6 +5,7 @@ Everything else is the grid renderer, see [multigrid-renderer.md](multigrid-rend
 The working spec and phase plan is `plans/milestone2.md` (gitignored); this file is the committed record of how the island actually behaves and why.
 For the separate macOS Grammarly Desktop compatibility boundary, see [grammarly-markdown-island.md](grammarly-markdown-island.md).
 For the deferred native predictive text and autocorrect investigation, see [macos-predictive-text-and-autocorrect.md](macos-predictive-text-and-autocorrect.md).
+For the public preview mode autocmd and adapters for visual Neovim plugins, see [markdown-live-preview-plugin-integration.md](markdown-live-preview-plugin-integration.md).
 
 One CodeMirror instance per previewed markdown window, keyed by window id in the `islands` map in `src/main.js`, mounted and unmounted by `reconcileIslands`.
 Two windows on one buffer share a single refcounted `nvim_buf_attach` in `bridge.rs`.
@@ -246,6 +247,10 @@ A whole logical line containing `![alt](url)` gets a noneditable block `figure` 
 The widget contains a semantic `img`; it has no `figcaption` because the visible alt text on the source line is already the image label. `![label|600](url)` adds one optional width in CSS pixels. Its source label renders as `label (600px)`, while the image gets a `width: 600px` style and retains its intrinsic ratio. Remote `http` and `https` sources are passed directly to the webview. Local, relative sources are resolved against the current buffer name and passed through Tauri's asset protocol with `convertFileSrc`, not against the webview URL. The snapshot's existing `name` field is therefore also the image base path. `tauri.conf.json` enables that protocol for absolute paths because a Markdown file can be opened from anywhere, including `/private/tmp`; its CSP explicitly permits `asset:`, `http:`, and `https:` image sources.
 
 Image loading can change the widget height once, so images are width constrained to the island and capped at `60vh`. The widget is recreated only on a document or buffer path change, never on every cursor update.
+
+## Plugin integration
+
+Changing a window's `w:gnv_md_preview` also emits `User GneovimMarkdownPreviewChanged`. Its autocmd data is `{ win, buf, preview }`, where `preview` is true when the window has entered the CM6 island and false when it returns to the grid. Gneovim does not know or configure individual plugins: user configuration may listen to this event and use each plugin's own API. It is emitted for the initial materialized state as well as an actual `:MarkdownLivePreviewOn`, `Off`, or `Toggle` transition, but not when a command repeats the state already in effect. Listener failures are reported as a warning without undoing the preview transition.
 
 ## Files
 
