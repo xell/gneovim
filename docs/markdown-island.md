@@ -3,6 +3,7 @@
 Context for the CodeMirror 6 editor that is layered over a `filetype=markdown` window when its live preview flag is on.
 Everything else is the grid renderer, see [multigrid-renderer.md](multigrid-renderer.md).
 The working spec and phase plan is `plans/milestone2.md` (gitignored); this file is the committed record of how the island actually behaves and why.
+For the separate macOS Grammarly Desktop compatibility boundary, see [grammarly-markdown-island.md](grammarly-markdown-island.md).
 
 One CodeMirror instance per previewed markdown window, keyed by window id in the `islands` map in `src/main.js`, mounted and unmounted by `reconcileIslands`.
 Two windows on one buffer share a single refcounted `nvim_buf_attach` in `bridge.rs`.

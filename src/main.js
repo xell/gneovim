@@ -974,6 +974,11 @@ class Island {
     this._gutterRaf = 0;
     this.decor = null; // last md_decor payload (parsed)
     this._lastViewport = null; // last {topline,botline,linecount} scrollTo saw
+    // The DOM selection normally mirrors this Neovim cursor. External desktop
+    // editors may move it through macOS Accessibility before posting their
+    // correction keys, so serialize island cursor and key requests.
+    this._nvimCursor = null; // { row, col }
+    this._nvimInputQueue = Promise.resolve();
     this.el = document.createElement("div");
     this.el.className = "island";
     this.el.hidden = true;
@@ -1001,6 +1006,7 @@ class Island {
         this.gutterComp.of([]),
         this.editableComp.of(EDITABLE_ON),
         EditorView.updateListener.of((u) => this.onUpdate(u)),
+        EditorView.updateListener.of((u) => this.onExternalSelection(u)),
         EditorView.updateListener.of((u) => {
           // relativenumber: repaint the number column when the cursor line
           // moves, even on a transaction that changed nothing else.
@@ -1314,7 +1320,38 @@ class Island {
       });
     });
     regions.reverse();
-    if (this.bufnr != null) invoke("nvim_edit", { buf: this.bufnr, regions });
+    if (this.bufnr != null)
+      invoke("nvim_edit", { buf: this.bufnr, regions }).catch((e) =>
+        jlog("external island edit failed: " + e),
+      );
+  }
+  onExternalSelection(u) {
+    // A mouse placement is already synchronized by onMousedown. This is the
+    // separate path used by desktop editors through AXSelectedTextRange. Only
+    // a collapsed selection is safe to represent with Neovim's one cursor.
+    if (
+      u.docChanged ||
+      !u.selectionSet ||
+      u.transactions.some((tr) => tr.annotation(fromNvim) || tr.isUserEvent("select.pointer"))
+    )
+      return;
+    const selection = u.state.selection.main;
+    if (!selection.empty) return;
+    const line = u.state.doc.lineAt(selection.head);
+    const row = line.number - 1;
+    const col = byteLen(line.text.slice(0, selection.head - line.from));
+    if (this._nvimCursor?.row === row && this._nvimCursor.col === col) return;
+    this.queueNvimCursor(row, col);
+  }
+  queueNvimCursor(row, col) {
+    this._nvimInputQueue = this._nvimInputQueue
+      .then(() => invoke("nvim_cursor_set", { win: this.winId, row, col }))
+      .catch((e) => jlog("island cursor set failed: " + e));
+  }
+  queueNvimInput(keys) {
+    this._nvimInputQueue = this._nvimInputQueue
+      .then(() => invoke("nvim_input", { keys }))
+      .catch((e) => jlog("island input failed: " + e));
   }
   onComposeEnd(e) {
     const snap = this.compose;
@@ -1329,17 +1366,16 @@ class Island {
         selection: { anchor: Math.min(snap.sel, snap.text.length) },
       });
     }
-    if (text) invoke("nvim_input", { keys: text.replace(/</g, "<lt>") });
+    if (text) this.queueNvimInput(text.replace(/</g, "<lt>"));
   }
   onMousedown(ev, v) {
     const pos = v.posAtCoords({ x: ev.clientX, y: ev.clientY });
     if (pos == null) return false;
     const line = v.state.doc.lineAt(pos);
-    invoke("nvim_cursor_set", {
-      win: this.winId,
-      row: line.number - 1,
-      col: byteLen(line.text.slice(0, pos - line.from)),
-    }).catch(() => {});
+    this.queueNvimCursor(
+      line.number - 1,
+      byteLen(line.text.slice(0, pos - line.from)),
+    );
     return false;
   }
   applyBufLines(a, lastline, linedata) {
@@ -1403,9 +1439,14 @@ class Island {
     this.setEditable(!blockImeInNormalMode || /^[iRsS\x13]/.test(mode));
     const doc = this.view.state.doc;
     const line = doc.line(Math.min(row + 1, doc.lines));
-    const pos = Math.min(line.from + col, line.to);
+    const pos = Math.min(line.from + byteToCol(line.text, col), line.to);
+    const cursorChanged =
+      this._nvimCursor == null ||
+      this._nvimCursor.row !== row ||
+      this._nvimCursor.col !== col;
+    this._nvimCursor = { row, col };
     this.tx({
-      selection: { anchor: pos },
+      ...(cursorChanged ? { selection: { anchor: pos } } : {}),
       effects: setNvimCursor.of({ row, col, mode }),
     });
     this.el.dataset.mode = mode;
@@ -1422,6 +1463,7 @@ class Island {
     // not be skipped just because its topline/botline/linecount happen to
     // match whatever the old buffer last scrolled to.
     this._lastViewport = null;
+    this._nvimCursor = null;
     // clear decorations before the full-doc replace: if a stale set is what is
     // making dispatches throw, mapping it through this huge change would keep
     // the island wedged even across `:e` / a forced re-attach.
@@ -1637,9 +1679,16 @@ function renderGridOps(ops) {
         const isl = islandForGrid(o.grid);
         if (isl) {
           isl.scrollTo(o.topline, o.botline, o.linecount);
-          // re-seat the island cursor after a bare window switch (no CursorMoved)
-          if (cursorGrid === o.grid && o.curline != null)
-            isl.applyCursor(o.curline, o.curcol ?? 0, isl.mode);
+          // win_viewport's curline/curcol can belong to an older redraw batch
+          // than the latest cursor event. Re-seat from the authoritative cursor
+          // payload instead, so a stale viewport never overwrites a temporary
+          // external-editor selection.
+          if (cursorGrid === o.grid && lastCursorPayload)
+            isl.applyCursor(
+              lastCursorPayload.row,
+              lastCursorPayload.col,
+              lastCursorPayload.mode,
+            );
         }
         break;
       }
@@ -2094,7 +2143,9 @@ addEventListener("keydown", (e) => {
   )
     return;
   e.preventDefault();
-  invoke("nvim_input", { keys });
+  const isl = islandForGrid(cursorGrid);
+  if (isl) isl.queueNvimInput(keys);
+  else invoke("nvim_input", { keys });
 });
 
 // ---------------------------------------------------------------------------
