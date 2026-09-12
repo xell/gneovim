@@ -54,6 +54,7 @@ pub struct ResetPayload {
     pub row: i64,
     pub col: i64,
     pub mode: String,
+    pub scrolloff: i64,
     pub name: String,
 }
 
@@ -71,6 +72,7 @@ pub struct CursorPayload {
     pub row: i64,
     pub col: i64,
     pub mode: String,
+    pub scrolloff: i64,
 }
 
 #[derive(Clone, Serialize)]
@@ -317,10 +319,16 @@ impl Handler for NvHandler {
                 let row = args.first().and_then(Value::as_i64).unwrap_or(0);
                 let col = args.get(1).and_then(Value::as_i64).unwrap_or(0);
                 let mode = args.get(2).and_then(Value::as_str).unwrap_or("n").to_string();
+                let scrolloff = args.get(3).and_then(Value::as_i64).unwrap_or(0);
                 let _ = self
                     .shared
                     .tx
-                    .send(BridgeEvent::Cursor(CursorPayload { row, col, mode }));
+                    .send(BridgeEvent::Cursor(CursorPayload {
+                        row,
+                        col,
+                        mode,
+                        scrolloff,
+                    }));
             }
             "gnv_cmdline" => {
                 let ctype = args.first().and_then(Value::as_str).unwrap_or(":").to_string();
@@ -463,7 +471,7 @@ async fn island_snapshot(nvim: &Nvim, win: i64, id: i64) -> Result<ResetPayload,
     let cur = nvim
         .exec_lua(
             "local w = ...; return vim.api.nvim_win_call(w, function() \
-             return { vim.fn.line('.'), vim.fn.charcol('.') } end)",
+             return { vim.fn.line('.'), vim.fn.charcol('.'), vim.wo.scrolloff } end)",
             vec![Value::from(win)],
         )
         .await
@@ -471,6 +479,7 @@ async fn island_snapshot(nvim: &Nvim, win: i64, id: i64) -> Result<ResetPayload,
     let arr = cur.as_array().ok_or("cursor lua shape")?;
     let row = arr.first().and_then(Value::as_i64).unwrap_or(1) - 1;
     let col = arr.get(1).and_then(Value::as_i64).unwrap_or(1) - 1;
+    let scrolloff = arr.get(2).and_then(Value::as_i64).unwrap_or(0);
     let mode = nvim
         .eval("mode()")
         .await
@@ -486,6 +495,7 @@ async fn island_snapshot(nvim: &Nvim, win: i64, id: i64) -> Result<ResetPayload,
         row,
         col,
         mode,
+        scrolloff,
         name,
     })
 }
@@ -794,7 +804,11 @@ pub async fn connect(
         for spec in [
             format!(
                 "autocmd gnv CursorMoved,CursorMovedI,ModeChanged,TextChanged,TextChangedI * \
-                 call rpcnotify({chan}, 'gnv_cursor', line('.') - 1, charcol('.') - 1, mode())"
+                 call rpcnotify({chan}, 'gnv_cursor', line('.') - 1, charcol('.') - 1, mode(), &scrolloff)"
+            ),
+            format!(
+                "autocmd gnv OptionSet scrolloff \
+                 call rpcnotify({chan}, 'gnv_cursor', line('.') - 1, charcol('.') - 1, mode(), &scrolloff)"
             ),
             format!(
                 "autocmd gnv CmdlineEnter,CmdlineChanged * \

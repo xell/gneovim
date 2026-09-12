@@ -974,6 +974,10 @@ class Island {
     this._gutterRaf = 0;
     this.decor = null; // last md_decor payload (parsed)
     this._lastViewport = null; // last {topline,botline,linecount} scrollTo saw
+    this.scrolloff = 0;
+    this._cursorScrollRaf = 0;
+    this._cursorScrollHideTimer = 0;
+    this._scrollPadding = null;
     // The DOM selection normally mirrors this Neovim cursor. External desktop
     // editors may move it through macOS Accessibility before posting their
     // correction keys, so serialize island cursor and key requests.
@@ -1293,6 +1297,8 @@ class Island {
   }
   destroy() {
     if (this._gutterRaf) cancelAnimationFrame(this._gutterRaf);
+    if (this._cursorScrollRaf) cancelAnimationFrame(this._cursorScrollRaf);
+    if (this._cursorScrollHideTimer) clearTimeout(this._cursorScrollHideTimer);
     this.view.destroy();
     this.el.remove();
   }
@@ -1429,8 +1435,11 @@ class Island {
       reconcileIslands(true);
     }
   }
-  applyCursor(row, col, mode) {
+  applyCursor(row, col, mode, scrolloff = this.scrolloff) {
     this.mode = mode;
+    const nextScrolloff = Math.max(0, scrolloff);
+    const scrolloffChanged = this.scrolloff !== nextScrolloff;
+    this.scrolloff = nextScrolloff;
     // if this island holds the cursor, keep its .cm-content focused so hasFocus
     // is reliable (needed for the insert-mode IME carve-out), in every mode
     if (gridToWin.get(cursorGrid) === this.winId && !this.view.hasFocus)
@@ -1449,7 +1458,52 @@ class Island {
       ...(cursorChanged ? { selection: { anchor: pos } } : {}),
       effects: setNvimCursor.of({ row, col, mode }),
     });
+    if (cursorChanged || scrolloffChanged) this.keepCursorInView();
     this.el.dataset.mode = mode;
+  }
+  keepCursorInView() {
+    if (this._cursorScrollRaf) cancelAnimationFrame(this._cursorScrollRaf);
+    this._cursorScrollRaf = requestAnimationFrame(() => {
+      this._cursorScrollRaf = 0;
+      const cursor = this._nvimCursor;
+      if (!cursor || this.el.hidden) return;
+      const scroller = this.view.scrollDOM;
+      if (!scroller.clientHeight) return;
+      const height = scroller.clientHeight;
+      const margin = Math.min(this.scrolloff * cellH, height / 2);
+      // The real scroller needs room beyond the document edges. Without this,
+      // scrollTop clamps at zero/max and the first/last cursor line cannot
+      // occupy the same scrolloff zone as an interior line.
+      if (this._scrollPadding !== margin) {
+        const padding = `${margin}px`;
+        this.view.contentDOM.style.paddingBlockStart = padding;
+        this.view.contentDOM.style.paddingBlockEnd = padding;
+        this._scrollPadding = margin;
+      }
+      const line = this.view.state.doc.line(Math.min(cursor.row + 1, this.view.state.doc.lines));
+      const pos = Math.min(line.from + byteToCol(line.text, cursor.col), line.to);
+      const rect = this.view.coordsAtPos(pos);
+      if (!rect) return;
+      const bounds = scroller.getBoundingClientRect();
+      const top = rect.top - bounds.top;
+      const bottom = rect.bottom - bounds.top;
+      let delta = 0;
+      if (margin === height / 2) delta = (top + bottom) / 2 - height / 2;
+      else if (top < margin) delta = top - margin;
+      else if (bottom > height - margin) delta = bottom - (height - margin);
+      if (delta) {
+        // WebKit reveals an overlay scrollbar for every programmatic scrollTop
+        // change. Keep it hidden across a cursor-key burst, but leave native
+        // wheel/trackpad scrolling and its scrollbar entirely untouched.
+        scroller.classList.add("cm-nvim-cursor-scroll");
+        clearTimeout(this._cursorScrollHideTimer);
+        this._cursorScrollHideTimer = setTimeout(() => {
+          scroller.classList.remove("cm-nvim-cursor-scroll");
+          this._cursorScrollHideTimer = 0;
+        }, 180);
+        scroller.scrollTop += delta;
+      }
+    });
   }
   clearCursor() {
     this.tx({ effects: setNvimCursor.of(null) });
@@ -1476,46 +1530,18 @@ class Island {
     this.tx({
       changes: { from: 0, to: this.view.state.doc.length, insert: m.lines.join("\n") },
     });
-    this.applyCursor(m.row, m.col, m.mode);
+    this.applyCursor(m.row, m.col, m.mode, m.scrolloff);
   }
   scrollTo(topline, botline, linecount) {
-    // win_viewport fires on every redraw touching this window, including a
-    // bare cursor move that never actually scrolls (curline/curcol ride
-    // along in the same event); Neovim resends the same topline/botline it
-    // already sent. EditorView.scrollIntoView isn't a no-op just because the
-    // target is already visible though: it still re-measures and re-aligns,
-    // and if that lands in the same tick as a decoration change on the line
-    // being aligned to (the cursor widget arriving at or leaving an
-    // otherwise-empty line), it can compute against a height CodeMirror
-    // hasn't finished settling into, one real (if small) corrective scroll
-    // and then a snap back, which is the "shake". Confirmed live: only ever
-    // on the exact line scrollIntoView re-aligns to on every single call,
-    // topline itself (line 1 when the window is already at the top of the
-    // buffer), never elsewhere. Skipping the call entirely when nothing
-    // about the viewport actually changed removes the redundant re-align
-    // that the race depends on, not just for this one case.
+    // Neovim's viewport is based on grid rows and keeps whole wrapped buffer
+    // lines visible. The preview owns visual scrolling instead: it uses the
+    // measured cursor rectangle in keepCursorInView, so prose may scroll
+    // through a wrapped line and honor scrolloff in actual pixels. Retain the
+    // dedupe state because win_viewport is still a useful model-level signal
+    // and must never grow into an unconditional scrollIntoView call again.
     const key = `${topline}/${botline}/${linecount}`;
     if (this._lastViewport === key) return;
     this._lastViewport = key;
-    const doc = this.view.state.doc;
-    // Neovim scrolled for a monospace window `p.h` rows tall, but our box is
-    // that many *monospace cells* tall and CM lines are taller, so it fits
-    // fewer lines. When Neovim is already showing the end of the buffer,
-    // pinning `topline` to the top clips the trailing lines with no way to
-    // reach them (Neovim will not scroll further). Sit the last line on the
-    // box bottom instead and show as many trailing lines as fit.
-    if (linecount != null && botline != null && botline >= linecount) {
-      this.view.dispatch({
-        effects: EditorView.scrollIntoView(doc.length, { y: "end" }),
-        annotations: fromNvim.of(true),
-      });
-      return;
-    }
-    const l = Math.min(Math.max(topline, 0), doc.lines - 1);
-    this.view.dispatch({
-      effects: EditorView.scrollIntoView(doc.line(l + 1).from, { y: "start" }),
-      annotations: fromNvim.of(true),
-    });
   }
 }
 
@@ -1599,6 +1625,7 @@ function renderGridOps(ops) {
               lastCursorPayload.row,
               lastCursorPayload.col,
               lastCursorPayload.mode,
+              lastCursorPayload.scrolloff,
             );
         }
         break;
@@ -1688,6 +1715,7 @@ function renderGridOps(ops) {
               lastCursorPayload.row,
               lastCursorPayload.col,
               lastCursorPayload.mode,
+              lastCursorPayload.scrolloff,
             );
         }
         break;
@@ -1798,6 +1826,7 @@ function applyScreen(m) {
   viewportEl.style.bottom = "auto";
   viewportEl.style.height = m.rows * cellH + "px";
   layout();
+  for (const isl of islands.values()) isl.keepCursorInView();
   placeGridCursor();
 }
 let lastSize = { cols: 0, rows: 0 };
@@ -1872,7 +1901,13 @@ addEventListener("error", (e) => {
       // event can replay it (see lastCursorPayload).
       lastCursorPayload = e.payload;
       const isl = islandForGrid(cursorGrid);
-      if (isl) isl.applyCursor(e.payload.row, e.payload.col, e.payload.mode);
+      if (isl)
+        isl.applyCursor(
+          e.payload.row,
+          e.payload.col,
+          e.payload.mode,
+          e.payload.scrolloff,
+        );
     }),
     listen(ev("cmdline"), () => {}),
     listen(ev("cmdline_hide"), () => {}),

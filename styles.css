@@ -104,6 +104,12 @@ body {
   line-height: 1.6;
   overflow: auto;
 }
+/* macOS reveals its overlay scrollbar for each programmatic cursor-follow
+   scroll. Hide only that short burst; user-driven wheel and trackpad scrolling
+   keeps the platform scrollbar behavior selected in System Settings. */
+.island .cm-scroller.cm-nvim-cursor-scroll::-webkit-scrollbar {
+  display: none;
+}
 .island .cm-content {
   /* the caret is our own nvim-cursor decoration; suppress the native one */
   caret-color: transparent;
