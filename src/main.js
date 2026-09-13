@@ -10,7 +10,7 @@ import { listen as tauriListen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { NvimClient } from "./nvim-client.js";
 import { SessionModel } from "./session-model.js";
-import { GridStore } from "./grid-store.js";
+import { GridView } from "./grid-view.js";
 import { byteLen, byteToCol } from "./pure/text-geometry.js";
 import { parseGuifont } from "./pure/guifont.js";
 import {
@@ -194,128 +194,7 @@ function hlCss(id) {
   return s;
 }
 
-// ---------------------------------------------------------------------------
-// GridWin: a Neovim grid rendered as DOM cell rows
-// ---------------------------------------------------------------------------
-class GridWin {
-  constructor(id) {
-    this.id = id;
-    this.store = new GridStore();
-    this.el = document.createElement("div");
-    this.el.className = "grid gridwin";
-    this.el.dataset.grid = id;
-    this.cursor = null;
-    // row-level repaint: one reused <div class="grid-row"> per row, and the set
-    // of rows whose cells changed since the last repaint. `fullDirty` forces a
-    // rebuild of every row (resize, clear, colour change, stale-surface repaint).
-    this.rowEls = [];
-    this.dirtyRows = new Set();
-    this.fullDirty = true;
-  }
-  get cols() {
-    return this.store.cols;
-  }
-  get rows() {
-    return this.store.rows;
-  }
-  get cells() {
-    return this.store.cells;
-  }
-  resize(w, h) {
-    // grid_resize does NOT imply a clear: Neovim keeps the overlapping cells and
-    // only sends grid_line for what changed. Blanking here leaves stale rows
-    // empty forever after a window shrinks and grows back (q:, devtools, ...).
-    this.store.resize(w, h);
-    this.fullDirty = true; // row count / width changed: rebuild all rows
-  }
-  clear() {
-    this.store.clear();
-    this.fullDirty = true;
-  }
-  line(row, col, cells) {
-    if (!this.store.line(row, col, cells)) return;
-    this.dirtyRows.add(row);
-  }
-  scroll(spec) {
-    if (!this.store.scroll(spec)) return;
-    const { top, bot, left, right, rows } = spec;
-    // Full-width scroll: move the row nodes to match the cell shift so the
-    // scrolled text is never re-serialized. Only the vacated band needs
-    // repainting (Neovim's following grid_line fills it; mark it dirty so a
-    // blank scroll-in still paints). A sub-column region (left/right) is rare
-    // and can't move whole nodes, so fall back to repainting the band.
-    const region = bot - top;
-    if (left === 0 && right === this.cols && this.rowEls.length === this.rows) {
-      const seg = this.rowEls.slice(top, bot);
-      const k = ((rows % region) + region) % region; // left-rotate amount
-      const rotated = seg.slice(k).concat(seg.slice(0, k));
-      for (let i = 0; i < region; i++) this.rowEls[top + i] = rotated[i];
-      const anchor = this.rowEls[bot] || null;
-      for (let i = top; i < bot; i++)
-        this.el.insertBefore(this.rowEls[i], anchor);
-      if (rows > 0) for (let r = bot - rows; r < bot; r++) this.dirtyRows.add(r);
-      else for (let r = top; r < top - rows; r++) this.dirtyRows.add(r);
-    } else {
-      for (let r = top; r < bot; r++) this.dirtyRows.add(r);
-    }
-  }
-  paintRow(r) {
-    const rowEl = this.rowEls[r];
-    const row = this.cells[r];
-    const frag = document.createDocumentFragment();
-    let run = "";
-    let runHl = row.length ? row[0][1] : 0;
-    const flush = () => {
-      if (!run) return;
-      const sp = document.createElement("span");
-      sp.style.cssText = hlCss(runHl);
-      sp.textContent = run;
-      frag.append(sp);
-      run = "";
-    };
-    for (let c = 0; c < this.cols; c++) {
-      const [ch, hl] = row[c];
-      // "" is the right half of a preceding double-width cell; skip it
-      if (ch === "") continue;
-      if (hl !== runHl) {
-        flush();
-        runHl = hl;
-      }
-      // A double-width glyph (CJK, some emoji): the next cell is "". The
-      // fallback CJK font is not monospace, so pin the glyph to exactly two
-      // cells or the row drifts out of sync with the cell-based cursor math.
-      if (c + 1 < this.cols && row[c + 1][0] === "") {
-        flush();
-        const sp = document.createElement("span");
-        sp.className = "wide";
-        sp.style.cssText = hlCss(hl) + `width:${2 * cellW}px`;
-        sp.textContent = ch;
-        frag.append(sp);
-      } else {
-        run += ch;
-      }
-    }
-    flush();
-    rowEl.replaceChildren(frag);
-  }
-  repaint() {
-    if (this.fullDirty || this.rowEls.length !== this.rows) {
-      this.rowEls = Array.from({ length: this.rows }, () => {
-        const d = document.createElement("div");
-        d.className = "grid-row";
-        return d;
-      });
-      this.el.replaceChildren(...this.rowEls);
-      for (let r = 0; r < this.rows; r++) this.paintRow(r);
-    } else {
-      for (const r of this.dirtyRows) if (r < this.rows) this.paintRow(r);
-    }
-    this.fullDirty = false;
-    this.dirtyRows.clear();
-  }
-}
-
-const grids = new Map(); // gridId -> GridWin
+const grids = new Map(); // gridId -> GridView
 const session = new SessionModel();
 const islands = new Map(); // winId -> Island (one CM instance per markdown window)
 let islandGridIds = new Set(); // gridIds currently rendered as an island
@@ -402,7 +281,11 @@ function mergeHlDefs(defs) {
 function gw(id) {
   let g = grids.get(id);
   if (!g) {
-    g = new GridWin(id);
+    g = new GridView(id, {
+      document,
+      highlightCss: hlCss,
+      cellWidth: () => cellW,
+    });
     grids.set(id, g);
     viewportEl.append(g.el);
   }
