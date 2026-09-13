@@ -17,11 +17,11 @@ describe("NvimClient", () => {
     expect(listen).toHaveBeenCalledWith("gnv://main/grid", callback);
   });
 
-  it("preserves command names and payload shapes", () => {
+  it("preserves command names and payload shapes", async () => {
     const { invoke, nvim } = client();
     const regions = [{ startRow: 1, startCol: 2, endRow: 3, endCol: 4, replacement: ["x"] }];
 
-    nvim.input("<CR>");
+    await nvim.input("<CR>");
     nvim.cursorSet(1000, 2, 7);
     nvim.edit(8, regions);
     nvim.mouse("left", "press", "C-", 4, 5);
@@ -39,6 +39,35 @@ describe("NvimClient", () => {
       ["island_detach", { buf: 8 }],
       ["nvim_resize", { cols: 120, rows: 40 }],
       ["nvim_ui_start", { cols: 120, rows: 40 }],
+    ]);
+  });
+
+  it("serializes input and continues after a rejected request", async () => {
+    let releaseFirst;
+    const first = new Promise((resolve) => {
+      releaseFirst = resolve;
+    });
+    const invoke = vi
+      .fn()
+      .mockImplementationOnce(() => first)
+      .mockRejectedValueOnce(new Error("input failed"))
+      .mockResolvedValueOnce();
+    const nvim = new NvimClient({ invoke, listen: vi.fn(), windowLabel: "main" });
+
+    const one = nvim.input("one");
+    const two = nvim.input("two");
+    const three = nvim.input("three");
+    await Promise.resolve();
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    releaseFirst();
+    await one;
+    await expect(two).rejects.toThrow("input failed");
+    await three;
+    expect(invoke.mock.calls).toEqual([
+      ["nvim_input", { keys: "one" }],
+      ["nvim_input", { keys: "two" }],
+      ["nvim_input", { keys: "three" }],
     ]);
   });
 

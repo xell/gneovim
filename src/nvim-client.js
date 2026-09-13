@@ -5,6 +5,7 @@ export class NvimClient {
     this.invoke = invoke;
     this.listen = listen;
     this.windowLabel = windowLabel;
+    this.inputQueue = Promise.resolve();
   }
 
   eventName(kind) {
@@ -16,7 +17,11 @@ export class NvimClient {
   }
 
   input(keys) {
-    return this.invoke("nvim_input", { keys });
+    const request = this.inputQueue.then(() => this.invoke("nvim_input", { keys }));
+    // Keep later input moving after a rejected request while still returning the
+    // original rejection to the caller that owns its error policy.
+    this.inputQueue = request.catch(() => {});
+    return request;
   }
 
   showDefinition(text, x, y) {

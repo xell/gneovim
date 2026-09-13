@@ -475,7 +475,13 @@ function attachIsland(isl) {
   nvim
     .attachIsland(isl.winId)
     .then((snap) => {
-      if (islands.get(isl.winId) !== isl) return; // unmounted while awaiting
+      if (islands.get(isl.winId) !== isl) {
+        // The Rust attach already incremented this buffer's refcount. Balance it
+        // when the island was unmounted while the request was in flight.
+        return nvim
+          .detachIsland(snap.buf)
+          .catch((e) => jlog("abandoned island_detach failed: " + e));
+      }
       isl.bufnr = snap.buf;
       isl.applyReset(snap);
       layout();
@@ -626,7 +632,7 @@ function imeFlush() {
   const v = imeEl.value;
   imeEl.value = "";
   if (v && gridTextInputActive())
-    nvim.input(v.replace(/</g, "<lt>"));
+    nvim.input(v.replace(/</g, "<lt>")).catch((e) => jlog("IME input failed: " + e));
 }
 imeEl.addEventListener("compositionstart", () => {
   imeComposing = true;
@@ -2313,8 +2319,12 @@ function pushSize() {
   resizeTimer = setTimeout(() => {
     const m = screenMetrics();
     if (m.cols === lastSize.cols && m.rows === lastSize.rows) return;
-    lastSize = { cols: m.cols, rows: m.rows };
-    nvim.resize(m.cols, m.rows).catch(() => {});
+    nvim
+      .resize(m.cols, m.rows)
+      .then(() => {
+        lastSize = { cols: m.cols, rows: m.rows };
+      })
+      .catch((e) => jlog("resize failed: " + e));
   }, 40); // coalesce a live drag into one nvim resize per frame-ish
 }
 
@@ -2407,7 +2417,13 @@ addEventListener("error", (e) => {
       islands.get(e.payload.win)?.setGutter(e.payload);
     }),
     nvim.on("md_decor", (e) => {
-      const d = JSON.parse(e.payload.json);
+      let d;
+      try {
+        d = JSON.parse(e.payload.json);
+      } catch (error) {
+        jlog("invalid md_decor payload: " + error);
+        return;
+      }
       if (d.hl?.defs) mergeHlDefs(d.hl.defs);
       const isl = islands.get(e.payload.win);
       if (isl) isl.setDecor(d);
@@ -2595,7 +2611,7 @@ addEventListener("keydown", (e) => {
     e.preventDefault();
     const keys = normalPunctuation === "<" ? "<lt>" : normalPunctuation;
     if (isl) isl.queueNvimInput(keys);
-    else nvim.input(keys);
+    else nvim.input(keys).catch((error) => jlog("grid input failed: " + error));
     return;
   }
   const plain = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
@@ -2636,7 +2652,7 @@ addEventListener("keydown", (e) => {
     return;
   e.preventDefault();
   if (isl) isl.queueNvimInput(keys);
-  else nvim.input(keys);
+  else nvim.input(keys).catch((error) => jlog("grid input failed: " + error));
 });
 
 // ---------------------------------------------------------------------------
