@@ -19,7 +19,7 @@ import {
   colorLuma,
   rgbHex,
 } from "./highlight-registry.js";
-import { byteLen, byteRange, byteToCol } from "./pure/text-geometry.js";
+import { byteLen, byteToCol } from "./pure/text-geometry.js";
 import { parseGuifont } from "./pure/guifont.js";
 import {
   keyToNvim as encodeKeyToNvim,
@@ -427,15 +427,12 @@ const islandDecorationState = createIslandDecorationState({
   log: jlog,
 });
 const {
-  concealHide: CONCEAL_HIDE,
   islandDecorField,
   islandFoldField,
-  lineDecoration: lineDeco,
   nvimCursorField,
   setIslandDecor,
   setIslandFolds,
   setNvimCursor,
-  visualMark: VISUAL_MARK,
 } = islandDecorationState;
 // `guard_row` is supplied by md_decor.lua after applying Neovim's
 // 'concealcursor' rule. -1 means conceal remains active on the cursor line.
@@ -472,7 +469,6 @@ class Island {
     this.fontZoom = 0;
     this.editableComp = new Compartment();
     this.editable = true;
-    this.decor = null; // last md_decor payload (parsed)
     this._lastViewport = null; // last {topline,botline,linecount} scrollTo saw
     this.scrolloff = 0;
     // The DOM selection normally mirrors this Neovim cursor. External desktop
@@ -625,170 +621,6 @@ class Island {
   //   listener; this only consumes `hl.runs` / `hl.virt`.
   setDecor(d) {
     this.displayDecorations.set(d);
-  }
-  // byte range [sc, ec) on buffer row `row` -> CM [from, to), or null.
-  _range(row, sc, ec) {
-    return byteRange(this.view.state.doc, row, sc, ec);
-  }
-  applyDecor() {
-    return this.displayDecorations.apply();
-    const d = this.decor;
-    const doc = this.view.state.doc;
-
-    // folds first: a closed fold hides everything from the end of its own
-    // first line onward through the end of its last line. The first line is
-    // not touched here at all, so every normal decoration on it (structural
-    // styling, highlights, conceal) still applies exactly as if it were not
-    // folded; foldLines below only adds one text-colour mark to it, the sole
-    // visible sign that the fold is closed. End at the last folded line's
-    // `.to` (before its newline) so the range stays within the buffer and
-    // the trailing newline keeps the next line flowing normally.
-    const { spans: foldSpans, firstLines: foldLines } = foldRanges(
-      doc,
-      d?.folds,
-    );
-    const inFold = (from, to) => overlapsRanges(foldSpans, from, to);
-
-    // conceal: inline replace decorations, which may not overlap each other.
-    // Neovim's own conceal, our heading-marker icon, and our blockquote-marker
-    // hiding all go through one dedup pass. Ours are pushed first so they win
-    // a tie (stable sort) if Neovim also happens to conceal the same run.
-    // Both skip guardRow, the same row real conceal is guarded against server
-    // side (md_decor.lua's conceal_guard_row): -1 when 'concealcursor' names
-    // the current mode, meaning nothing is guarded and even the cursor line
-    // conceals normally, otherwise the cursor's row. Neither marker hiding is
-    // real conceal, so without reading this they would always reveal the
-    // cursor line regardless of concealcursor, ignoring the option entirely.
-    const guardRow = d?.guard_row ?? -1;
-    const spans = [];
-    for (const { row, from, to, level } of headingMarkerRanges(
-      doc,
-      d?.heads,
-      guardRow,
-      inFold,
-    )) {
-      // The heading icon replaces the first source character. When conceal
-      // stays active on the cursor line, the ordinary cursor decoration would
-      // be swallowed by that replace, so the icon paints its cursor state.
-      const cursorMode =
-        this._nvimCursor?.row === row && this._nvimCursor.col === 0
-          ? this.mode
-          : null;
-      spans.push({
-        from,
-        to,
-        deco:
-          level <= 3
-            ? Decoration.replace({ widget: new HeadingIconWidget(level, cursorMode) })
-            : CONCEAL_HIDE,
-      });
-    }
-    for (const { from, to } of quoteMarkerRanges(
-      doc,
-      d?.quotes,
-      guardRow,
-      inFold,
-    )) {
-      spans.push({ from, to, deco: CONCEAL_HIDE });
-    }
-    // overlay virt_text (hop.nvim's jump letters, etc): pushed ahead of plain
-    // conceal so an interactive overlay wins a tie over Neovim's own conceal.
-    for (const [row, col, hide, segs] of d?.hl?.virt ?? []) {
-      const r = this._range(row, col, col + hide);
-      if (r && !inFold(r.from, r.to))
-        spans.push({ ...r, deco: Decoration.replace({ widget: new OverlayWidget(segs) }) });
-    }
-    for (const [row, sc, ec, text] of d?.conceal ?? []) {
-      const r = this._range(row, sc, ec);
-      if (r && !inFold(r.from, r.to))
-        spans.push({
-          ...r,
-          deco: text ? Decoration.replace({ widget: new ConcealWidget(text) }) : CONCEAL_HIDE,
-        });
-    }
-    const ranges = [];
-    for (const span of nonOverlappingSpans(spans)) {
-      ranges.push(span.deco.range(span.from, span.to));
-    }
-    // inline `code`: monospace, no Neovim highlight attribute carries font.
-    for (const [row, sc, ec] of d?.hl?.codespans ?? []) {
-      const r = this._range(row, sc, ec);
-      if (r && !inFold(r.from, r.to))
-        ranges.push(Decoration.mark({ class: "cm-inline-code" }).range(r.from, r.to));
-    }
-    // highlights: one mark per treesitter capture / hl_group extmark run. They
-    // overlap freely; CM nests the spans and CSS resolves, like a browser.
-    for (const [row, sc, ec, group] of d?.hl?.runs ?? []) {
-      const r = this._range(row, sc, ec);
-      if (r && !inFold(r.from, r.to)) {
-        ranges.push(
-          Decoration.mark({ class: highlights.islandClass(group) }).range(r.from, r.to),
-        );
-      }
-    }
-    // visual/select range: a background mark, may overlap anything.
-    for (const range of visualRanges(doc, d?.visual, inFold)) {
-      ranges.push(VISUAL_MARK.range(range.from, range.to));
-    }
-    // A closed fold's own first line: everything else about it is untouched
-    // (see foldLines above), this is the only visual difference from the
-    // same line unfolded. `!important` in the CSS rule, since this must win
-    // over whatever colour a highlight mark on the same text already gives
-    // it, regardless of which one CodeMirror happens to nest innermost.
-    for (const f of foldLines)
-      ranges.push(Decoration.mark({ class: "cm-fold-closed" }).range(f.from, f.to));
-    // structure: heading size / code fence / blockquote, one Decoration.line
-    // per affected line (see lineDeco above for why not a multi-line replace).
-    const addLines = (sr, er, cls) => {
-      const deco = lineDeco(cls);
-      for (const from of structuralLineStarts(doc, sr, er, inFold)) {
-        ranges.push(deco.range(from));
-      }
-    };
-    for (const [sr, er, level] of d?.heads ?? [])
-      addLines(sr, er, `cm-h${Math.min(Math.max(level, 1), 6)}`);
-    for (const [sr, er] of d?.codes ?? []) addLines(sr, er, "cm-code-block");
-    for (const [sr, er] of d?.quotes ?? []) addLines(sr, er, "cm-blockquote");
-    // folds go in their own never-mapped field (see islandFoldField). A
-    // closed fold's body is hidden outright, the same no-widget replace as
-    // conceal, not a summary widget: the fold's first line, left untouched
-    // above, is the only visible representative of the whole range.
-    const foldSet = Decoration.set(
-      foldSpans.map((f) => CONCEAL_HIDE.range(f.from, f.to)),
-    );
-
-    const st = this.view.state;
-    const noConcealChange =
-      !ranges.length && !st.field(islandDecorField).size;
-    const noFoldChange = !foldSpans.length && !st.field(islandFoldField).size;
-    if (noConcealChange && noFoldChange) return;
-
-    const effects = [];
-    if (!noConcealChange) {
-      try {
-        effects.push(setIslandDecor.of(Decoration.set(ranges, true)));
-      } catch (e) {
-        jlog("island decor build failed: " + e);
-      }
-    }
-    if (!noFoldChange) effects.push(setIslandFolds.of(foldSet));
-    if (effects.length) {
-      this.view.dispatch({ effects });
-      // WKWebView will not composite a freshly updated absolutely-positioned
-      // subtree until an unrelated event (scroll/resize) nudges it; the grid
-      // renderer hits the same thing (see forceRepaint's other call site).
-      // Usually masked because typing/scrolling keeps the compositor busy,
-      // but a decoration that arrives after the webview has gone idle (hop.nvim:
-      // type the search string, hit Enter, the hint letters push lands after
-      // that, nothing else touches the page) can sit applied-but-unpainted
-      // until something else forces a reflow, e.g. opening devtools.
-      // forceRepaint toggles display:none, which would blur .cm-content (an
-      // island descendant) if it currently holds focus; restore it right after
-      // so the toggle costs nothing even mid insert-mode typing or IME.
-      const hadFocus = this.view.hasFocus;
-      forceRepaint(this.el);
-      if (hadFocus) this.view.focus();
-    }
   }
   destroy() {
     this.gutterController.destroy();

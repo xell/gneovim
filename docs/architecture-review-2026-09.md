@@ -4,6 +4,19 @@ Reviewed at main commit `593f571` on 2026-09-13. All line numbers below refer to
 
 This document is the handoff for the next refactoring rounds. The goal of that work is a thorough quality pass with **strictly no functional changes**: no user-facing feature added, removed, or altered, and **the IPC command signatures frozen** (names, parameters, payload shapes, on both the command and event direction). Every candidate below fits inside that constraint except where explicitly flagged.
 
+## Implementation status
+
+The recommended refactoring rounds are complete. The original findings below remain as the historical rationale; current source locations and module counts have changed substantially.
+
+1. Pure frontend logic now lives in importable modules under `src/pure/`, with Vitest coverage for text geometry, key encoding, Markdown parsing and decoration planning, visual and fold ranges, buffer edits, image sources, layout, fonts, and semantic word targeting.
+2. `NvimClient` owns every Tauri command name, payload, event naming rule, input ordering rule, and command-specific recovery policy. `main.js` contains no raw `invoke` or `listen` calls.
+3. Island synchronization uses changedtick acknowledgements, an atomic snapshot, and idempotent attach and detach lifecycle handling rather than timed echo suppression.
+4. `SessionModel`, `GridStore`, `GridView`, `GridCoordinator`, `RedrawScheduler`, `IslandManager`, `CursorScroller`, `GutterController`, `IslandInputController`, and the decoration modules own the mutable frontend state previously concentrated in `main.js`.
+5. Rust event payloads are typed, malformed Markdown decoration JSON is contained, hot-path locks recover from poisoning, dead forwarding channels stop work, and bridge readiness uses a shared watch signal.
+6. The frozen IPC inventory in this review remains present with the same command names, event names, notification names, parameters, and payload shapes. The intentionally retained unused `nvim_redraw` command remains frozen.
+
+Final automated verification covers the JavaScript unit suite and production build plus all Rust unit, bridge, multigrid renderer, and redraw probe tests. The manual webview checks listed at the end of this review remain the release checklist because they require macOS composition, accessibility, and compositor behavior that automated unit tests cannot reproduce.
+
 ## Vocabulary
 
 These terms are used exactly as defined here; do not substitute "component", "service", "API", "boundary", or "layer".
