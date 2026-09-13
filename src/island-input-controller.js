@@ -145,6 +145,37 @@ export class IslandInputController {
     return false;
   }
 
+  syncDomSelectionBeforeKey(event) {
+    // AXSelectedTextRange updates WebKit's DOM selection before Grammarly posts
+    // its key, but CodeMirror's selection observer may not have dispatched yet.
+    // Sample the native selection at the causal key boundary rather than racing
+    // that observer or introducing a timeout.
+    if (event.isComposing) return;
+    const selection = this.view.contentDOM.ownerDocument.getSelection();
+    if (
+      !selection ||
+      !selection.isCollapsed ||
+      !selection.focusNode ||
+      !this.view.contentDOM.contains(selection.focusNode)
+    )
+      return;
+    let position;
+    try {
+      position = this.view.posAtDOM(
+        selection.focusNode,
+        selection.focusOffset,
+      );
+    } catch {
+      return;
+    }
+    const line = this.view.state.doc.lineAt(position);
+    const row = line.number - 1;
+    const col = byteLen(line.text.slice(0, position - line.from));
+    const cursor = this.getCursor();
+    if (cursor?.row === row && cursor.col === col) return;
+    this.inputQueue.cursor(row, col);
+  }
+
   isComposing() {
     return Boolean(this.composition || this.view.composing);
   }

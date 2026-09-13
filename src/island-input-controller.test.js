@@ -207,4 +207,64 @@ describe("IslandInputController", () => {
     await inputQueue.pending;
     expect(client.input).toHaveBeenCalledWith(",");
   });
+
+  it("samples Grammarly's DOM selection before CodeMirror observes it", async () => {
+    const cursorRequest = deferred();
+    const client = {
+      cursorSet: vi.fn(() => cursorRequest.promise),
+      edit: vi.fn(() => Promise.resolve()),
+      input: vi.fn(() => Promise.resolve()),
+    };
+    const inputQueue = new IslandInputQueue({
+      client,
+      winId: 12,
+      log: vi.fn(),
+    });
+    const fromNvim = {};
+    const focusNode = {};
+    const doc = Text.of(["ok", "ADHD people"]);
+    const contentDOM = {
+      contains: (node) => node === focusNode,
+      ownerDocument: {
+        getSelection: () => ({
+          focusNode,
+          focusOffset: 4,
+          isCollapsed: true,
+        }),
+      },
+    };
+    const view = {
+      composing: false,
+      contentDOM,
+      posAtDOM: vi.fn(() => 7),
+      state: {
+        doc,
+        // CodeMirror still has Neovim's old cursor when keydown arrives.
+        selection: EditorSelection.single(2),
+      },
+    };
+    const controller = new IslandInputController({
+      client,
+      inputQueue,
+      fromNvim,
+      getBuffer: () => 5,
+      getCursor: () => ({ row: 0, col: 2 }),
+      log: vi.fn(),
+      requestFrame: vi.fn(),
+      setTimer: vi.fn(),
+    });
+    controller.attach(view);
+
+    controller.syncDomSelectionBeforeKey({ isComposing: false });
+    inputQueue.input(",");
+    await Promise.resolve();
+
+    expect(view.posAtDOM).toHaveBeenCalledWith(focusNode, 4);
+    expect(client.cursorSet).toHaveBeenCalledWith(12, 1, 4);
+    expect(client.input).not.toHaveBeenCalled();
+
+    cursorRequest.resolve();
+    await inputQueue.pending;
+    expect(client.input).toHaveBeenCalledWith(",");
+  });
 });

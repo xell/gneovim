@@ -634,6 +634,10 @@ class Island {
   queueNvimInput(keys) {
     this.inputQueue.input(keys);
   }
+  queueNvimKey(keys, event) {
+    this.inputController.syncDomSelectionBeforeKey(event);
+    this.inputQueue.input(keys);
+  }
   semanticWordTarget() {
     return findSemanticWordTarget(this.view.state.doc, this._nvimCursor);
   }
@@ -1150,7 +1154,7 @@ addEventListener("keydown", (e) => {
     if (isl) islandNativeWPending = true;
     e.preventDefault();
     const keys = normalPunctuation === "<" ? "<lt>" : normalPunctuation;
-    if (isl) isl.queueNvimInput(keys);
+    if (isl) isl.queueNvimKey(keys, e);
     else nvim.input(keys).catch((error) => jlog("grid input failed: " + error));
     return;
   }
@@ -1191,7 +1195,7 @@ addEventListener("keydown", (e) => {
   )
     return;
   e.preventDefault();
-  if (isl) isl.queueNvimInput(keys);
+  if (isl) isl.queueNvimKey(keys, e);
   else nvim.input(keys).catch((error) => jlog("grid input failed: " + error));
 });
 
