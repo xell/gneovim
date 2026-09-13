@@ -2,7 +2,7 @@
 // a CodeMirror island for each markdown window, one nvim driving both.
 
 import "../styles.css";
-import { EditorView, Decoration, WidgetType, lineNumbers } from "@codemirror/view";
+import { EditorView, Decoration, WidgetType } from "@codemirror/view";
 import { Annotation, StateEffect, StateField, Compartment } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
@@ -44,6 +44,7 @@ import {
   structuralLineStarts,
 } from "./pure/markdown-decoration-plan.js";
 import { CursorScroller } from "./cursor-scroller.js";
+import { GutterController } from "./gutter-controller.js";
 
 // this webview's window label; event names are per-window (gnv://<label>/<kind>)
 // because emit_to() broadcasts to every webview in this app.
@@ -987,9 +988,6 @@ class Island {
     this.fontZoom = 0;
     this.editableComp = new Compartment();
     this.editable = true;
-    this.gutterComp = new Compartment(); // number column, mirrored from Neovim
-    this.gutter = null; // last { number, relativenumber, numberwidth, ... }
-    this._gutterRaf = 0;
     this.decor = null; // last md_decor payload (parsed)
     this._lastViewport = null; // last {topline,botline,linecount} scrollTo saw
     this.scrolloff = 0;
@@ -1003,6 +1001,13 @@ class Island {
     this.el.className = "island";
     this.el.hidden = true;
     viewportEl.append(this.el);
+    this.gutterController = new GutterController({
+      element: this.el,
+      compartment: new Compartment(),
+      cursorField: nvimCursorField,
+      requestFrame: (callback) => requestAnimationFrame(callback),
+      cancelFrame: (id) => cancelAnimationFrame(id),
+    });
     this.compose = null; // { text, sel } snapshot while an IME composition runs
     this.view = new EditorView({
       doc: "",
@@ -1025,18 +1030,11 @@ class Island {
         nvimCursorField,
         islandDecorField,
         islandFoldField,
-        this.gutterComp.of([]),
+        this.gutterController.extension(),
         this.editableComp.of(EDITABLE_ON),
         EditorView.updateListener.of((u) => this.onUpdate(u)),
         EditorView.updateListener.of((u) => this.onExternalSelection(u)),
-        EditorView.updateListener.of((u) => {
-          // relativenumber: repaint the number column when the cursor line
-          // moves, even on a transaction that changed nothing else.
-          if (!this.gutter?.relativenumber) return;
-          const a = u.startState.field(nvimCursorField, false)?.pos?.row;
-          const b = u.state.field(nvimCursorField, false)?.pos?.row;
-          if (a !== b) this.scheduleGutterRefresh();
-        }),
+        EditorView.updateListener.of((u) => this.gutterController.onUpdate(u)),
         EditorView.domEventHandlers({
           mousedown: (ev, v) => this.onMousedown(ev, v),
           compositionstart: () => {
@@ -1077,6 +1075,7 @@ class Island {
       ],
       parent: this.el,
     });
+    this.gutterController.attach(this.view);
     this.cursorScroller = new CursorScroller({
       view: this.view,
       isHidden: () => this.el.hidden,
@@ -1118,40 +1117,7 @@ class Island {
   // `number` / `relativenumber` / `numberwidth` are drawn for now (signcolumn
   // and foldcolumn ride along in `o` for a later pass).
   setGutter(o) {
-    this.gutter = o;
-    this.applyGutter();
-  }
-  applyGutter() {
-    const g = this.gutter;
-    const ext = [];
-    if (g && (g.number || g.relativenumber)) {
-      this.el.style.setProperty(
-        "--gutter-numw",
-        String(Math.max(g.numberwidth || 4, 2)),
-      );
-      ext.push(
-        lineNumbers({
-          formatNumber: (n, state) => {
-            if (!g.relativenumber) return String(n);
-            const cur = state.field(nvimCursorField, false)?.pos;
-            const curLine = cur ? Math.min(cur.row + 1, state.doc.lines) : null;
-            if (curLine == null) return String(n);
-            if (n === curLine) return g.number ? String(n) : "0";
-            return String(Math.abs(n - curLine));
-          },
-        }),
-      );
-    } else {
-      this.el.style.removeProperty("--gutter-numw");
-    }
-    this.view.dispatch({ effects: this.gutterComp.reconfigure(ext) });
-  }
-  scheduleGutterRefresh() {
-    if (this._gutterRaf) return;
-    this._gutterRaf = requestAnimationFrame(() => {
-      this._gutterRaf = 0;
-      this.applyGutter();
-    });
+    this.gutterController.set(o);
   }
   // Display bridge (runtime/md_decor.lua). `d` is the parsed payload:
   // { first, last, conceal: [[row, sByte, eByte, text], ...],
@@ -1375,7 +1341,7 @@ class Island {
     }
   }
   destroy() {
-    if (this._gutterRaf) cancelAnimationFrame(this._gutterRaf);
+    this.gutterController.destroy();
     this.cursorScroller.destroy();
     this.view.destroy();
     this.el.remove();
