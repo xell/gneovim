@@ -48,6 +48,7 @@ import { CursorScroller } from "./cursor-scroller.js";
 import { GutterController } from "./gutter-controller.js";
 import { IslandInputQueue } from "./island-input-queue.js";
 import { IslandInputController } from "./island-input-controller.js";
+import { createIslandDecorationState } from "./island-decoration-state.js";
 
 // this webview's window label; event names are per-window (gnv://<label>/<kind>)
 // because emit_to() broadcasts to every webview in this app.
@@ -435,30 +436,22 @@ function placeGridCursor() {
 }
 
 const fromNvim = Annotation.define();
-const setNvimCursor = StateEffect.define();
+const {
+  concealHide: CONCEAL_HIDE,
+  islandDecorField,
+  islandFoldField,
+  lineDecoration: lineDeco,
+  nvimCursorField,
+  setIslandDecor,
+  setIslandFolds,
+  setNvimCursor,
+  visualMark: VISUAL_MARK,
+} = createIslandDecorationState({ document, log: jlog });
 // `guard_row` is supplied by md_decor.lua after applying Neovim's
 // 'concealcursor' rule. -1 means conceal remains active on the cursor line.
 const setTableConcealGuard = StateEffect.define();
 const setTableHighlights = StateEffect.define();
 const setIslandImageBase = StateEffect.define();
-
-class BlockCursor extends WidgetType {
-  toDOM() {
-    const s = document.createElement("span");
-    s.className = "nvim-cursor nvim-cursor-block nvim-cursor-eol";
-    s.textContent = " ";
-    return s;
-  }
-}
-// The insert-mode caret. Its own widget, not CodeMirror's, so the buffer echo
-// (a whole-line replace on every keystroke) can never map it to the line start.
-class BarCursor extends WidgetType {
-  toDOM() {
-    const s = document.createElement("span");
-    s.className = "nvim-cursor nvim-cursor-bar";
-    return s;
-  }
-}
 // Replacement glyph for an extmark conceal at conceallevel 1 (the `cchar`).
 // conceallevel >= 2 sends an empty string and gets a plain Decoration.replace.
 class ConcealWidget extends WidgetType {
@@ -837,141 +830,6 @@ const markdownTableField = StateField.define({
       : value;
   },
   provide: (field) => EditorView.decorations.from(field, (value) => value.deco),
-});
-// A plain hidden run with no replacement text: blockquote "> " markers (the
-// cm-blockquote line decoration already draws the bar) and H4-H6 markers.
-// One shared instance; identical specs compare equal so it never re-renders.
-const CONCEAL_HIDE = Decoration.replace({});
-// Display-bridge decorations, in two fields.
-//
-// islandDecorField: conceal, highlights, visual range. Marks and short inline
-// replaces. Mapped through edits (guarded) so they stay put between the ~20ms
-// pushes without flashing on every keystroke.
-//
-// islandFoldField: closed-fold replaces only. A fold replace spans line breaks,
-// and mapping one through certain edits corrupts the set so that every later
-// `map(tr.changes)` throws, which aborts the transaction and freezes the island
-// permanently (survives `:e`). So this field is NEVER mapped: it drops on any
-// doc change and the next push rebuilds it. Folds are rare and big, so a
-// one-cycle drop on edit is unnoticeable, unlike conceal.
-//
-// Both are defined before nvimCursorField so cursorDeco reads the current sets.
-const VISUAL_MARK = Decoration.mark({ class: "cm-nvim-visual" });
-// Structural styling (heading size, code fence, blockquote): Decoration.line
-// per affected line, not a multi-line replace. Point decorations at line.from,
-// so they map trivially and carry none of the fold class of risk (see the
-// "Decoration safety rules" note in docs/markdown-island.md). One instance per
-// class, reused, so pushes that touch the same lines diff to a no-op.
-const lineDecoBy = new Map();
-function lineDeco(cls) {
-  let d = lineDecoBy.get(cls);
-  if (!d) {
-    d = Decoration.line({ attributes: { class: cls } });
-    lineDecoBy.set(cls, d);
-  }
-  return d;
-}
-const setIslandDecor = StateEffect.define();
-const islandDecorField = StateField.define({
-  create: () => Decoration.none,
-  update(v, tr) {
-    if (tr.docChanged) {
-      try {
-        v = v.map(tr.changes);
-      } catch (e) {
-        jlog("island decor map failed, dropping: " + e);
-        v = Decoration.none;
-      }
-    }
-    for (const e of tr.effects) if (e.is(setIslandDecor)) v = e.value;
-    return v;
-  },
-  provide: (f) => EditorView.decorations.from(f),
-});
-const setIslandFolds = StateEffect.define();
-const islandFoldField = StateField.define({
-  create: () => Decoration.none,
-  update(v, tr) {
-    for (const e of tr.effects) if (e.is(setIslandFolds)) v = e.value;
-    if (tr.docChanged && v.size) {
-      // Map per position, never RangeSet.map: mapping a multi-line replace set
-      // that way corrupted it into a state where every later map threw and the
-      // island froze for good. Here each fold's ends are mapped independently
-      // (mapPos never throws); a fold whose content was entirely deleted
-      // collapses to zero length and is dropped. Keeps folds collapsed through
-      // an edit so the layout does not jump on every keystroke.
-      const kept = [];
-      v.between(0, tr.startState.doc.length, (from, to, deco) => {
-        const nf = tr.changes.mapPos(from, 1);
-        const nt = tr.changes.mapPos(to, -1);
-        if (nf < nt) kept.push(deco.range(nf, nt));
-      });
-      try {
-        v = Decoration.set(kept, true);
-      } catch (e) {
-        jlog("island fold remap failed: " + e);
-        v = Decoration.none;
-      }
-    }
-    return v;
-  },
-  provide: (f) => EditorView.decorations.from(f),
-});
-
-function cursorDeco(state, pos) {
-  if (!pos) return Decoration.none;
-  const doc = state.doc;
-  const line = doc.line(Math.min(pos.row + 1, doc.lines));
-  // Cursor payloads use Neovim byte columns. CodeMirror positions are UTF-16
-  // offsets, so convert here just as applyCursor does for its state selection.
-  let from = Math.min(line.from + byteToCol(line.text, pos.col), line.to);
-
-  // A closed fold hides its body (everything after its own first line); a
-  // cursor decoration placed inside that hidden span would be swallowed and
-  // the cursor vanishes. Neovim keeps a closed fold's reported cursor on its
-  // first line, which is never hidden, so this is mostly a defensive
-  // fallback; snaps to the fold's left edge with side -1 (before the hidden
-  // content) on the rare position it would otherwise land in.
-  let onFold = false;
-  const folds = state.field(islandFoldField, false);
-  if (folds) {
-    folds.between(from, from, (dfrom, dto) => {
-      if (dfrom < dto) {
-        from = dfrom;
-        onFold = true;
-        return false;
-      }
-    });
-  }
-  if (onFold) {
-    return Decoration.set([
-      Decoration.widget({ widget: new BlockCursor(), side: -1 }).range(from),
-    ]);
-  }
-  if (pos.mode[0] === "i") {
-    return Decoration.set([
-      Decoration.widget({ widget: new BarCursor(), side: 1 }).range(from),
-    ]);
-  }
-  const to = Math.min(from + 1, line.to);
-  return from === to
-    ? Decoration.set([
-        Decoration.widget({ widget: new BlockCursor(), side: 1 }).range(from),
-      ])
-    : Decoration.set([
-        Decoration.mark({ class: "nvim-cursor nvim-cursor-block" }).range(from, to),
-      ]);
-}
-const nvimCursorField = StateField.define({
-  create: () => ({ deco: Decoration.none, pos: null }),
-  update(v, tr) {
-    let pos = v.pos;
-    for (const e of tr.effects) if (e.is(setNvimCursor)) pos = e.value;
-    // recompute every transaction: a fold added by setIslandDecor (defined
-    // above, so current here) changes where the cursor must render.
-    return { deco: cursorDeco(tr.state, pos), pos };
-  },
-  provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
 });
 
 // Non-editable content is not focusable on its own; the tabindex keeps it the
