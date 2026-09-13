@@ -342,7 +342,6 @@ let islandGridIds = new Set(); // gridIds currently rendered as an island
 // window's gutter options mirrored from Neovim (runtime/md_preview.lua feed +
 // the nvim_wingutters replay). Applied to the island's gutter compartment.
 let livePreviewDefault = true; // from gnv_config [markdown] live_preview_default
-let modeName_ = "n";
 
 // ---------------------------------------------------------------------------
 // island highlight groups: Neovim resolves every treesitter capture / hl_group
@@ -520,9 +519,9 @@ function floatTopPx(p) {
   let agrid = fa.agrid;
   let arow = fa.arow;
   if (agrid === 1) {
-    const wp = session.positionForGrid(cursorGrid);
+    const wp = session.positionForGrid(session.cursorGrid);
     if (!wp || arow == null || arow < wp.srow || arow >= wp.srow + wp.h) return null;
-    agrid = cursorGrid;
+    agrid = session.cursorGrid;
     arow = arow - wp.srow;
   }
   const aIsl = islandForGrid(agrid);
@@ -579,7 +578,6 @@ const gridCursorEl = document.createElement("div");
 gridCursorEl.id = "grid-cursor";
 gridCursorEl.hidden = true;
 viewportEl.append(gridCursorEl);
-let cursorGrid = 1;
 // Last gnv_cursor payload (buffer row/col/mode), kept even while cursorGrid
 // points elsewhere. gnv_cursor (the buffer position feed) and grid_cursor_goto
 // (which grid owns it) are two independent streams; if a grid_cursor_goto that
@@ -589,10 +587,7 @@ let cursorGrid = 1;
 // misses the update and its cursor stays hidden until an unrelated move
 // re-fires both. Re-applying the cached payload when the island regains its
 // grid closes that gap without depending on event arrival order.
-let lastCursorPayload = null;
-let modeInfo = []; // from mode_info_set, indexed by mode_change idx
 let cursorStyleEnabled = false;
-let curMode = null; // modeInfo entry for the current mode
 
 // ---------------------------------------------------------------------------
 // grid-window IME: a hidden contenteditable at the cursor is the composition
@@ -603,7 +598,6 @@ let imeComposing = false;
 // CmdlineEnter/Changed and CmdlineLeave notifications make command-line input
 // another editable grid context. UI mode_change alone cannot identify it:
 // Neovim draws the command line on a grid while its mode may still look normal.
-let cmdlineActive = false;
 // A hidden <textarea> is the keyboard/IME sink for grid windows (the standard
 // pattern: Monaco, ace, CodeMirror 5). It stays focused so macOS keeps the
 // user's input source, and is readOnly outside insert mode so the OS IME has
@@ -638,10 +632,13 @@ imeEl.addEventListener("input", () => {
 });
 
 function gridInsertActive() {
-  return !islandForGrid(cursorGrid) && /^(insert|replace)/.test(modeName_);
+  return (
+    !islandForGrid(session.cursorGrid) &&
+    /^(insert|replace)/.test(session.modeName)
+  );
 }
 function gridTextInputActive() {
-  return cmdlineActive || gridInsertActive();
+  return session.cmdlineActive || gridInsertActive();
 }
 // #ime stays FOCUSED whenever a grid window holds the cursor, in every mode, so
 // macOS keeps the user's chosen input source. It is only contenteditable in
@@ -649,7 +646,7 @@ function gridTextInputActive() {
 // focused-but-non-editable element gives the OS IME nothing to compose into, so
 // normal-mode keys reach nvim untouched.
 function updateImeFocus() {
-  if (!cmdlineActive && islandForGrid(cursorGrid)) {
+  if (!session.cmdlineActive && islandForGrid(session.cursorGrid)) {
     if (document.activeElement === imeEl) imeEl.blur();
     return;
   }
@@ -677,7 +674,7 @@ function stopBlink() {
 // blink per guicursor (blinkwait / blinkon / blinkoff, ms); restarts on move.
 function startBlink() {
   stopBlink();
-  const m = cursorStyleEnabled ? curMode : null;
+  const m = cursorStyleEnabled ? session.currentMode : null;
   const on = (m && m.blinkon) | 0;
   const off = (m && m.blinkoff) | 0;
   if (!on || !off) return; // 0 in either -> steady cursor
@@ -691,9 +688,9 @@ function startBlink() {
 }
 
 function placeGridCursor() {
-  const g = grids.get(cursorGrid);
-  const p = session.positionForGrid(cursorGrid);
-  if (!g || !g.cursor || !p || islandForGrid(cursorGrid)) {
+  const g = grids.get(session.cursorGrid);
+  const p = session.positionForGrid(session.cursorGrid);
+  if (!g || !g.cursor || !p || islandForGrid(session.cursorGrid)) {
     gridCursorEl.hidden = true;
     stopBlink();
     return;
@@ -702,7 +699,7 @@ function placeGridCursor() {
   const y = (p.srow + g.cursor.row) * cellH;
   imeEl.style.left = `${x}px`; // anchor the IME candidate window at the cursor
   imeEl.style.top = `${y}px`;
-  const m = cursorStyleEnabled ? curMode : null;
+  const m = cursorStyleEnabled ? session.currentMode : null;
   const shape = (m && m.cursor_shape) || "block";
   const pct = m && m.cell_percentage ? m.cell_percentage / 100 : 1;
   gridCursorEl.hidden = false;
@@ -1897,7 +1894,10 @@ class Island {
     this.scrolloff = nextScrolloff;
     // if this island holds the cursor, keep its .cm-content focused so hasFocus
     // is reliable (needed for the insert-mode IME carve-out), in every mode
-    if (session.windowForGrid(cursorGrid) === this.winId && !this.view.hasFocus)
+    if (
+      session.windowForGrid(session.cursorGrid) === this.winId &&
+      !this.view.hasFocus
+    )
       this.view.focus();
     // editable only in insert / replace / select mode, unless the guard is off
     this.setEditable(!blockImeInNormalMode || /^[iRsS\x13]/.test(mode));
@@ -2080,21 +2080,21 @@ function renderGridOps(ops) {
         break;
       case "cursor":
         gw(o.grid).cursor = { row: o.row, col: o.col };
-        if (o.grid !== cursorGrid) {
-          const prev = islandForGrid(cursorGrid);
-          cursorGrid = o.grid;
+        if (o.grid !== session.cursorGrid) {
+          const prev = islandForGrid(session.cursorGrid);
+          session.moveGridCursor(o.grid);
           const next = islandForGrid(o.grid);
           // focus left an island: drop its now-stale block cursor decoration
           if (prev && prev !== next) prev.clearCursor();
           // (re)gained an island's grid: replay the last known buffer
           // position immediately rather than waiting for a fresh gnv_cursor
           // event, which may not come if Neovim sees nothing further changed
-          if (next && next !== prev && lastCursorPayload?.win === next.winId)
+          if (next && next !== prev && session.lastCursor?.win === next.winId)
             next.applyCursor(
-              lastCursorPayload.row,
-              lastCursorPayload.col,
-              lastCursorPayload.mode,
-              lastCursorPayload.scrolloff,
+              session.lastCursor.row,
+              session.lastCursor.col,
+              session.lastCursor.mode,
+              session.lastCursor.scrolloff,
             );
         }
         break;
@@ -2185,12 +2185,12 @@ function renderGridOps(ops) {
           // than the latest cursor event. Re-seat from the authoritative cursor
           // payload instead, so a stale viewport never overwrites a temporary
           // external-editor selection.
-          if (cursorGrid === o.grid && lastCursorPayload?.win === isl.winId)
+          if (session.cursorGrid === o.grid && session.lastCursor?.win === isl.winId)
             isl.applyCursor(
-              lastCursorPayload.row,
-              lastCursorPayload.col,
-              lastCursorPayload.mode,
-              lastCursorPayload.scrolloff,
+              session.lastCursor.row,
+              session.lastCursor.col,
+              session.lastCursor.mode,
+              session.lastCursor.scrolloff,
             );
         }
         break;
@@ -2217,12 +2217,11 @@ function renderGridOps(ops) {
         hlAttrs.set(o.id, o.attr || {});
         break;
       case "mode":
-        modeName_ = o.name || modeName_;
-        curMode = o.idx != null ? modeInfo[o.idx] ?? null : curMode;
+        session.setMode(o.name, o.idx);
         break;
       case "mode_info":
         cursorStyleEnabled = !!o.enabled;
-        modeInfo = o.modes || [];
+        session.setModeInfo(o.modes);
         break;
       case "title":
         currentWin.setTitle(o.title || "gneovim").catch(() => {});
@@ -2372,7 +2371,7 @@ addEventListener("error", (e) => {
       // buffer from cursorGrid: a redraw can deliver this notification before
       // its grid_cursor_goto, which previously applied another window's row to
       // the island and scrolled it to that clamped position.
-      lastCursorPayload = e.payload;
+      session.setCursor(e.payload);
       const isl = islands.get(e.payload.win);
       if (isl)
         isl.applyCursor(
@@ -2383,11 +2382,11 @@ addEventListener("error", (e) => {
         );
     }),
     nvim.on("cmdline", () => {
-      cmdlineActive = true;
+      session.setCmdlineActive(true);
       updateImeFocus();
     }),
     nvim.on("cmdline_hide", () => {
-      cmdlineActive = false;
+      session.setCmdlineActive(false);
       updateImeFocus();
     }),
     nvim.on("focus", () => repaintNow()),
@@ -2508,20 +2507,14 @@ let blockImeInNormalMode = true;
 let forwardCmdKeys = false;
 
 function normalModeActive(island) {
-  if (cmdlineActive) return false;
-  if (island) return island.mode === "n";
-  // gnv_cursor carries mode() and is authoritative for grid windows. The UI
-  // mode name is only a startup fallback before that first payload arrives.
-  return lastCursorPayload
-    ? lastCursorPayload.mode === "n"
-    : modeName_ === "normal";
+  return session.normalModeActive(island?.mode, Boolean(island));
 }
 function keyToNvim(e) {
   return encodeKeyToNvim(e, { optionIsMeta, forwardCmdKeys });
 }
 
 function islandLookup() {
-  const isl = islandForGrid(cursorGrid);
+  const isl = islandForGrid(session.cursorGrid);
   if (!isl) {
     jlog("look up: no focused island");
     return false;
@@ -2563,7 +2556,7 @@ function handleFontZoom(e) {
   if (action == null) return false;
   e.preventDefault();
   if (e.altKey) {
-    const island = islandForGrid(cursorGrid);
+    const island = islandForGrid(session.cursorGrid);
     if (!island) return true;
     island.fontZoom = action === 0 ? 0 : island.fontZoom + action * FONT_ZOOM_STEP;
     island.applyFontZoom(effectiveGuiFontSize() / guiFontBaseSize);
@@ -2582,7 +2575,7 @@ addEventListener("keydown", (e) => {
   // A command line temporarily belongs to Neovim, even when the underlying
   // cursor grid is a Markdown island. Do not apply island Normal-mode physical
   // punctuation or semantic-motion interception to command-line text.
-  const isl = cmdlineActive ? null : islandForGrid(cursorGrid);
+  const isl = session.cmdlineActive ? null : islandForGrid(session.cursorGrid);
   const normalPunctuation =
     normalModeActive(isl) ? normalModePunctuation(e) : null;
   if (normalPunctuation != null) {

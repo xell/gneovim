@@ -9,6 +9,12 @@ export class SessionModel {
     this.windowBuffers = new Map();
     this.previewWindows = new Map();
     this.windowGutters = new Map();
+    this.cursorGrid = 1;
+    this.lastCursor = null;
+    this.modeName = "n";
+    this.modeInfo = [];
+    this.currentMode = null;
+    this.cmdlineActive = false;
   }
 
   positionForGrid(grid) {
@@ -62,6 +68,35 @@ export class SessionModel {
 
   setGutter(payload) {
     this.windowGutters.set(payload.win, payload);
+  }
+
+  moveGridCursor(grid) {
+    const previous = this.cursorGrid;
+    this.cursorGrid = grid;
+    return previous;
+  }
+
+  setCursor(payload) {
+    this.lastCursor = payload;
+  }
+
+  setMode(name, index) {
+    this.modeName = name || this.modeName;
+    if (index != null) this.currentMode = this.modeInfo[index] ?? null;
+  }
+
+  setModeInfo(modes) {
+    this.modeInfo = modes || [];
+  }
+
+  setCmdlineActive(active) {
+    this.cmdlineActive = active;
+  }
+
+  normalModeActive(islandMode = null, islandPresent = false) {
+    if (this.cmdlineActive) return false;
+    if (islandPresent) return islandMode === "n";
+    return this.lastCursor ? this.lastCursor.mode === "n" : this.modeName === "normal";
   }
 
   placeGrid(grid, position, win = null) {

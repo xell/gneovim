@@ -36,4 +36,20 @@ describe("SessionModel", () => {
     expect(model.positionForGrid(2)).toBeUndefined();
     expect(model.windowForGrid(2)).toBe(1000);
   });
+
+  it("reconciles cursor, mode, and command-line streams in one owner", () => {
+    const model = new SessionModel();
+    model.setModeInfo([{ cursor_shape: "block" }, { cursor_shape: "vertical" }]);
+    model.setMode("insert", 1);
+    model.setCursor({ win: 1000, row: 4, col: 2, mode: "n" });
+
+    expect(model.moveGridCursor(3)).toBe(1);
+    expect(model.cursorGrid).toBe(3);
+    expect(model.currentMode).toEqual({ cursor_shape: "vertical" });
+    expect(model.normalModeActive()).toBe(true);
+    expect(model.normalModeActive("i", true)).toBe(false);
+
+    model.setCmdlineActive(true);
+    expect(model.normalModeActive("n", true)).toBe(false);
+  });
 });
