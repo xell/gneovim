@@ -11,6 +11,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { NvimClient } from "./nvim-client.js";
 import { SessionModel } from "./session-model.js";
 import { GridView } from "./grid-view.js";
+import { RedrawScheduler } from "./redraw-scheduler.js";
 import { byteLen, byteToCol } from "./pure/text-geometry.js";
 import { parseGuifont } from "./pure/guifont.js";
 import {
@@ -1893,17 +1894,12 @@ class Island {
 // faster than the display refreshes (held `j`, `:%s`, a big paste); painting
 // every flush wastes DOM work and a forced reflow each time. Ops keep their
 // arrival order, so a later frame's cursor / colour / layout op still wins.
-let pendingOps = [];
-let rafScheduled = 0;
+const redrawScheduler = new RedrawScheduler({
+  requestFrame: (callback) => requestAnimationFrame(callback),
+  render: renderGridOps,
+});
 function applyGridBatch(ops) {
-  for (let i = 0; i < ops.length; i++) pendingOps.push(ops[i]);
-  if (!rafScheduled) rafScheduled = requestAnimationFrame(flushGridOps);
-}
-function flushGridOps() {
-  rafScheduled = 0;
-  const ops = pendingOps;
-  pendingOps = [];
-  renderGridOps(ops);
+  redrawScheduler.enqueue(ops);
 }
 
 function renderGridOps(ops) {
