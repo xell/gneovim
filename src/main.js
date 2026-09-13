@@ -12,6 +12,7 @@ import { NvimClient } from "./nvim-client.js";
 import { SessionModel } from "./session-model.js";
 import { GridView } from "./grid-view.js";
 import { RedrawScheduler } from "./redraw-scheduler.js";
+import { GridCoordinator } from "./grid-coordinator.js";
 import { byteLen, byteToCol } from "./pure/text-geometry.js";
 import { parseGuifont } from "./pure/guifont.js";
 import {
@@ -1879,217 +1880,42 @@ class Island {
 // faster than the display refreshes (held `j`, `:%s`, a big paste); painting
 // every flush wastes DOM work and a forced reflow each time. Ops keep their
 // arrival order, so a later frame's cursor / colour / layout op still wins.
+const gridCoordinator = new GridCoordinator({
+  session,
+  grids,
+  gridFor: gw,
+  islandForGrid,
+  reconcileIslands,
+  isIslandGrid: (id) => islandGridIds.has(id),
+  onColors: applyDefaultColors,
+  onHighlight: (id, attr) => hlAttrs.set(id, attr),
+  onModeInfo: (enabled) => {
+    cursorStyleEnabled = enabled;
+  },
+  onTitle: (title) => currentWin.setTitle(title).catch(() => {}),
+  forceRepaint,
+  placeGridCursor,
+  updateInputFocus: updateImeFocus,
+});
 const redrawScheduler = new RedrawScheduler({
   requestFrame: (callback) => requestAnimationFrame(callback),
-  render: renderGridOps,
+  render: (ops) => gridCoordinator.render(ops),
 });
 function applyGridBatch(ops) {
   redrawScheduler.enqueue(ops);
 }
 
-function renderGridOps(ops) {
-  let dirty = new Set();
-  let layoutDirty = false;
-  for (const o of ops) {
-    switch (o.op) {
-      case "resize": {
-        gw(o.grid).resize(o.w, o.h);
-        dirty.add(o.grid);
-        // A float can shrink or grow via grid_resize alone, with no fresh
-        // win_float_pos. Keep the placed element's size in step or its old
-        // height lingers as a blank band below the real rows.
-        const wp = session.positionForGrid(o.grid);
-        if (wp && (wp.w !== o.w || wp.h !== o.h)) {
-          wp.w = o.w;
-          wp.h = o.h;
-          layoutDirty = true;
-        }
-        break;
-      }
-      case "clear":
-        gw(o.grid).clear();
-        dirty.add(o.grid);
-        break;
-      case "destroy": {
-        const g = grids.get(o.grid);
-        if (g) g.el.remove();
-        grids.delete(o.grid);
-        session.destroyGrid(o.grid);
-        layoutDirty = true;
-        break;
-      }
-      case "line":
-        gw(o.grid).line(o.row, o.col, o.cells);
-        dirty.add(o.grid);
-        break;
-      case "scroll":
-        gw(o.grid).scroll(o);
-        dirty.add(o.grid);
-        break;
-      case "cursor":
-        gw(o.grid).cursor = { row: o.row, col: o.col };
-        if (o.grid !== session.cursorGrid) {
-          const prev = islandForGrid(session.cursorGrid);
-          session.moveGridCursor(o.grid);
-          const next = islandForGrid(o.grid);
-          // focus left an island: drop its now-stale block cursor decoration
-          if (prev && prev !== next) prev.clearCursor();
-          // (re)gained an island's grid: replay the last known buffer
-          // position immediately rather than waiting for a fresh gnv_cursor
-          // event, which may not come if Neovim sees nothing further changed
-          if (next && next !== prev && session.lastCursor?.win === next.winId)
-            next.applyCursor(
-              session.lastCursor.row,
-              session.lastCursor.col,
-              session.lastCursor.mode,
-              session.lastCursor.scrolloff,
-            );
-        }
-        break;
-      case "win_pos":
-        session.placeGrid(
-          o.grid,
-          { srow: o.srow, scol: o.scol, w: o.w, h: o.h },
-          o.win,
-        );
-        layoutDirty = true;
-        break;
-      case "win_float": {
-        const fg = grids.get(o.grid) || {};
-        const w = fg.cols || 20;
-        const h = fg.rows || 5;
-        // position is relative to anchor_grid (grid 1 = whole screen, at 0,0)
-        const ap =
-          o.agrid != null && o.agrid !== 1 ? session.positionForGrid(o.agrid) : null;
-        let srow = (ap ? ap.srow : 0) + (o.arow ?? 0);
-        let scol = (ap ? ap.scol : 0) + (o.acol ?? 0);
-        const anchor = o.anchor || "NW"; // which float corner sits at (row,col)
-        if (anchor[0] === "S") srow -= h;
-        if (anchor[1] === "E") scol -= w;
-        // srow*cellH assumes every anchor-grid row is one uniform cellH tall.
-        // True for a plain grid, false inside an island: markdown decorations
-        // give headings, code fences, etc. non-uniform line heights, so a
-        // heading anywhere above the anchor row throws this off (a completion
-        // popup lands noticeably higher than the line it was triggered on).
-        // floatTopPx (see place()) covers the one case that actually matters
-        // -- a float anchored at the cursor's own row or the row directly
-        // below it, i.e. a completion or signature-help popup -- with an
-        // exact pixel lookup through CodeMirror instead, resolved lazily once
-        // the whole batch's ops have landed. Anything else (arow further
-        // away) falls back to the row math above; column is left alone too,
-        // it would need mapping a screen column through the island's own
-        // conceal/rendering and isn't what was reported broken.
-        //
-        // agrid, not cursorGrid: the trigger (e.g. C-x C-k) doesn't move the
-        // cursor, so this redraw may carry no fresh "cursor" op at all and
-        // the global cursorGrid pointer is left stale from whatever grid last
-        // actually had a cursor move. floatTopPx reads the anchor grid's own
-        // last-known `.cursor` row instead, which is set regardless.
-        session.placeGrid(
-          o.grid,
-          {
-            srow: Math.round(srow),
-            scol: Math.round(scol),
-            w,
-            h,
-            float: true,
-            zindex: o.zindex ?? 50,
-            floatAnchor: { agrid: o.agrid, arow: o.arow, anchorS: anchor[0] === "S" },
-          },
-          o.win,
-        );
-        layoutDirty = true;
-        break;
-      }
-      case "win_hide":
-      case "win_close": {
-        const g = grids.get(o.grid);
-        if (g) g.el.hidden = true;
-        session.hideGrid(o.grid);
-        layoutDirty = true;
-        break;
-      }
-      case "msg_pos": {
-        const mg = grids.get(o.grid) || {};
-        session.placeGrid(o.grid, {
-          srow: o.row,
-          scol: 0,
-          w: mg.cols || (grids.get(1) || {}).cols || 200,
-          h: mg.rows || 1,
-          // Neovim special-cases the message / cmdline grid above every float;
-          // a big zindex reproduces that. Without it a completion popup that
-          // sits directly over the cmdline row (blink.cmp, nvim-cmp, wild pum)
-          // paints its blank tail over the command line text.
-          zindex: 1_000_000,
-        });
-        layoutDirty = true;
-        break;
-      }
-      case "viewport": {
-        const isl = islandForGrid(o.grid);
-        if (isl) {
-          isl.scrollTo(o.topline, o.botline, o.linecount);
-          // win_viewport's curline/curcol can belong to an older redraw batch
-          // than the latest cursor event. Re-seat from the authoritative cursor
-          // payload instead, so a stale viewport never overwrites a temporary
-          // external-editor selection.
-          if (session.cursorGrid === o.grid && session.lastCursor?.win === isl.winId)
-            isl.applyCursor(
-              session.lastCursor.row,
-              session.lastCursor.col,
-              session.lastCursor.mode,
-              session.lastCursor.scrolloff,
-            );
-        }
-        break;
-      }
-      case "colors":
-        // default_colors_set carries the Normal group's fg/bg/sp; it re-fires on
-        // every :colorscheme and :set background. Honor it. The hardcoded values
-        // are only a fallback for when nvim sends -1 (no Normal colors).
-        defColors = {
-          fg: hex(o.fg) ?? defColors.fg,
-          bg: hex(o.bg) ?? defColors.bg,
-          sp: hex(o.sp) ?? defColors.sp,
-        };
-        applyTheme();
-        // every cell's colour may have changed: rebuild all rows of every grid
-        for (const g of grids.values()) g.fullDirty = true;
-        dirty = new Set(grids.keys());
-        // island highlight groups are stale too; md_decor.lua re-resolves and
-        // re-pushes on ColorScheme, drop what we have so the merge takes.
-        hlDefs.clear();
-        if (hlStyleEl) hlStyleEl.textContent = "";
-        break;
-      case "hl":
-        hlAttrs.set(o.id, o.attr || {});
-        break;
-      case "mode":
-        session.setMode(o.name, o.idx);
-        break;
-      case "mode_info":
-        cursorStyleEnabled = !!o.enabled;
-        session.setModeInfo(o.modes);
-        break;
-      case "title":
-        currentWin.setTitle(o.title || "gneovim").catch(() => {});
-        break;
-      case "flush":
-        break;
-    }
-  }
-  if (layoutDirty) reconcileIslands();
-  for (const id of dirty) {
-    const g = grids.get(id);
-    if (g && !islandGridIds.has(id)) {
-      g.repaint();
-      // WKWebView will not composite a freshly rebuilt absolutely-positioned
-      // subtree until an unrelated event (scroll/resize). Force a reflow.
-      forceRepaint(g.el);
-    }
-  }
-  placeGridCursor();
-  updateImeFocus();
+function applyDefaultColors(op) {
+  defColors = {
+    fg: hex(op.fg) ?? defColors.fg,
+    bg: hex(op.bg) ?? defColors.bg,
+    sp: hex(op.sp) ?? defColors.sp,
+  };
+  applyTheme();
+  for (const grid of grids.values()) grid.fullDirty = true;
+  hlDefs.clear();
+  if (hlStyleEl) hlStyleEl.textContent = "";
+  return grids.keys();
 }
 
 function forceRepaint(el) {
