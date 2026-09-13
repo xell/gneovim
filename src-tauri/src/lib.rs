@@ -19,6 +19,9 @@ use tokio::process::Child;
 #[derive(Default)]
 struct AppState {
     windows: Mutex<HashMap<String, WindowBridge>>,
+    readiness: Mutex<
+        HashMap<String, tokio::sync::watch::Receiver<Option<Result<(), String>>>>,
+    >,
     last_focused: Mutex<Option<String>>,
     /// Label -> reason, for a window whose `bridge::connect` failed (a startup
     /// timeout, most commonly). It never got an entry in `windows`, so without
@@ -689,6 +692,12 @@ fn spawn_window(app: &AppHandle, as_tab: bool, open: OpenSpec) -> Option<String>
 /// `open` is forwarded to [`bridge::connect`] so the new nvim boots with the
 /// requested files / text loaded.
 fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec) {
+    let (ready_tx, ready_rx) = tokio::sync::watch::channel(None);
+    app.state::<AppState>()
+        .readiness
+        .lock()
+        .unwrap()
+        .insert(label.clone(), ready_rx);
     async_runtime::spawn(async move {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BridgeEvent>();
 
@@ -770,6 +779,7 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec) {
                     },
                 );
                 log::info!("bridge ready for window {label}");
+                let _ = ready_tx.send(Some(Ok(())));
             }
             Err(e) => {
                 log::error!("bridge failed for window {label}: {e}");
@@ -781,6 +791,7 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec) {
                     .lock()
                     .unwrap()
                     .insert(label.clone(), e.clone());
+                let _ = ready_tx.send(Some(Err(e.clone())));
                 // Reuse the same "gone" overlay a later `:q`/crash shows
                 // (`showGone` in main.js): the window otherwise just sits
                 // blank forever with the reason visible only in this log line
@@ -796,20 +807,40 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec) {
 
 /// The bridge for `label`, waiting out the async connect if the webview raced it.
 async fn bridge_for(app: &AppHandle, label: &str) -> Result<Bridge, String> {
-    for _ in 0..100 {
-        let b = app
-            .state::<AppState>()
+    let state = app.state::<AppState>();
+    let find_bridge = || {
+        state
             .windows
             .lock()
             .unwrap()
             .get(label)
-            .map(|w| w.bridge.clone());
-        if let Some(b) = b {
-            return Ok(b);
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+            .map(|window| window.bridge.clone())
+    };
+    if let Some(bridge) = find_bridge() {
+        return Ok(bridge);
     }
-    Err(format!("no bridge for window {label}"))
+
+    let mut readiness = state
+        .readiness
+        .lock()
+        .unwrap()
+        .get(label)
+        .cloned()
+        .ok_or_else(|| format!("no bridge startup for window {label}"))?;
+    if readiness.borrow().is_none() {
+        tokio::time::timeout(Duration::from_secs(10), readiness.changed())
+            .await
+            .map_err(|_| format!("bridge startup timed out for window {label}"))?
+            .map_err(|_| format!("bridge startup ended for window {label}"))?;
+    }
+
+    let outcome = readiness.borrow().clone();
+    match outcome {
+        Some(Ok(())) => find_bridge()
+            .ok_or_else(|| format!("bridge reported ready but is missing for window {label}")),
+        Some(Err(error)) => Err(error),
+        None => Err(format!("bridge startup unresolved for window {label}")),
+    }
 }
 
 #[tauri::command]
@@ -1264,6 +1295,7 @@ pub fn run() {
             WindowEvent::Destroyed => {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.windows.lock().unwrap().remove(window.label());
+                    state.readiness.lock().unwrap().remove(window.label());
                     state.failed.lock().unwrap().remove(window.label());
                     log::info!("window {} closed", window.label());
                 }
