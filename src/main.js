@@ -3,7 +3,7 @@
 
 import "../styles.css";
 import { EditorView, Decoration, WidgetType } from "@codemirror/view";
-import { Annotation, StateEffect, StateField, Compartment } from "@codemirror/state";
+import { Annotation, StateEffect, Compartment } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
@@ -22,18 +22,10 @@ import {
 import { byteLen, byteRange, byteToCol } from "./pure/text-geometry.js";
 import { parseGuifont } from "./pure/guifont.js";
 import {
-  imageLabel,
-  tableAlign,
-  tableCells,
-  tableCursorCell,
-  tableHighlightCells,
-} from "./pure/markdown.js";
-import {
   keyToNvim as encodeKeyToNvim,
   normalModePunctuation,
 } from "./pure/keymap.js";
 import { screenMetrics as calculateScreenMetrics } from "./pure/layout.js";
-import { imageSource as resolveImageSource } from "./pure/image-source.js";
 import { visualRanges } from "./pure/visual-ranges.js";
 import { foldRanges, overlapsRanges } from "./pure/fold-ranges.js";
 import { bufferLineEdit } from "./pure/buffer-line-edit.js";
@@ -49,6 +41,7 @@ import { GutterController } from "./gutter-controller.js";
 import { IslandInputQueue } from "./island-input-queue.js";
 import { IslandInputController } from "./island-input-controller.js";
 import { createIslandDecorationState } from "./island-decoration-state.js";
+import { createMarkdownPresentation } from "./markdown-presentation.js";
 
 // this webview's window label; event names are per-window (gnv://<label>/<kind>)
 // because emit_to() broadcasts to every webview in this app.
@@ -452,6 +445,19 @@ const {
 const setTableConcealGuard = StateEffect.define();
 const setTableHighlights = StateEffect.define();
 const setIslandImageBase = StateEffect.define();
+const {
+  markdownImageField,
+  markdownTableField,
+} = createMarkdownPresentation({
+  document,
+  textNodeType: Node.TEXT_NODE,
+  highlights,
+  convertFileSrc,
+  setCursor: setNvimCursor,
+  setImageBase: setIslandImageBase,
+  setTableConcealGuard,
+  setTableHighlights,
+});
 // Replacement glyph for an extmark conceal at conceallevel 1 (the `cchar`).
 // conceallevel >= 2 sends an empty string and gets a plain Decoration.replace.
 class ConcealWidget extends WidgetType {
@@ -524,314 +530,6 @@ class OverlayWidget extends WidgetType {
 // A semantic presentation for the Markdown table source. The widget is
 // deliberately non-editable: edits must continue to target the Markdown
 // buffer, where CodeMirror can map them and Neovim remains authoritative.
-class MarkdownTableWidget extends WidgetType {
-  constructor(header, align, rows, cursor, highlights) {
-    super();
-    this.header = header;
-    this.align = align;
-    this.rows = rows;
-    this.cursor = cursor;
-    this.highlights = highlights;
-    this.key = JSON.stringify([header, align, rows, cursor, highlights]);
-  }
-  eq(o) {
-    return o.key === this.key;
-  }
-  toDOM() {
-    const table = document.createElement("table");
-    table.className = "cm-markdown-table";
-    table.setAttribute("contenteditable", "false");
-    table.setAttribute("aria-label", "Markdown table");
-    const addRow = (parent, cells, tag, rowIndex) => {
-      const row = document.createElement("tr");
-      cells.forEach((text, i) => {
-        const cell = document.createElement(tag);
-        if (tag === "th") cell.scope = "col";
-        if (this.align[i]) cell.style.textAlign = this.align[i];
-        appendTableText(
-          cell,
-          text,
-          this.highlights.filter(([r, c]) => r === rowIndex && c === i),
-        );
-        if (this.cursor?.row === rowIndex && this.cursor.cell === i)
-          addTableCursor(cell, this.cursor);
-        row.append(cell);
-      });
-      parent.append(row);
-    };
-    const head = document.createElement("thead");
-    addRow(head, this.header, "th", 0);
-    table.append(head);
-    const body = document.createElement("tbody");
-    this.rows.forEach((row, i) => addRow(body, row, "td", i + 1));
-    table.append(body);
-    return table;
-  }
-}
-
-function appendTableText(cell, text, highlights) {
-  const spans = highlights
-    .map(([, , start, length, group]) => ({
-      from: Math.max(0, Math.min(start, text.length)),
-      to: Math.max(0, Math.min(start + length, text.length)),
-      group,
-    }))
-    .filter(({ from, to }) => to > from);
-  const boundaries = [...new Set([0, text.length, ...spans.flatMap(({ from, to }) => [from, to])])]
-    .sort((a, b) => a - b);
-  for (let i = 0; i + 1 < boundaries.length; i++) {
-    const from = boundaries[i];
-    const to = boundaries[i + 1];
-    const groups = [
-      ...new Set(
-        spans
-          .filter((span) => span.from < to && span.to > from)
-          .map((span) => span.group),
-      ),
-    ];
-    if (groups.length) {
-      const mark = document.createElement("span");
-      // Search and IncSearch overlap on the active result. Keep every group on
-      // the same text span so HighlightRegistry's Neovim-derived priority order,
-      // rather than iteration order, decides which visual attributes win.
-      mark.className = groups.map((group) => highlights.islandClass(group)).join(" ");
-      mark.textContent = text.slice(from, to);
-      cell.append(mark);
-    } else {
-      cell.append(document.createTextNode(text.slice(from, to)));
-    }
-  }
-  if (!cell.childNodes.length) cell.append(document.createTextNode(""));
-}
-
-function addTableCursor(cell, cursor) {
-  let offset = cursor.offset;
-  let textNode = null;
-  for (const node of cell.childNodes) {
-    const length = node.textContent.length;
-    if (offset < length || node === cell.lastChild) {
-      textNode = node.nodeType === Node.TEXT_NODE ? node : node.firstChild;
-      break;
-    }
-    offset -= length;
-  }
-  if (!textNode) {
-    textNode = document.createTextNode("");
-    cell.append(textNode);
-  }
-  offset = Math.min(offset, textNode.length);
-  const range = document.createRange();
-  if (cursor.mode[0] !== "i" && offset < textNode.length) {
-    // Normal-mode's cursor covers the character under it, precisely as the
-    // ordinary island cursor mark does. This stays in flow, but only changes
-    // paint properties and therefore cannot change the table's measurement.
-    range.setStart(textNode, offset);
-    range.setEnd(textNode, offset + 1);
-    const block = document.createElement("span");
-    block.className = "nvim-cursor nvim-cursor-block";
-    range.surroundContents(block);
-    return;
-  }
-  range.setStart(textNode, offset);
-  range.collapse(true);
-  const caret = document.createElement("span");
-  caret.className =
-    cursor.mode[0] === "i"
-      ? "nvim-cursor nvim-cursor-bar"
-      : "nvim-cursor nvim-cursor-block nvim-cursor-eol";
-  range.insertNode(caret);
-}
-
-class MarkdownImageWidget extends WidgetType {
-  constructor(src, alt, width) {
-    super();
-    this.src = src;
-    this.alt = alt;
-    this.width = width;
-  }
-  eq(other) {
-    return other.src === this.src && other.alt === this.alt && other.width === this.width;
-  }
-  toDOM() {
-    const figure = document.createElement("figure");
-    figure.className = "cm-markdown-image";
-    figure.setAttribute("contenteditable", "false");
-    const image = document.createElement("img");
-    image.src = this.src;
-    image.alt = this.alt;
-    image.loading = "lazy";
-    if (this.width != null) image.style.width = `${this.width}px`;
-    figure.append(image);
-    return figure;
-  }
-}
-
-// A standalone image definition displays its friendly label until its own
-// source line becomes active. Then the raw Markdown returns for direct editing.
-class MarkdownImageSourceWidget extends WidgetType {
-  constructor(alt) {
-    super();
-    this.alt = alt;
-  }
-  eq(other) {
-    return other.alt === this.alt;
-  }
-  toDOM() {
-    const source = document.createElement("span");
-    source.className = "cm-markdown-image-source";
-    source.textContent = this.alt;
-    return source;
-  }
-}
-
-function imageDecorations(doc, bufferName, cursor) {
-  const ranges = [];
-  for (let number = 1; number <= doc.lines; number++) {
-    const line = doc.line(number);
-    // Only a whole logical line is promoted to a figure. `![alt](url)` inside
-    // prose deliberately remains ordinary Markdown text, and `[alt](url)`
-    // always remains a link even if the destination is an image.
-    const match = /^\s*!\[([^\]]*)\]\((?:<([^>]+)>|([^\s)]+))(?:\s+["'][^"']*["'])?\)\s*$/.exec(
-      line.text,
-    );
-    if (!match) continue;
-    const src = resolveImageSource(match[2] || match[3], bufferName, convertFileSrc);
-    if (!src) continue;
-    const label = imageLabel(match[1]);
-    if (cursor?.row !== number - 1) {
-      ranges.push(
-        Decoration.replace({
-          widget: new MarkdownImageSourceWidget(label.caption),
-        }).range(line.from, line.to),
-      );
-    }
-    ranges.push(
-      Decoration.widget({
-        block: true,
-        side: 1,
-        widget: new MarkdownImageWidget(src, label.alt, label.width),
-      }).range(line.to),
-    );
-  }
-  return Decoration.set(ranges, true);
-}
-
-const markdownImageField = StateField.define({
-  create: (state) => ({
-    deco: imageDecorations(state.doc, "", null),
-    bufferName: "",
-    cursor: null,
-  }),
-  update(value, tr) {
-    let bufferName = value.bufferName;
-    let cursor = value.cursor;
-    for (const effect of tr.effects) if (effect.is(setIslandImageBase)) bufferName = effect.value;
-    for (const effect of tr.effects) if (effect.is(setNvimCursor)) cursor = effect.value;
-    return tr.docChanged || bufferName !== value.bufferName || cursor !== value.cursor
-      ? {
-          deco: imageDecorations(tr.state.doc, bufferName, cursor),
-          bufferName,
-          cursor,
-        }
-      : value;
-  },
-  provide: (field) => EditorView.decorations.from(field, (value) => value.deco),
-});
-
-function tableDecorations(doc, cursor, guardRow, highlights = []) {
-  const ranges = [];
-  let fence = null;
-  for (let n = 1; n < doc.lines; n++) {
-    const line = doc.line(n);
-    const fenceMatch = /^\s*(`{3,}|~{3,})/.exec(line.text);
-    if (fenceMatch) {
-      const fenceCharacter = fenceMatch[1][0];
-      if (fence == null) fence = fenceCharacter;
-      else if (fence === fenceCharacter) fence = null;
-      continue;
-    }
-    if (fence != null) continue;
-    const header = tableCells(line.text);
-    const delimiter = tableCells(doc.line(n + 1).text);
-    const align = header && delimiter && header.length === delimiter.length && tableAlign(delimiter);
-    if (!align) continue;
-    const rows = [];
-    let end = n + 1;
-    while (end < doc.lines) {
-      const cells = tableCells(doc.line(end + 1).text);
-      if (!cells || cells.length !== header.length) break;
-      rows.push(cells);
-      end++;
-    }
-    const last = doc.line(end);
-    const cursorOffset =
-      cursor && cursor.row >= 0 && cursor.row < doc.lines
-        ? (() => {
-            const cursorLine = doc.line(cursor.row + 1);
-            return Math.min(cursorLine.from + byteToCol(cursorLine.text, cursor.col), cursorLine.to);
-          })()
-        : null;
-    // A replacement hides any cursor decoration within its range. Reveal its
-    // source only when Neovim would reveal conceal on the cursor line. This
-    // makes tables follow 'concealcursor' just like every other Markdown
-    // presentation detail.
-    const revealForCursor =
-      guardRow !== -1 &&
-      cursorOffset != null &&
-      cursorOffset >= line.from &&
-      cursorOffset <= last.to;
-    if (!revealForCursor) {
-      let tableCursor = null;
-      if (cursorOffset != null && cursorOffset >= line.from && cursorOffset <= last.to) {
-        const sourceLine = doc.line(cursor.row + 1);
-        const sourceRow = cursor.row - (n - 1);
-        const target = tableCursorCell(sourceLine.text, cursorOffset - sourceLine.from);
-        // The delimiter has no displayed row of its own. Its cursor belongs to
-        // the matching header cell, which makes every source position visible.
-        tableCursor = {
-          row: sourceRow <= 1 ? 0 : sourceRow - 1,
-          ...target,
-          mode: cursor.mode,
-        };
-      }
-      const tableHighlights = tableHighlightCells(doc, n - 1, end - 1, highlights);
-      ranges.push(
-        Decoration.replace({
-          block: true,
-          widget: new MarkdownTableWidget(header, align, rows, tableCursor, tableHighlights),
-        }).range(line.from, last.to),
-      );
-    }
-    n = end;
-  }
-  return Decoration.set(ranges, true);
-}
-
-const markdownTableField = StateField.define({
-  create: (state) => ({
-    deco: tableDecorations(state.doc, null, null),
-    cursor: null,
-    guardRow: null,
-    highlights: [],
-  }),
-  update(value, tr) {
-    let cursor = value.cursor;
-    let guardRow = value.guardRow;
-    let highlights = value.highlights;
-    for (const effect of tr.effects) if (effect.is(setNvimCursor)) cursor = effect.value;
-    for (const effect of tr.effects)
-      if (effect.is(setTableConcealGuard)) guardRow = effect.value;
-    for (const effect of tr.effects) if (effect.is(setTableHighlights)) highlights = effect.value;
-    return tr.docChanged ||
-      cursor !== value.cursor ||
-      guardRow !== value.guardRow ||
-      highlights !== value.highlights
-      ? { deco: tableDecorations(tr.state.doc, cursor, guardRow, highlights), cursor, guardRow, highlights }
-      : value;
-  },
-  provide: (field) => EditorView.decorations.from(field, (value) => value.deco),
-});
-
 // Non-editable content is not focusable on its own; the tabindex keeps it the
 // keyboard's target so keydown still reaches the global nvim_input path.
 const EDITABLE_ON = EditorView.editable.of(true);
