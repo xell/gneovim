@@ -27,6 +27,7 @@ import {
   normalModePunctuation,
 } from "./pure/keymap.js";
 import { screenMetrics as calculateScreenMetrics } from "./pure/layout.js";
+import { imageSource as resolveImageSource } from "./pure/image-source.js";
 
 // this webview's window label; event names are per-window (gnv://<label>/<kind>)
 // because emit_to() broadcasts to every webview in this app.
@@ -855,22 +856,6 @@ class MarkdownImageSourceWidget extends WidgetType {
   }
 }
 
-// Resolve a local Markdown image through Tauri's asset protocol. A Markdown
-// buffer is local and trusted, but a relative image must still be resolved
-// against that buffer's directory rather than the webview's URL.
-function imageSource(url, bufferName) {
-  if (/^https?:\/\//i.test(url) || url.startsWith("data:image/")) return url;
-  if (!bufferName.startsWith("/")) return null;
-  try {
-    const base = new URL(`file://${bufferName}`);
-    const local = new URL(url, base);
-    if (local.protocol !== "file:") return null;
-    return convertFileSrc(decodeURIComponent(local.pathname));
-  } catch {
-    return null;
-  }
-}
-
 function imageDecorations(doc, bufferName, cursor) {
   const ranges = [];
   for (let number = 1; number <= doc.lines; number++) {
@@ -882,7 +867,7 @@ function imageDecorations(doc, bufferName, cursor) {
       line.text,
     );
     if (!match) continue;
-    const src = imageSource(match[2] || match[3], bufferName);
+    const src = resolveImageSource(match[2] || match[3], bufferName, convertFileSrc);
     if (!src) continue;
     const label = imageLabel(match[1]);
     if (cursor?.row !== number - 1) {
