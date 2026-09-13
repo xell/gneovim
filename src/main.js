@@ -881,20 +881,37 @@ class MarkdownTableWidget extends WidgetType {
 }
 
 function appendTableText(cell, text, highlights) {
-  let offset = 0;
-  for (const [, , start, length, group] of highlights.sort((a, b) => a[2] - b[2])) {
-    const from = Math.max(offset, Math.min(start, text.length));
-    const to = Math.max(from, Math.min(start + length, text.length));
-    if (from > offset) cell.append(document.createTextNode(text.slice(offset, from)));
-    if (to > from) {
+  const spans = highlights
+    .map(([, , start, length, group]) => ({
+      from: Math.max(0, Math.min(start, text.length)),
+      to: Math.max(0, Math.min(start + length, text.length)),
+      group,
+    }))
+    .filter(({ from, to }) => to > from);
+  const boundaries = [...new Set([0, text.length, ...spans.flatMap(({ from, to }) => [from, to])])]
+    .sort((a, b) => a - b);
+  for (let i = 0; i + 1 < boundaries.length; i++) {
+    const from = boundaries[i];
+    const to = boundaries[i + 1];
+    const groups = [
+      ...new Set(
+        spans
+          .filter((span) => span.from < to && span.to > from)
+          .map((span) => span.group),
+      ),
+    ];
+    if (groups.length) {
       const mark = document.createElement("span");
-      mark.className = hlClass(group);
+      // Search and IncSearch overlap on the active result. Keep every group on
+      // the same text span so rebuildHlStyle's Neovim-derived priority order,
+      // rather than iteration order, decides which visual attributes win.
+      mark.className = groups.map(hlClass).join(" ");
       mark.textContent = text.slice(from, to);
       cell.append(mark);
+    } else {
+      cell.append(document.createTextNode(text.slice(from, to)));
     }
-    offset = to;
   }
-  if (offset < text.length) cell.append(document.createTextNode(text.slice(offset)));
   if (!cell.childNodes.length) cell.append(document.createTextNode(""));
 }
 
@@ -1573,8 +1590,8 @@ class Island {
   //     codespans: [[row, sByte, eByte], ...],
   //     virt: [[row, col, hideBytes, [[text, group], ...]], ...] },
   //   heads: [[sRow, eRow, level], ...], codes: [[sRow, eRow], ...],
-  //   quotes: [[sRow, eRow], ...], visual_hl, accent_fg } in absolute buffer
-  //   coordinates.
+  //   quotes: [[sRow, eRow], ...], incsearch: [row, endByte] | null,
+  //   visual_hl, accent_fg } in absolute buffer coordinates.
   //   Decorations are view-only, so nothing here reaches nvim_edit. `hl.defs` is merged globally by the
   //   listener; this only consumes `hl.runs` / `hl.virt`.
   setDecor(d) {
@@ -1590,11 +1607,14 @@ class Island {
     else this.el.style.removeProperty("--visual-bg");
     if (d?.accent_fg) this.el.style.setProperty("--accent", d.accent_fg);
     else this.el.style.removeProperty("--accent");
-    // The table owns its own text nodes. Mirror target letters there; skip the
-    // whole-line shade run because it overlaps every cell and would otherwise
-    // swallow the more specific target run in this small inline renderer.
-    const tableHighlights = (d?.hl?.runs ?? []).filter(([, , , group]) =>
-      /^EasyMotionTarget/.test(group),
+    // The table owns replacement DOM text, so ordinary CM marks cannot paint
+    // inside it. Mirror interactive and search highlights into those text
+    // nodes. Skip EasyMotionShade: its whole-line run would dim every cell.
+    const tableHighlights = (d?.hl?.runs ?? []).filter(
+      ([, , , group]) =>
+        /^EasyMotionTarget/.test(group) ||
+        group === "Search" ||
+        group === "IncSearch",
     );
     const tableHighlightsKey = JSON.stringify(tableHighlights);
     const tableEffects = [setTableConcealGuard.of(d?.guard_row ?? null)];
@@ -1606,6 +1626,20 @@ class Island {
       effects: tableEffects,
     });
     this.applyDecor();
+    const incsearch = d?.incsearch ?? null;
+    const incsearchKey = incsearch ? `${incsearch[0]}/${incsearch[1]}` : "";
+    if (incsearchKey !== this._incsearchKey) {
+      const wasSearching = !!this._incsearchKey;
+      this._incsearchKey = incsearchKey;
+      if (incsearch) {
+        this.keepPositionInView({ row: incsearch[0], col: incsearch[1] });
+      } else if (wasSearching) {
+        // Enter will shortly replace _nvimCursor with the accepted result;
+        // Escape leaves it at the original cursor. Defer one frame so either
+        // case follows the authoritative cursor event without a false bounce.
+        requestAnimationFrame(() => this.keepCursorInView());
+      }
+    }
   }
   // byte range [sc, ec) on buffer row `row` -> CM [from, to), or null.
   _range(row, sc, ec) {
@@ -2025,11 +2059,13 @@ class Island {
     this.tx({ selection: { anchor } });
   }
   keepCursorInView() {
+    this.keepPositionInView(this._nvimCursor);
+  }
+  keepPositionInView(position) {
     if (this._cursorScrollRaf) cancelAnimationFrame(this._cursorScrollRaf);
     this._cursorScrollRaf = requestAnimationFrame(() => {
       this._cursorScrollRaf = 0;
-      const cursor = this._nvimCursor;
-      if (!cursor || this.el.hidden) return;
+      if (!position || this.el.hidden) return;
       const scroller = this.view.scrollDOM;
       if (!scroller.clientHeight) return;
       const height = scroller.clientHeight;
@@ -2043,8 +2079,13 @@ class Island {
         this.view.contentDOM.style.paddingBlockEnd = padding;
         this._scrollPadding = margin;
       }
-      const line = this.view.state.doc.line(Math.min(cursor.row + 1, this.view.state.doc.lines));
-      const pos = Math.min(line.from + byteToCol(line.text, cursor.col), line.to);
+      const line = this.view.state.doc.line(
+        Math.min(position.row + 1, this.view.state.doc.lines),
+      );
+      const pos = Math.min(
+        line.from + byteToCol(line.text, position.col),
+        line.to,
+      );
       const rect = this.view.coordsAtPos(pos);
       if (!rect) return;
       const bounds = scroller.getBoundingClientRect();
@@ -2636,6 +2677,24 @@ const CODE_CHAR = {
   Slash: "/",
   Space: " ",
 };
+const SHIFT_CODE_CHAR = {
+  Minus: "_",
+  Equal: "+",
+  BracketLeft: "{",
+  BracketRight: "}",
+  Backslash: "|",
+  Semicolon: ":",
+  Quote: '"',
+  Backquote: "~",
+  Comma: "<",
+  Period: ">",
+  Slash: "?",
+};
+function normalModePunctuation(e) {
+  if (e.metaKey || e.ctrlKey || e.altKey) return null;
+  if (!Object.hasOwn(SHIFT_CODE_CHAR, e.code)) return null;
+  return (e.shiftKey ? SHIFT_CODE_CHAR : CODE_CHAR)[e.code] ?? null;
+}
 function baseFromCode(e) {
   let m;
   if ((m = /^Key([A-Z])$/.exec(e.code))) return m[1].toLowerCase();
@@ -2753,6 +2812,20 @@ addEventListener("keydown", (e) => {
   if (imeComposing) return; // IME is mid-composition; let #ime + the OS handle it
   if (handleFontZoom(e)) return;
   const isl = islandForGrid(cursorGrid);
+  const normalPunctuation =
+    isl?.mode === "n" ? normalModePunctuation(e) : null;
+  if (normalPunctuation != null) {
+    // In a normal-mode island, use the physical punctuation key even when a
+    // CJK input source reports Process, keyCode 229, or full-width punctuation.
+    // Treat it as a possible mapping/operator prefix so a following `w` remains
+    // native rather than being consumed by semantic prose navigation.
+    islandNativeWPending = true;
+    e.preventDefault();
+    isl.queueNvimInput(
+      normalPunctuation === "<" ? "<lt>" : normalPunctuation,
+    );
+    return;
+  }
   const plain = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
   if (
     isl &&

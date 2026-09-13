@@ -6,8 +6,8 @@
 -- markdown-live-preview window into its CodeMirror island. This script does not
 -- reimplement conceal, folds, treesitter, syntax, matches, or render-markdown.nvim.
 -- It reads their results with built-in calls (synconcealed, the treesitter
--- highlights query, nvim_buf_get_extmarks, getmatches, nvim_get_hl, foldclosed,
--- getpos) and forwards a compact payload.
+-- highlights query, nvim_buf_get_extmarks, getmatches, the search register,
+-- nvim_get_hl, foldclosed, getpos) and forwards a compact payload.
 --
 -- Payload keys, all viewport-limited and absolute buffer coordinates:
 --   conceal : union of synconcealed() (:syntax), the treesitter highlights
@@ -15,10 +15,11 @@
 --   visual  : the visual / select range.
 --   folds   : closed folds (foldclosed / foldtextresult).
 --   hl      : { runs, defs } - union of every treesitter capture, hl_group
---             extmark, and :match / matchadd() / matchaddpos() overlay
---             (getmatches()) over the viewport, plus the resolved attrs for
---             each group. The last is how plugins like vim-easymotion and
---             quick-scope colour a window without extmarks or :syntax.
+--             extmark, active 'hlsearch' result, and :match / matchadd() /
+--             matchaddpos() overlay (getmatches()) over the viewport, plus the
+--             resolved attrs for each group. The last is how plugins like
+--             vim-easymotion and quick-scope colour a window without extmarks
+--             or :syntax.
 --
 -- Args: (channel).
 
@@ -358,9 +359,57 @@ local HL_SKIP = { spell = true, nospell = true, conceal = true, none = true, noc
 -- character; it is not a per-run z-index, groups get one priority each.
 local PRIO_TREESITTER = 100
 local PRIO_EXTMARK = 4096
+local PRIO_SEARCH = 9000
+local PRIO_INCSEARCH = 9001
 local PRIO_MATCH = 10000
 
-local function collect_highlights(win, buf, first, last, marks)
+-- Return the pattern Neovim is currently previewing for / or ?, without a
+-- trailing search offset. Search commands use their own command type as the
+-- delimiter. An escaped delimiter remains part of the Vim regexp; the first
+-- delimiter preceded by an even number of backslashes starts the offset.
+local function cmdline_search_pattern(cmd, delimiter)
+  for i = 1, #cmd do
+    if cmd:sub(i, i) == delimiter then
+      local slashes, j = 0, i - 1
+      while j >= 1 and cmd:sub(j, j) == '\\' do
+        slashes = slashes + 1
+        j = j - 1
+      end
+      if slashes % 2 == 0 then
+        local pattern = cmd:sub(1, i - 1)
+        -- // and ?? repeat the previous search pattern.
+        return pattern ~= '' and pattern or vim.fn.getreg('/')
+      end
+    end
+  end
+  return cmd
+end
+
+local function current_incsearch(win)
+  if not vim.o.incsearch or vim.api.nvim_get_current_win() ~= win then
+    return nil
+  end
+  local cmdtype = vim.fn.getcmdtype()
+  if cmdtype ~= '/' and cmdtype ~= '?' then
+    return nil
+  end
+  local cmdline = vim.fn.getcmdline()
+  if cmdline == '' then
+    return nil
+  end
+  local pattern = cmdline_search_pattern(cmdline, cmdtype)
+  if pattern == '' then
+    return nil
+  end
+  -- During incsearch Neovim temporarily places its real window cursor just
+  -- after the current match. This already reflects direction, CTRL-G/CTRL-T,
+  -- wrapping, offsets, and every other command-line interaction, so use it
+  -- rather than trying to reproduce selection of the current result.
+  local cursor = vim.api.nvim_win_get_cursor(win)
+  return { pattern = pattern, row = cursor[1] - 1, end_col = cursor[2] }
+end
+
+local function collect_highlights(win, buf, first, last, marks, search_pattern, incsearch)
   local runs, seen, codespans, virt = {}, {}, {}, {}
   local function note(group, prio)
     if group then
@@ -432,6 +481,35 @@ local function collect_highlights(win, buf, first, last, marks)
         end
         if hide > 0 then
           virt[#virt + 1] = { row, col, hide, segs }
+        end
+      end
+    end
+  end
+
+  -- Neovim's built-in search highlighting is not a :match entry, extmark,
+  -- syntax item, or treesitter capture. `v:hlsearch` is the authoritative
+  -- active flag: unlike the 'hlsearch' option alone it becomes false after
+  -- :nohlsearch. Resolve the current search register with the same Vim regexp
+  -- engine Neovim uses and emit ordinary Search-group runs.
+  local match_pattern = incsearch and incsearch.pattern or search_pattern
+  if match_pattern then
+    local ok_search, hits = pcall(
+      vim.fn.matchbufline,
+      buf,
+      match_pattern,
+      first + 1,
+      last + 1,
+      vim.empty_dict()
+    )
+    if ok_search then
+      for _, hit in ipairs(hits) do
+        local row = hit.lnum - 1
+        local end_col = hit.byteidx + #hit.text
+        if search_pattern then
+          add(row, hit.byteidx, end_col, 'Search', PRIO_SEARCH)
+        end
+        if incsearch and row == incsearch.row and end_col == incsearch.end_col then
+          add(row, hit.byteidx, end_col, 'IncSearch', PRIO_INCSEARCH)
         end
       end
     end
@@ -563,6 +641,14 @@ local function push(win)
   -- details=true fetch collect_highlights itself needs, fetched once here
   -- and passed down, rather than queried twice.
   local tick = vim.api.nvim_buf_get_changedtick(buf)
+  local incsearch = current_incsearch(win)
+  local search_pattern
+  if vim.v.hlsearch == 1 then
+    local pattern = incsearch and incsearch.pattern or vim.fn.getreg('/')
+    if pattern ~= '' then
+      search_pattern = pattern
+    end
+  end
   local mcount, msum = 0, 0
   for _, m in ipairs(vim.fn.getmatches(win)) do
     mcount = mcount + 1
@@ -603,6 +689,10 @@ local function push(win)
     and c.tick == tick
     and c.first == first
     and c.last == last
+    and c.search_pattern == search_pattern
+    and c.incsearch_pattern == (incsearch and incsearch.pattern or nil)
+    and c.incsearch_row == (incsearch and incsearch.row or nil)
+    and c.incsearch_end_col == (incsearch and incsearch.end_col or nil)
     and c.mcount == mcount
     and c.msum == msum
     and c.ecount == ecount
@@ -610,11 +700,15 @@ local function push(win)
   then
     hl = c.value
   else
-    hl = collect_highlights(win, buf, first, last, marks)
+    hl = collect_highlights(win, buf, first, last, marks, search_pattern, incsearch)
     hl_by_win[win] = {
       tick = tick,
       first = first,
       last = last,
+      search_pattern = search_pattern,
+      incsearch_pattern = incsearch and incsearch.pattern or nil,
+      incsearch_row = incsearch and incsearch.row or nil,
+      incsearch_end_col = incsearch and incsearch.end_col or nil,
       mcount = mcount,
       msum = msum,
       ecount = ecount,
@@ -634,6 +728,10 @@ local function push(win)
     heads = heads,
     codes = codes,
     quotes = quotes,
+    -- Temporary Neovim-owned incsearch cursor, kept separate from the real
+    -- editing cursor. The client follows it visually without changing CM's
+    -- selection or the island's authoritative cursor decoration.
+    incsearch = incsearch and { incsearch.row, incsearch.end_col } or nil,
     -- -1 (no valid row is negative) rather than omitting the key when there is
     -- no guard, so the client has one plain number to compare against instead
     -- of an optional field. See conceal_guard_row: the heading-marker and
@@ -698,6 +796,11 @@ vim.api.nvim_create_autocmd({
   'CursorHold',
   'CursorHoldI',
 }, { group = grp, callback = schedule })
+vim.api.nvim_create_autocmd({ 'CmdlineChanged', 'CmdlineLeave' }, {
+  group = grp,
+  pattern = { '/', '?' },
+  callback = schedule,
+})
 -- ModeChanged also fires for insert-completion's pum-visible sub-modes ('i'
 -- <-> 'ic' <-> 'ix', :h mode()): opening, closing, or cycling the completion
 -- menu, on every keystroke. Nothing this module renders depends on pum
@@ -719,7 +822,14 @@ vim.api.nvim_create_autocmd('ModeChanged', {
 vim.api.nvim_create_autocmd('OptionSet', {
   group = grp,
   -- foldlevel / foldenable catch the bulk fold commands (`zR` `zM` `zi` ...).
-  pattern = { 'conceallevel', 'concealcursor', 'foldlevel', 'foldenable' },
+  pattern = {
+    'conceallevel',
+    'concealcursor',
+    'foldlevel',
+    'foldenable',
+    'hlsearch',
+    'incsearch',
+  },
   callback = schedule,
 })
 vim.api.nvim_create_autocmd('ColorScheme', {
