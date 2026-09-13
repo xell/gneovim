@@ -143,3 +143,6 @@ vite.config.ts.timestamp-*
 .vite/
 
 plans/
+
+# Claude Code machine-local settings
+.claude/settings.local.json
