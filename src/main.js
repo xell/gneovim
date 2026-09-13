@@ -37,6 +37,7 @@ import { screenMetrics as calculateScreenMetrics } from "./pure/layout.js";
 import { imageSource as resolveImageSource } from "./pure/image-source.js";
 import { visualRanges } from "./pure/visual-ranges.js";
 import { foldRanges, overlapsRanges } from "./pure/fold-ranges.js";
+import { semanticWordTarget as findSemanticWordTarget } from "./pure/semantic-word.js";
 import {
   headingMarkerRanges,
   nonOverlappingSpans,
@@ -1408,25 +1409,7 @@ class Island {
     this.inputQueue.input(keys);
   }
   semanticWordTarget() {
-    const cursor = this._nvimCursor;
-    if (!cursor) return null;
-    const doc = this.view.state.doc;
-    const firstRow = Math.min(cursor.row, doc.lines - 1);
-    const firstLine = doc.line(firstRow + 1);
-    const firstCol = byteToCol(firstLine.text, cursor.col);
-    const segmenter = new Intl.Segmenter("zh", { granularity: "word" });
-    for (let row = firstRow; row < doc.lines; row++) {
-      const line = doc.line(row + 1);
-      const after = row === firstRow ? firstCol : -1;
-      for (const part of segmenter.segment(line.text)) {
-        if (part.index > after && part.segment.trim())
-          return {
-            row,
-            col: byteLen(line.text.slice(0, part.index)),
-          };
-      }
-    }
-    return null;
+    return findSemanticWordTarget(this.view.state.doc, this._nvimCursor);
   }
   onComposeEnd(committed) {
     const snap = this.compose;
