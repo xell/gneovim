@@ -38,6 +38,7 @@ import { imageSource as resolveImageSource } from "./pure/image-source.js";
 import { visualRanges } from "./pure/visual-ranges.js";
 import { foldRanges, overlapsRanges } from "./pure/fold-ranges.js";
 import { bufferLineEdit } from "./pure/buffer-line-edit.js";
+import { externalEditRegions } from "./pure/external-edit-regions.js";
 import { semanticWordTarget as findSemanticWordTarget } from "./pure/semantic-word.js";
 import {
   headingMarkerRanges,
@@ -1363,20 +1364,7 @@ class Island {
       u.transactions.some((tr) => tr.isUserEvent("input.type.compose"))
     )
       return;
-    const oldDoc = u.startState.doc;
-    const regions = [];
-    u.changes.iterChanges((fromA, toA, _b, _c, inserted) => {
-      const s = oldDoc.lineAt(fromA);
-      const e = oldDoc.lineAt(toA);
-      regions.push({
-        startRow: s.number - 1,
-        startCol: byteLen(s.text.slice(0, fromA - s.from)),
-        endRow: e.number - 1,
-        endCol: byteLen(e.text.slice(0, toA - e.from)),
-        replacement: inserted.toJSON(),
-      });
-    });
-    regions.reverse();
+    const regions = externalEditRegions(u.startState.doc, u.changes);
     if (this.bufnr != null)
       nvim.edit(this.bufnr, regions).catch((e) =>
         jlog("external island edit failed: " + e),
