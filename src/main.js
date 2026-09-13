@@ -36,6 +36,7 @@ import {
 import { screenMetrics as calculateScreenMetrics } from "./pure/layout.js";
 import { imageSource as resolveImageSource } from "./pure/image-source.js";
 import { visualRanges } from "./pure/visual-ranges.js";
+import { foldRanges, overlapsRanges } from "./pure/fold-ranges.js";
 
 // this webview's window label; event names are per-window (gnv://<label>/<kind>)
 // because emit_to() broadcasts to every webview in this app.
@@ -1213,17 +1214,11 @@ class Island {
     // visible sign that the fold is closed. End at the last folded line's
     // `.to` (before its newline) so the range stays within the buffer and
     // the trailing newline keeps the next line flowing normally.
-    const foldSpans = [];
-    const foldLines = [];
-    for (const [sr, er] of d?.folds ?? []) {
-      if (sr < 0 || sr >= doc.lines) continue;
-      const first = doc.line(sr + 1);
-      const to = doc.line(Math.min(er + 1, doc.lines)).to;
-      if (first.to > first.from) foldLines.push({ from: first.from, to: first.to });
-      if (to > first.to) foldSpans.push({ from: first.to, to });
-    }
-    const inFold = (a, b) =>
-      foldSpans.some((f) => a < f.to && b > f.from);
+    const { spans: foldSpans, firstLines: foldLines } = foldRanges(
+      doc,
+      d?.folds,
+    );
+    const inFold = (from, to) => overlapsRanges(foldSpans, from, to);
 
     // conceal: inline replace decorations, which may not overlap each other.
     // Neovim's own conceal, our heading-marker icon, and our blockquote-marker
