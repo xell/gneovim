@@ -139,9 +139,11 @@ describe("IslandInputController", () => {
     expect(inputQueue.cursor).toHaveBeenCalledWith(0, 7);
   });
 
-  it("does not forward selection changes during an owned composition", () => {
+  it("uses the selection transaction even when composition flags are stale", () => {
     const { controller, fromNvim, inputQueue, view } = fixture();
     controller.onCompositionStart();
+    controller.compositionSettling = true;
+    view.composing = true;
     controller.onSelectionUpdate({
       docChanged: false,
       selectionSet: true,
@@ -151,7 +153,7 @@ describe("IslandInputController", () => {
       },
       transactions: [transaction(fromNvim)],
     });
-    expect(inputQueue.cursor).not.toHaveBeenCalled();
+    expect(inputQueue.cursor).toHaveBeenCalledWith(0, 4);
   });
 
   it("orders a Grammarly AX selection before its posted key", async () => {

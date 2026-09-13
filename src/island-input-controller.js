@@ -108,10 +108,10 @@ export class IslandInputController {
 
   onSelectionUpdate(update) {
     // Pointer placement is synchronized by onMousedown. This path is for
-    // desktop editors using AXSelectedTextRange.
+    // desktop editors using AXSelectedTextRange. Deliberately decide from the
+    // transaction itself, as in the verified a42cda1 fix: persistent browser
+    // composition flags can be stale and must not veto an external placement.
     if (
-      this.composition ||
-      this.compositionSettling ||
       update.docChanged ||
       !update.selectionSet ||
       update.transactions.some(
