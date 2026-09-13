@@ -37,6 +37,12 @@ import { screenMetrics as calculateScreenMetrics } from "./pure/layout.js";
 import { imageSource as resolveImageSource } from "./pure/image-source.js";
 import { visualRanges } from "./pure/visual-ranges.js";
 import { foldRanges, overlapsRanges } from "./pure/fold-ranges.js";
+import {
+  headingMarkerRanges,
+  nonOverlappingSpans,
+  quoteMarkerRanges,
+  structuralLineStarts,
+} from "./pure/markdown-decoration-plan.js";
 
 // this webview's window label; event names are per-window (gnv://<label>/<kind>)
 // because emit_to() broadcasts to every webview in this app.
@@ -1232,44 +1238,35 @@ class Island {
     // cursor line regardless of concealcursor, ignoring the option entirely.
     const guardRow = d?.guard_row ?? -1;
     const spans = [];
-    for (const [sr, , level] of d?.heads ?? []) {
-      if (sr < 0 || sr >= doc.lines || sr === guardRow) continue;
-      const line = doc.line(sr + 1);
-      const m = /^(#{1,6})(\s+)/.exec(line.text); // setext headings have no marker on this line
-      if (!m) continue;
-      const from = line.from;
-      const to = from + m[0].length;
-      if (inFold(from, to)) continue;
-      const lvl = Math.min(Math.max(level, 1), 6);
+    for (const { row, from, to, level } of headingMarkerRanges(
+      doc,
+      d?.heads,
+      guardRow,
+      inFold,
+    )) {
       // The heading icon replaces the first source character. When conceal
       // stays active on the cursor line, the ordinary cursor decoration would
       // be swallowed by that replace, so the icon paints its cursor state.
       const cursorMode =
-        this._nvimCursor?.row === sr && this._nvimCursor.col === 0
+        this._nvimCursor?.row === row && this._nvimCursor.col === 0
           ? this.mode
           : null;
       spans.push({
         from,
         to,
         deco:
-          lvl <= 3
-            ? Decoration.replace({ widget: new HeadingIconWidget(lvl, cursorMode) })
+          level <= 3
+            ? Decoration.replace({ widget: new HeadingIconWidget(level, cursorMode) })
             : CONCEAL_HIDE,
       });
     }
-    for (const [sr, er] of d?.quotes ?? []) {
-      const s = Math.max(sr, 0);
-      const e = Math.min(er, doc.lines - 1);
-      for (let r = s; r <= e; r++) {
-        if (r === guardRow) continue;
-        const line = doc.line(r + 1);
-        const m = /^(?:[ \t]*>[ \t]?)+/.exec(line.text);
-        if (!m || !m[0]) continue;
-        const from = line.from;
-        const to = from + m[0].length;
-        if (inFold(from, to)) continue;
-        spans.push({ from, to, deco: CONCEAL_HIDE });
-      }
+    for (const { from, to } of quoteMarkerRanges(
+      doc,
+      d?.quotes,
+      guardRow,
+      inFold,
+    )) {
+      spans.push({ from, to, deco: CONCEAL_HIDE });
     }
     // overlay virt_text (hop.nvim's jump letters, etc): pushed ahead of plain
     // conceal so an interactive overlay wins a tie over Neovim's own conceal.
@@ -1286,13 +1283,9 @@ class Island {
           deco: text ? Decoration.replace({ widget: new ConcealWidget(text) }) : CONCEAL_HIDE,
         });
     }
-    spans.sort((a, b) => a.from - b.from || a.to - b.to);
     const ranges = [];
-    let end = -1;
-    for (const s of spans) {
-      if (s.from < end) continue; // drop an overlap (two sources, same run)
-      end = s.to;
-      ranges.push(s.deco.range(s.from, s.to));
+    for (const span of nonOverlappingSpans(spans)) {
+      ranges.push(span.deco.range(span.from, span.to));
     }
     // inline `code`: monospace, no Neovim highlight attribute carries font.
     for (const [row, sc, ec] of d?.hl?.codespans ?? []) {
@@ -1324,12 +1317,9 @@ class Island {
     // structure: heading size / code fence / blockquote, one Decoration.line
     // per affected line (see lineDeco above for why not a multi-line replace).
     const addLines = (sr, er, cls) => {
-      const s = Math.max(sr, 0);
-      const e = Math.min(er, doc.lines - 1);
       const deco = lineDeco(cls);
-      for (let r = s; r <= e; r++) {
-        const lf = doc.line(r + 1).from;
-        if (!inFold(lf, lf + 1)) ranges.push(deco.range(lf));
+      for (const from of structuralLineStarts(doc, sr, er, inFold)) {
+        ranges.push(deco.range(from));
       }
     };
     for (const [sr, er, level] of d?.heads ?? [])
