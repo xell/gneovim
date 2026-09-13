@@ -88,6 +88,41 @@ pub struct CmdlinePayload {
     pub pos: i64,
 }
 
+#[derive(Clone, Serialize)]
+pub struct WinFtPayload {
+    pub win: i64,
+    pub buf: i64,
+    pub ft: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct GuiOptPayload {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct MdPreviewPayload {
+    pub win: i64,
+    pub state: i64,
+}
+
+#[derive(Clone, Serialize)]
+pub struct WinGutterPayload {
+    pub win: i64,
+    pub number: bool,
+    pub relativenumber: bool,
+    pub numberwidth: i64,
+    pub signcolumn: String,
+    pub foldcolumn: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct MdDecorPayload {
+    pub win: i64,
+    pub json: String,
+}
+
 pub enum BridgeEvent {
     Reset(ResetPayload),
     Lines(LinesPayload),
@@ -97,28 +132,21 @@ pub enum BridgeEvent {
     /// One flushed frame of normalized grid ops for the multigrid renderer.
     Grid(Vec<Json>),
     /// A window's filetype, so the client can pick which grid is the CM island.
-    WinFt { win: i64, buf: i64, ft: String },
+    WinFt(WinFtPayload),
     /// A GUI option changed (`guifont`, `linespace`, ...). No `ext_` event
     /// carries these; polled via an `OptionSet` autocmd.
-    GuiOpt { name: String, value: String },
+    GuiOpt(GuiOptPayload),
     /// A window's markdown-live-preview flag changed. `state`: 1 preview island,
     /// 0 grid, -1 no longer a markdown window. From `runtime/md_preview.lua`.
-    MdPreview { win: i64, state: i64 },
+    MdPreview(MdPreviewPayload),
     /// A markdown window's gutter options, so its island can mirror Neovim's
     /// number column. `signcolumn` / `foldcolumn` ride along for a later pass.
     /// From `runtime/md_preview.lua`.
-    WinGutter {
-        win: i64,
-        number: bool,
-        relativenumber: bool,
-        numberwidth: i64,
-        signcolumn: String,
-        foldcolumn: String,
-    },
+    WinGutter(WinGutterPayload),
     /// Per-window display state for a markdown island (inline conceal now;
     /// highlights, folds, visual range later), as a JSON string.
     /// From `runtime/md_decor.lua`.
-    MdDecor { win: i64, json: String },
+    MdDecor(MdDecorPayload),
     /// `:OpenInNewGneovimTab` / `_G.OpenInNewGneovimTab()`: open a new gui-tab
     /// with its own nvim. `paths` open one Neovim tabpage each; `content` (for a
     /// `[No Name]` buffer being moved) seeds the initial buffer's lines.
@@ -348,6 +376,46 @@ mod redraw_wire_tests {
         );
         assert_eq!(grid_op("unknown", &[]), None);
     }
+
+    #[test]
+    fn typed_event_payload_shapes_are_frozen() {
+        assert_eq!(
+            serde_json::to_value(WinFtPayload {
+                win: 1000,
+                buf: 7,
+                ft: "markdown".into(),
+            })
+            .unwrap(),
+            json!({"win": 1000, "buf": 7, "ft": "markdown"})
+        );
+        assert_eq!(
+            serde_json::to_value(WinGutterPayload {
+                win: 1000,
+                number: true,
+                relativenumber: false,
+                numberwidth: 4,
+                signcolumn: "auto".into(),
+                foldcolumn: "0".into(),
+            })
+            .unwrap(),
+            json!({
+                "win": 1000,
+                "number": true,
+                "relativenumber": false,
+                "numberwidth": 4,
+                "signcolumn": "auto",
+                "foldcolumn": "0"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(MdDecorPayload {
+                win: 1000,
+                json: "{}".into(),
+            })
+            .unwrap(),
+            json!({"win": 1000, "json": "{}"})
+        );
+    }
 }
 
 struct BufState {
@@ -474,7 +542,10 @@ impl Handler for NvHandler {
                 let win = args.first().and_then(Value::as_i64).unwrap_or(0);
                 let buf = args.get(1).and_then(Value::as_i64).unwrap_or(0);
                 let ft = args.get(2).and_then(Value::as_str).unwrap_or("").to_string();
-                let _ = self.shared.tx.send(BridgeEvent::WinFt { win, buf, ft });
+                let _ = self
+                    .shared
+                    .tx
+                    .send(BridgeEvent::WinFt(WinFtPayload { win, buf, ft }));
             }
             "gnv_guiopt" => {
                 let name = args.first().and_then(Value::as_str).unwrap_or("").to_string();
@@ -483,12 +554,18 @@ impl Handler for NvHandler {
                     Some(Value::Integer(n)) => n.to_string(),
                     _ => String::new(),
                 };
-                let _ = self.shared.tx.send(BridgeEvent::GuiOpt { name, value });
+                let _ = self
+                    .shared
+                    .tx
+                    .send(BridgeEvent::GuiOpt(GuiOptPayload { name, value }));
             }
             "gnv_md_preview" => {
                 let win = args.first().and_then(Value::as_i64).unwrap_or(0);
                 let state = args.get(1).and_then(Value::as_i64).unwrap_or(-1);
-                let _ = self.shared.tx.send(BridgeEvent::MdPreview { win, state });
+                let _ = self
+                    .shared
+                    .tx
+                    .send(BridgeEvent::MdPreview(MdPreviewPayload { win, state }));
             }
             "gnv_win_gutter" => {
                 let win = args.first().and_then(Value::as_i64).unwrap_or(0);
@@ -514,14 +591,14 @@ impl Handler for NvHandler {
                         }
                     }
                 }
-                let _ = self.shared.tx.send(BridgeEvent::WinGutter {
+                let _ = self.shared.tx.send(BridgeEvent::WinGutter(WinGutterPayload {
                     win,
                     number,
                     relativenumber,
                     numberwidth,
                     signcolumn,
                     foldcolumn,
-                });
+                }));
             }
             "gnv_md_decor" => {
                 let win = args.first().and_then(Value::as_i64).unwrap_or(0);
@@ -530,7 +607,10 @@ impl Handler for NvHandler {
                     .and_then(Value::as_str)
                     .unwrap_or("{}")
                     .to_string();
-                let _ = self.shared.tx.send(BridgeEvent::MdDecor { win, json });
+                let _ = self
+                    .shared
+                    .tx
+                    .send(BridgeEvent::MdDecor(MdDecorPayload { win, json }));
             }
             // [{ paths = [..]?, content = [..]? }]
             "gnv_open_new_tab" => {

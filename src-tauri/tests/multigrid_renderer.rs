@@ -45,8 +45,8 @@ async fn multigrid_renderer_flow() {
             continue;
         };
         match ev {
-            BridgeEvent::WinFt { ft, .. } => {
-                if ft.contains("markdown") {
+            BridgeEvent::WinFt(payload) => {
+                if payload.ft.contains("markdown") {
                     md_winft = true;
                 }
             }

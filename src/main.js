@@ -1788,11 +1788,6 @@ class Island {
       .then(() => nvim.input(keys))
       .catch((e) => jlog("island input failed: " + e));
   }
-  queueSemanticWord(row, col) {
-    this._nvimInputQueue = this._nvimInputQueue
-      .then(() => nvim.cursorSet(this.winId, row, col))
-      .catch((e) => jlog("island semantic word failed: " + e));
-  }
   semanticWordTarget() {
     const cursor = this._nvimCursor;
     if (!cursor) return null;
@@ -2634,7 +2629,7 @@ addEventListener("keydown", (e) => {
     const target = isl.semanticWordTarget();
     if (target) {
       e.preventDefault();
-      isl.queueSemanticWord(target.row, target.col);
+      isl.queueNvimCursor(target.row, target.col);
       return;
     }
   }

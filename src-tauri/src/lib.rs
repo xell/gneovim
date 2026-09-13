@@ -708,36 +708,11 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec) {
                     BridgeEvent::Cmdline(p) => emit_app.emit(&ev("cmdline"), p),
                     BridgeEvent::CmdlineHide => emit_app.emit(&ev("cmdline_hide"), ()),
                     BridgeEvent::Grid(ops) => emit_app.emit(&ev("grid"), ops),
-                    BridgeEvent::WinFt { win, buf, ft } => emit_app.emit(
-                        &ev("winft"),
-                        serde_json::json!({"win":win,"buf":buf,"ft":ft}),
-                    ),
-                    BridgeEvent::GuiOpt { name, value } => emit_app
-                        .emit(&ev("guiopt"), serde_json::json!({"name":name,"value":value})),
-                    BridgeEvent::MdPreview { win, state } => emit_app
-                        .emit(&ev("md_preview"), serde_json::json!({"win":win,"state":state})),
-                    BridgeEvent::WinGutter {
-                        win,
-                        number,
-                        relativenumber,
-                        numberwidth,
-                        signcolumn,
-                        foldcolumn,
-                    } => emit_app.emit(
-                        &ev("win_gutter"),
-                        serde_json::json!({
-                            "win": win,
-                            "number": number,
-                            "relativenumber": relativenumber,
-                            "numberwidth": numberwidth,
-                            "signcolumn": signcolumn,
-                            "foldcolumn": foldcolumn,
-                        }),
-                    ),
-                    BridgeEvent::MdDecor { win, json } => emit_app.emit(
-                        &ev("md_decor"),
-                        serde_json::json!({ "win": win, "json": json }),
-                    ),
+                    BridgeEvent::WinFt(p) => emit_app.emit(&ev("winft"), p),
+                    BridgeEvent::GuiOpt(p) => emit_app.emit(&ev("guiopt"), p),
+                    BridgeEvent::MdPreview(p) => emit_app.emit(&ev("md_preview"), p),
+                    BridgeEvent::WinGutter(p) => emit_app.emit(&ev("win_gutter"), p),
+                    BridgeEvent::MdDecor(p) => emit_app.emit(&ev("md_decor"), p),
                     // Spawn a new gui-tab (its own nvim) loaded with the
                     // requested files / carried-over text. Window creation +
                     // macOS tab grouping must run on the main thread.
