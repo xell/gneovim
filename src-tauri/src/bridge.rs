@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, OnceLock,
+    Arc, MutexGuard, OnceLock,
 };
 use std::time::Duration;
 
@@ -188,6 +188,8 @@ pub struct OpenSpec {
 #[derive(Clone)]
 struct Shared {
     tx: UnboundedSender<BridgeEvent>,
+    /// Cleared on the first send to a dropped frontend receiver.
+    forwarding: Arc<AtomicBool>,
     /// Changedtick protocol for distinguishing CM6 edit echoes from independent
     /// Neovim edits without relying on scheduler timing.
     edit_sync: Arc<std::sync::Mutex<EditSync>>,
@@ -197,6 +199,29 @@ struct Shared {
     grid_batch: Arc<std::sync::Mutex<Vec<Json>>>,
     /// Set once `ui_attach` has run, so a webview reload does not attach twice.
     ui_attached: Arc<AtomicBool>,
+}
+
+impl Shared {
+    fn send(&self, event: BridgeEvent) -> bool {
+        if !self.forwarding.load(Ordering::Acquire) {
+            return false;
+        }
+        if self.tx.send(event).is_err() {
+            self.forwarding.store(false, Ordering::Release);
+            return false;
+        }
+        true
+    }
+}
+
+fn lock_recover<'a, T>(
+    mutex: &'a std::sync::Mutex<T>,
+    name: &str,
+) -> MutexGuard<'a, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        log::error!("recovering poisoned {name} lock");
+        poisoned.into_inner()
+    })
 }
 
 #[derive(Default)]
@@ -416,6 +441,22 @@ mod redraw_wire_tests {
             json!({"win": 1000, "json": "{}"})
         );
     }
+
+    #[test]
+    fn poisoned_hot_path_lock_recovers_its_data() {
+        let mutex = Arc::new(std::sync::Mutex::new(vec![1]));
+        let poisoned = mutex.clone();
+        let _ = std::thread::spawn(move || {
+            let mut value = poisoned.lock().unwrap();
+            value.push(2);
+            panic!("poison the fixture");
+        })
+        .join();
+
+        let mut recovered = lock_recover(&mutex, "test");
+        recovered.push(3);
+        assert_eq!(*recovered, vec![1, 2, 3]);
+    }
 }
 
 struct BufState {
@@ -492,7 +533,7 @@ impl Handler for NvHandler {
                     lastline,
                     linedata,
                 };
-                let mut sync = self.shared.edit_sync.lock().unwrap();
+                let mut sync = lock_recover(&self.shared.edit_sync, "edit sync");
                 if let Some(pending) = sync.pending.get_mut(&buf) {
                     pending.push((changedtick, payload));
                     return;
@@ -506,7 +547,7 @@ impl Handler for NvHandler {
                     }
                 }
                 drop(sync);
-                let _ = self.shared.tx.send(BridgeEvent::Lines(payload));
+                self.shared.send(BridgeEvent::Lines(payload));
             }
             "gnv_cursor" => {
                 let win = args.first().and_then(Value::as_i64).unwrap_or(0);
@@ -514,10 +555,7 @@ impl Handler for NvHandler {
                 let col = args.get(2).and_then(Value::as_i64).unwrap_or(0);
                 let mode = args.get(3).and_then(Value::as_str).unwrap_or("n").to_string();
                 let scrolloff = args.get(4).and_then(Value::as_i64).unwrap_or(0);
-                let _ = self
-                    .shared
-                    .tx
-                    .send(BridgeEvent::Cursor(CursorPayload {
+                self.shared.send(BridgeEvent::Cursor(CursorPayload {
                         win,
                         row,
                         col,
@@ -529,22 +567,20 @@ impl Handler for NvHandler {
                 let ctype = args.first().and_then(Value::as_str).unwrap_or(":").to_string();
                 let content = args.get(1).and_then(Value::as_str).unwrap_or("").to_string();
                 let pos = args.get(2).and_then(Value::as_i64).unwrap_or(1);
-                let _ = self.shared.tx.send(BridgeEvent::Cmdline(CmdlinePayload {
+                self.shared.send(BridgeEvent::Cmdline(CmdlinePayload {
                     ctype,
                     content,
                     pos,
                 }));
             }
             "gnv_cmdline_hide" => {
-                let _ = self.shared.tx.send(BridgeEvent::CmdlineHide);
+                self.shared.send(BridgeEvent::CmdlineHide);
             }
             "gnv_winft" => {
                 let win = args.first().and_then(Value::as_i64).unwrap_or(0);
                 let buf = args.get(1).and_then(Value::as_i64).unwrap_or(0);
                 let ft = args.get(2).and_then(Value::as_str).unwrap_or("").to_string();
-                let _ = self
-                    .shared
-                    .tx
+                self.shared
                     .send(BridgeEvent::WinFt(WinFtPayload { win, buf, ft }));
             }
             "gnv_guiopt" => {
@@ -554,17 +590,13 @@ impl Handler for NvHandler {
                     Some(Value::Integer(n)) => n.to_string(),
                     _ => String::new(),
                 };
-                let _ = self
-                    .shared
-                    .tx
+                self.shared
                     .send(BridgeEvent::GuiOpt(GuiOptPayload { name, value }));
             }
             "gnv_md_preview" => {
                 let win = args.first().and_then(Value::as_i64).unwrap_or(0);
                 let state = args.get(1).and_then(Value::as_i64).unwrap_or(-1);
-                let _ = self
-                    .shared
-                    .tx
+                self.shared
                     .send(BridgeEvent::MdPreview(MdPreviewPayload { win, state }));
             }
             "gnv_win_gutter" => {
@@ -591,7 +623,7 @@ impl Handler for NvHandler {
                         }
                     }
                 }
-                let _ = self.shared.tx.send(BridgeEvent::WinGutter(WinGutterPayload {
+                self.shared.send(BridgeEvent::WinGutter(WinGutterPayload {
                     win,
                     number,
                     relativenumber,
@@ -607,9 +639,7 @@ impl Handler for NvHandler {
                     .and_then(Value::as_str)
                     .unwrap_or("{}")
                     .to_string();
-                let _ = self
-                    .shared
-                    .tx
+                self.shared
                     .send(BridgeEvent::MdDecor(MdDecorPayload { win, json }));
             }
             // [{ paths = [..]?, content = [..]? }]
@@ -634,13 +664,11 @@ impl Handler for NvHandler {
                         .map(|v| v.as_str().unwrap_or("").to_string())
                         .collect()
                 });
-                let _ = self
-                    .shared
-                    .tx
+                self.shared
                     .send(BridgeEvent::OpenNewTab { paths, content });
             }
             "redraw" => {
-                let mut batch = self.shared.grid_batch.lock().unwrap();
+                let mut batch = lock_recover(&self.shared.grid_batch, "grid batch");
                 for group in &args {
                     let Some(arr) = group.as_array() else { continue };
                     let Some(ev) = arr.first().and_then(Value::as_str) else {
@@ -654,7 +682,7 @@ impl Handler for NvHandler {
                             batch.push(op);
                             if is_flush {
                                 let frame = std::mem::take(&mut *batch);
-                                let _ = self.shared.tx.send(BridgeEvent::Grid(frame));
+                                self.shared.send(BridgeEvent::Grid(frame));
                             }
                         }
                     }
@@ -911,6 +939,7 @@ pub async fn connect(
 
     let shared = Shared {
         tx,
+        forwarding: Arc::new(AtomicBool::new(true)),
         edit_sync: Arc::new(std::sync::Mutex::new(EditSync::default())),
         edit_lock: Arc::new(Mutex::new(())),
         grid_batch: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1242,10 +1271,7 @@ impl Bridge {
             })
             .collect();
 
-        self.shared
-            .edit_sync
-            .lock()
-            .unwrap()
+        lock_recover(&self.shared.edit_sync, "edit sync")
             .pending
             .insert(buf, Vec::new());
         let res = self
@@ -1263,7 +1289,7 @@ impl Bridge {
             .map(|ticks| ticks.iter().filter_map(Value::as_i64).collect())
             .unwrap_or_default();
         let forward = {
-            let mut sync = self.shared.edit_sync.lock().unwrap();
+            let mut sync = lock_recover(&self.shared.edit_sync, "edit sync");
             let pending = sync.pending.remove(&buf).unwrap_or_default();
             let suppress = sync.suppress.entry(buf).or_default();
             suppress.extend(own_ticks);
@@ -1283,7 +1309,7 @@ impl Bridge {
             forward
         };
         for payload in forward {
-            let _ = self.shared.tx.send(BridgeEvent::Lines(payload));
+            self.shared.send(BridgeEvent::Lines(payload));
         }
         res.map(|_| ()).map_err(err)
     }
