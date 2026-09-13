@@ -2,6 +2,7 @@
 //! attach a window's buffer, see incremental diffs, forward a reverse edit with
 //! echo suppression.
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,13 +24,21 @@ async fn island_round_trip() {
     let (tx, mut rx) = mpsc::unbounded_channel::<BridgeEvent>();
     let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let lines2 = lines.clone();
+    let current_win = Arc::new(AtomicI64::new(0));
+    let current_win2 = current_win.clone();
     tokio::spawn(async move {
         while let Some(e) = rx.recv().await {
-            if let BridgeEvent::Lines(p) = e {
-                lines2
-                    .lock()
-                    .unwrap()
-                    .push(format!("buf={} f={} l={} {:?}", p.buf, p.firstline, p.lastline, p.linedata));
+            match e {
+                BridgeEvent::Lines(p) => {
+                    lines2.lock().unwrap().push(format!(
+                        "buf={} f={} l={} {:?}",
+                        p.buf, p.firstline, p.lastline, p.linedata
+                    ));
+                }
+                BridgeEvent::Cursor(p) => {
+                    current_win2.store(p.win, Ordering::Release);
+                }
+                _ => {}
             }
         }
     });
@@ -43,7 +52,8 @@ async fn island_round_trip() {
     settle().await;
 
     // 1. attach the current window's buffer -> snapshot
-    let win = 1000; // first window id in a fresh nvim
+    let win = current_win.load(Ordering::Acquire);
+    assert!(win > 0, "cursor stream reported the active window");
     let snap = b.island_attach(win).await.expect("island_attach");
     assert!(snap.buf > 0);
     assert_eq!(snap.lines.len(), 3);
