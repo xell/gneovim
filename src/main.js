@@ -14,6 +14,11 @@ import { GridView } from "./grid-view.js";
 import { RedrawScheduler } from "./redraw-scheduler.js";
 import { GridCoordinator } from "./grid-coordinator.js";
 import { IslandManager } from "./island-manager.js";
+import {
+  HighlightRegistry,
+  colorLuma,
+  rgbHex,
+} from "./highlight-registry.js";
 import { byteLen, byteToCol } from "./pure/text-geometry.js";
 import { parseGuifont } from "./pure/guifont.js";
 import {
@@ -38,6 +43,7 @@ const winLabel = currentWin.label;
 const nvim = new NvimClient({ invoke: tauriInvoke, listen: tauriListen, windowLabel: winLabel });
 
 const viewportEl = document.getElementById("viewport");
+const highlights = new HighlightRegistry({ document });
 
 // mirror the webview console into the app log (the webview has no visible one)
 const jlog = (m) => nvim.log(m).catch(() => {});
@@ -124,78 +130,14 @@ function applyGuiOpt(name, value) {
 // id -> the rgb_attr map from hl_attr_define, verbatim: foreground, background,
 // special, reverse, bold, italic, strikethrough, underline, undercurl,
 // underdouble, underdotted, underdashed, blend, ...
-const hlAttrs = new Map();
-let defColors = { fg: "#000000", bg: "#ffffff", sp: "#d40000" };
-const hex = (n) =>
-  n == null || n < 0 ? null : "#" + n.toString(16).padStart(6, "0");
-
-// blend (0-100, from hl_attr_define) is the cell's transparency: 0 opaque,
-// 100 invisible. Append an alpha byte so the cell composites over whatever the
-// grid element's background is (floats/pum with winblend/pumblend).
-const withAlpha = (css, blend) =>
-  blend && /^#[0-9a-f]{6}$/i.test(css)
-    ? css +
-      Math.round((100 - blend) * 2.55)
-        .toString(16)
-        .padStart(2, "0")
-    : css;
-
-function luma(hex6) {
-  const n = parseInt(hex6.slice(1), 16);
-  return 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255);
-}
-
 // Push Neovim's Normal colours into CSS custom properties so every surface
 // (body, grid backgrounds, islands, cursors) tracks :colorscheme / :set bg.
 function applyTheme() {
   const s = document.documentElement.style;
-  s.setProperty("--fg", defColors.fg);
-  s.setProperty("--bg", defColors.bg);
-  s.setProperty("--sp", defColors.sp);
-  s.colorScheme = luma(defColors.bg) < 128 ? "dark" : "light";
-}
-
-function hlCss(id) {
-  const a = hlAttrs.get(id) || {};
-  let fg = hex(a.foreground) ?? defColors.fg;
-  let bg = hex(a.background) ?? null;
-  const sp = hex(a.special) ?? defColors.sp;
-  if (a.reverse || a.standout) {
-    const t = fg;
-    fg = bg ?? defColors.bg;
-    bg = t;
-  }
-  // Neovim's default DiagnosticUnderline* groups (and themes copying them) set
-  // fg == bg on purpose: the glyph is meant to be invisible so only the
-  // undercurl / underline in `sp` shows. Rendered literally that is a solid
-  // block of unreadable text. Drop both colours so the run inherits Normal
-  // fg/bg; the text-decoration below still draws the squiggle.
-  const camouflage = bg && fg.toLowerCase() === bg.toLowerCase();
-  const blend = a.blend | 0;
-  let s = camouflage ? "" : `color:${withAlpha(fg, blend)};`;
-  if (bg && !camouflage) s += `background:${withAlpha(bg, blend)};`;
-  if (a.bold) s += "font-weight:700;";
-  if (a.italic) s += "font-style:italic;";
-
-  const anyUnderline =
-    a.underline || a.undercurl || a.underdouble || a.underdotted || a.underdashed;
-  const lines = [];
-  if (anyUnderline) lines.push("underline");
-  if (a.strikethrough) lines.push("line-through");
-  if (lines.length) s += `text-decoration-line:${lines.join(" ")};`;
-  if (anyUnderline) {
-    const style = a.undercurl
-      ? "wavy"
-      : a.underdouble
-        ? "double"
-        : a.underdotted
-          ? "dotted"
-          : a.underdashed
-            ? "dashed"
-            : "solid";
-    s += `text-decoration-style:${style};text-decoration-color:${sp};`;
-  }
-  return s;
+  s.setProperty("--fg", highlights.defaults.fg);
+  s.setProperty("--bg", highlights.defaults.bg);
+  s.setProperty("--sp", highlights.defaults.sp);
+  s.colorScheme = colorLuma(highlights.defaults.bg) < 128 ? "dark" : "light";
 }
 
 const grids = new Map(); // gridId -> GridView
@@ -217,84 +159,12 @@ const islands = islandManager.islands; // read-only access for rendering and eve
 // the nvim_wingutters replay). Applied to the island's gutter compartment.
 let livePreviewDefault = true; // from gnv_config [markdown] live_preview_default
 
-// ---------------------------------------------------------------------------
-// island highlight groups: Neovim resolves every treesitter capture / hl_group
-// to concrete attrs (md_decor.lua `hl.defs`); we turn each into one CSS rule in
-// a shared <style>, and mark the runs with the matching class. Names -> a short
-// stable class, so `@markup.strong.markdown_inline` does not go in the DOM.
-// ---------------------------------------------------------------------------
-const hlClassBy = new Map(); // group name -> "cm-h-<n>"
-const hlDefs = new Map(); // group name -> attrs (accumulated across payloads)
-let hlStyleEl = null;
-function hlClass(group) {
-  let c = hlClassBy.get(group);
-  if (!c) {
-    c = "cm-h-" + hlClassBy.size;
-    hlClassBy.set(group, c);
-  }
-  return c;
-}
-function rebuildHlStyle() {
-  let css = "";
-  // Lowest priority first, so a higher layer's rule is written *later* in the
-  // stylesheet: when two decorations cover the same character (a "shade" mark
-  // spanning a whole line under a brighter "target" mark on one letter of it,
-  // easymotion's own pattern) they land on the same flattened element client
-  // side, and CSS gives the later same-specificity rule the win. Map
-  // iteration order is otherwise just payload arrival order, which does not
-  // reflect which layer should show through.
-  const sorted = [...hlDefs].sort(
-    (a, b) => (a[1].priority ?? 0) - (b[1].priority ?? 0),
-  );
-  for (const [group, a] of sorted) {
-    let fg = a.fg;
-    let bg = a.bg;
-    if (a.reverse) [fg, bg] = [bg || "var(--bg)", fg || "var(--fg)"];
-    // fg == bg is deliberate camouflage (diagnostic underline groups): drop
-    // both so only the squiggle shows, matching the grid renderer's hlCss.
-    if (fg && fg === bg) fg = bg = null;
-    const p = [];
-    if (fg) p.push(`color:${fg}`);
-    if (bg) p.push(`background-color:${bg}`);
-    if (a.bold) p.push("font-weight:700");
-    if (a.italic) p.push("font-style:italic");
-    const dec = [];
-    if (a.underline) dec.push("underline");
-    if (a.undercurl) dec.push("underline wavy");
-    if (a.strikethrough) dec.push("line-through");
-    if (dec.length) {
-      p.push(`text-decoration:${dec.join(" ")}`);
-      if (a.sp) p.push(`text-decoration-color:${a.sp}`);
-    }
-    if (p.length) css += `.island .${hlClass(group)}{${p.join(";")}}\n`;
-  }
-  if (!hlStyleEl) {
-    hlStyleEl = document.createElement("style");
-    document.head.append(hlStyleEl);
-  }
-  hlStyleEl.textContent = css;
-}
-function mergeHlDefs(defs) {
-  // a group's attrs only change on ColorScheme, which clears hlDefs and the
-  // <style>; so only a genuinely new group needs a rebuild. Comparing attrs
-  // every push (and regenerating the whole <style>) forced a document-wide
-  // style recalc on every keystroke.
-  let added = false;
-  for (const [group, a] of Object.entries(defs)) {
-    if (!hlDefs.has(group)) {
-      hlDefs.set(group, a);
-      added = true;
-    }
-  }
-  if (added) rebuildHlStyle();
-}
-
 function gw(id) {
   let g = grids.get(id);
   if (!g) {
     g = new GridView(id, {
       document,
-      highlightCss: hlCss,
+      highlightCss: (id) => highlights.gridCss(id),
       cellWidth: () => cellW,
     });
     grids.set(id, g);
@@ -545,9 +415,9 @@ function placeGridCursor() {
   }
   // block cursor uses the CSS white+difference invert; bars get the Cursor
   // highlight's colour, or the theme foreground
-  const attr = m && m.attr_id != null ? hlAttrs.get(m.attr_id) : null;
+  const attr = m && m.attr_id != null ? highlights.gridAttributesFor(m.attr_id) : null;
   gridCursorEl.style.background =
-    shape === "block" ? "" : (attr && hex(attr.background)) || "var(--fg)";
+    shape === "block" ? "" : (attr && rgbHex(attr.background)) || "var(--fg)";
   startBlink();
 }
 
@@ -622,7 +492,7 @@ class HeadingIconWidget extends WidgetType {
 }
 // An overlay virt_text extmark (hop.nvim's jump-target letters and similar):
 // new content drawn in place of the buffer text it covers, not a recolouring
-// of it. Each segment gets the same hlClass() as any other highlight group.
+// of it. Each segment gets the same stable class as any other highlight group.
 class OverlayWidget extends WidgetType {
   constructor(segs) {
     super();
@@ -638,7 +508,7 @@ class OverlayWidget extends WidgetType {
     const s = document.createElement("span");
     for (const [text, group] of this.segs) {
       const t = document.createElement("span");
-      if (group) t.className = hlClass(group);
+      if (group) t.className = highlights.islandClass(group);
       t.textContent = text;
       s.append(t);
     }
@@ -716,9 +586,9 @@ function appendTableText(cell, text, highlights) {
     if (groups.length) {
       const mark = document.createElement("span");
       // Search and IncSearch overlap on the active result. Keep every group on
-      // the same text span so rebuildHlStyle's Neovim-derived priority order,
+      // the same text span so HighlightRegistry's Neovim-derived priority order,
       // rather than iteration order, decides which visual attributes win.
-      mark.className = groups.map(hlClass).join(" ");
+      mark.className = groups.map((group) => highlights.islandClass(group)).join(" ");
       mark.textContent = text.slice(from, to);
       cell.append(mark);
     } else {
@@ -1444,7 +1314,9 @@ class Island {
     for (const [row, sc, ec, group] of d?.hl?.runs ?? []) {
       const r = this._range(row, sc, ec);
       if (r && !inFold(r.from, r.to)) {
-        ranges.push(Decoration.mark({ class: hlClass(group) }).range(r.from, r.to));
+        ranges.push(
+          Decoration.mark({ class: highlights.islandClass(group) }).range(r.from, r.to),
+        );
       }
     }
     // visual/select range: a background mark, may overlap anything.
@@ -1839,7 +1711,7 @@ const gridCoordinator = new GridCoordinator({
   reconcileIslands: () => islandManager.reconcile(),
   isIslandGrid: (id) => islandManager.gridIds.has(id),
   onColors: applyDefaultColors,
-  onHighlight: (id, attr) => hlAttrs.set(id, attr),
+  onHighlight: (id, attr) => highlights.setGrid(id, attr),
   onModeInfo: (enabled) => {
     cursorStyleEnabled = enabled;
   },
@@ -1857,15 +1729,10 @@ function applyGridBatch(ops) {
 }
 
 function applyDefaultColors(op) {
-  defColors = {
-    fg: hex(op.fg) ?? defColors.fg,
-    bg: hex(op.bg) ?? defColors.bg,
-    sp: hex(op.sp) ?? defColors.sp,
-  };
+  highlights.setDefaults(op);
   applyTheme();
   for (const grid of grids.values()) grid.fullDirty = true;
-  hlDefs.clear();
-  if (hlStyleEl) hlStyleEl.textContent = "";
+  highlights.resetIslandDefinitions();
   return grids.keys();
 }
 
@@ -2034,7 +1901,7 @@ addEventListener("error", (e) => {
         jlog("invalid md_decor payload: " + error);
         return;
       }
-      if (d.hl?.defs) mergeHlDefs(d.hl.defs);
+      if (d.hl?.defs) highlights.mergeIslandDefinitions(d.hl.defs);
       const isl = islands.get(e.payload.win);
       if (isl) isl.setDecor(d);
     }),
