@@ -45,6 +45,7 @@ import {
 } from "./pure/markdown-decoration-plan.js";
 import { CursorScroller } from "./cursor-scroller.js";
 import { GutterController } from "./gutter-controller.js";
+import { IslandInputQueue } from "./island-input-queue.js";
 
 // this webview's window label; event names are per-window (gnv://<label>/<kind>)
 // because emit_to() broadcasts to every webview in this app.
@@ -995,7 +996,11 @@ class Island {
     // editors may move it through macOS Accessibility before posting their
     // correction keys, so serialize island cursor and key requests.
     this._nvimCursor = null; // { row, col }
-    this._nvimInputQueue = Promise.resolve();
+    this.inputQueue = new IslandInputQueue({
+      client: nvim,
+      winId,
+      log: jlog,
+    });
     this._compositionSettling = false;
     this.el = document.createElement("div");
     this.el.className = "island";
@@ -1397,14 +1402,10 @@ class Island {
     this.queueNvimCursor(row, col);
   }
   queueNvimCursor(row, col) {
-    this._nvimInputQueue = this._nvimInputQueue
-      .then(() => nvim.cursorSet(this.winId, row, col))
-      .catch((e) => jlog("island cursor set failed: " + e));
+    this.inputQueue.cursor(row, col);
   }
   queueNvimInput(keys) {
-    this._nvimInputQueue = this._nvimInputQueue
-      .then(() => nvim.input(keys))
-      .catch((e) => jlog("island input failed: " + e));
+    this.inputQueue.input(keys);
   }
   semanticWordTarget() {
     const cursor = this._nvimCursor;
