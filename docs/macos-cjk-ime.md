@@ -98,6 +98,21 @@ it covers every direct character emitted by a macOS input source.
 Grammarly and system replacements use replacement event types and retain the
 arbitrary-range `nvim_edit` path.
 
+## Physical punctuation in Normal mode
+
+A Chinese input source may report full-width punctuation or an IME `Process`
+event for a punctuation key even when the user intends a Normal-mode command
+such as `,` for `<Leader>` or `~`. In exact Normal mode, the global keydown path
+therefore maps the physical punctuation key code, with Shift, to its US English
+punctuation character before consulting the event's composed value. This rule
+applies equally to grid windows and Markdown islands.
+
+The override does not run during Insert or Replace mode, an active composition,
+or any Neovim command line. Those contexts must receive the character selected
+by the IME. Markdown islands additionally mark the normalized character as a
+possible mapping or operator prefix so their semantic prose `w` interception
+cannot consume a following native motion.
+
 ## One coordinate contract
 
 Neovim buffer columns and CodeMirror positions are different units:

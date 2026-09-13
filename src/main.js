@@ -2709,6 +2709,15 @@ function normalModePunctuation(e) {
   if (!Object.hasOwn(SHIFT_CODE_CHAR, e.code)) return null;
   return (e.shiftKey ? SHIFT_CODE_CHAR : CODE_CHAR)[e.code] ?? null;
 }
+function normalModeActive(island) {
+  if (cmdlineActive) return false;
+  if (island) return island.mode === "n";
+  // gnv_cursor carries mode() and is authoritative for grid windows. The UI
+  // mode name is only a startup fallback before that first payload arrives.
+  return lastCursorPayload
+    ? lastCursorPayload.mode === "n"
+    : modeName_ === "normal";
+}
 function baseFromCode(e) {
   let m;
   if ((m = /^Key([A-Z])$/.exec(e.code))) return m[1].toLowerCase();
@@ -2830,17 +2839,19 @@ addEventListener("keydown", (e) => {
   // punctuation or semantic-motion interception to command-line text.
   const isl = cmdlineActive ? null : islandForGrid(cursorGrid);
   const normalPunctuation =
-    isl?.mode === "n" ? normalModePunctuation(e) : null;
+    normalModeActive(isl) ? normalModePunctuation(e) : null;
   if (normalPunctuation != null) {
-    // In a normal-mode island, use the physical punctuation key even when a
-    // CJK input source reports Process, keyCode 229, or full-width punctuation.
-    // Treat it as a possible mapping/operator prefix so a following `w` remains
-    // native rather than being consumed by semantic prose navigation.
-    islandNativeWPending = true;
+    // In Normal mode, use the physical punctuation key even when a CJK input
+    // source reports Process, keyCode 229, or full-width punctuation. This is
+    // global across grid windows and islands; Insert mode and command lines
+    // retain the IME's actual character. In an island, treat it as a possible
+    // mapping/operator prefix so a following `w` remains native rather than
+    // being consumed by semantic prose navigation.
+    if (isl) islandNativeWPending = true;
     e.preventDefault();
-    isl.queueNvimInput(
-      normalPunctuation === "<" ? "<lt>" : normalPunctuation,
-    );
+    const keys = normalPunctuation === "<" ? "<lt>" : normalPunctuation;
+    if (isl) isl.queueNvimInput(keys);
+    else invoke("nvim_input", { keys });
     return;
   }
   const plain = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
