@@ -13,6 +13,7 @@ import { SessionModel } from "./session-model.js";
 import { GridView } from "./grid-view.js";
 import { RedrawScheduler } from "./redraw-scheduler.js";
 import { GridCoordinator } from "./grid-coordinator.js";
+import { IslandManager } from "./island-manager.js";
 import { byteLen, byteToCol } from "./pure/text-geometry.js";
 import { parseGuifont } from "./pure/guifont.js";
 import {
@@ -199,8 +200,15 @@ function hlCss(id) {
 
 const grids = new Map(); // gridId -> GridView
 const session = new SessionModel();
-const islands = new Map(); // winId -> Island (one CM instance per markdown window)
-let islandGridIds = new Set(); // gridIds currently rendered as an island
+const islandManager = new IslandManager({
+  session,
+  nvim,
+  createIsland: (win) => new Island(win),
+  layout,
+  reportError: jlog,
+  livePreviewDefault: () => livePreviewDefault,
+});
+const islands = islandManager.islands; // read-only access for rendering and events
 // winId -> bool: markdown-live-preview flag, from runtime/md_preview.lua's
 // `w:gnv_md_preview` (gnv://<label>/md_preview events + the winfts replay).
 // Absent -> fall back to livePreviewDefault.
@@ -295,64 +303,7 @@ function gw(id) {
   return g;
 }
 
-// A window gets a CM island only if it is markdown AND its live-preview flag is
-// on (explicit per-window value, else the configured default). Turning it off
-// drops the window back to plain grid rendering like every other window.
-
-// Mount an Island over every previewed markdown window, unmount the rest,
-// re-point any whose buffer changed. `force` re-attaches every island.
-function reconcileIslands(force = false) {
-  const desired = session.desiredIslands(livePreviewDefault);
-
-  for (const [wid, isl] of [...islands]) {
-    if (!desired.has(wid)) {
-      islands.delete(wid);
-      const b = isl.bufnr;
-      isl.destroy();
-      if (b != null) nvim.detachIsland(b).catch(() => {});
-    }
-  }
-  for (const wid of desired.keys()) {
-    const cur = islands.get(wid);
-    const wantBuf = session.bufferForWindow(wid);
-    if (!cur) {
-      const isl = new Island(wid);
-      islands.set(wid, isl);
-      attachIsland(isl);
-      const gutter = session.gutterForWindow(wid);
-      if (gutter) isl.setGutter(gutter);
-    } else if (force || (wantBuf != null && cur.bufnr !== wantBuf)) {
-      const old = cur.bufnr;
-      cur.bufnr = null;
-      if (old != null) nvim.detachIsland(old).catch(() => {});
-      attachIsland(cur);
-    }
-  }
-  islandGridIds = new Set(desired.values());
-  layout();
-}
-
-function attachIsland(isl) {
-  nvim
-    .attachIsland(isl.winId)
-    .then((snap) => {
-      if (islands.get(isl.winId) !== isl) {
-        // The Rust attach already incremented this buffer's refcount. Balance it
-        // when the island was unmounted while the request was in flight.
-        return nvim
-          .detachIsland(snap.buf)
-          .catch((e) => jlog("abandoned island_detach failed: " + e));
-      }
-      isl.bufnr = snap.buf;
-      isl.applyReset(snap);
-      layout();
-      // no md_decor trigger event has fired for this window yet; pull once.
-      nvim.refreshMarkdownDecorations().catch(() => {});
-    })
-    .catch((e) => jlog("island_attach failed: " + e));
-}
-
-const islandForGrid = (gid) => islands.get(session.windowForGrid(gid));
+const islandForGrid = (gid) => islandManager.forGrid(gid);
 
 function place(el, p) {
   el.style.left = `${p.scol * cellW + originX}px`;
@@ -1722,7 +1673,7 @@ class Island {
       this._compositionSettling = false;
     } catch (err) {
       jlog("island desync " + err);
-      reconcileIslands(true);
+      islandManager.reconcile(true);
     }
   }
   applyCursor(row, col, mode, scrolloff = this.scrolloff) {
@@ -1839,7 +1790,7 @@ class Island {
     updateImeFocus();
   }
   applyReset(m) {
-    // A reset can reuse this same Island for a new buffer (reconcileIslands
+    // A reset can reuse this same Island for a new buffer (IslandManager
     // re-attaching on a buffer switch); the new buffer's first scrollTo must
     // not be skipped just because its topline/botline/linecount happen to
     // match whatever the old buffer last scrolled to.
@@ -1885,8 +1836,8 @@ const gridCoordinator = new GridCoordinator({
   grids,
   gridFor: gw,
   islandForGrid,
-  reconcileIslands,
-  isIslandGrid: (id) => islandGridIds.has(id),
+  reconcileIslands: () => islandManager.reconcile(),
+  isIslandGrid: (id) => islandManager.gridIds.has(id),
   onColors: applyDefaultColors,
   onHighlight: (id, attr) => hlAttrs.set(id, attr),
   onModeInfo: (enabled) => {
@@ -1939,7 +1890,7 @@ function showGone(reason) {
 // cheap insurance against a stale WKWebView surface after a tab/window reveal.
 function repaintNow() {
   for (const [id, g] of grids)
-    if (!islandGridIds.has(id)) {
+    if (!islandManager.gridIds.has(id)) {
       g.fullDirty = true; // stale WKWebView surface: force a full row rebuild
       g.repaint();
     }
@@ -2029,7 +1980,7 @@ addEventListener("error", (e) => {
     nvim.on("grid", (e) => applyGridBatch(e.payload)),
     nvim.on("winft", (e) => {
       session.setWindowInfo(e.payload.win, e.payload.buf, e.payload.ft);
-      reconcileIslands();
+      islandManager.reconcile();
     }),
     nvim.on("reset", (e) => {
       for (const isl of islands.values())
@@ -2069,7 +2020,7 @@ addEventListener("error", (e) => {
     nvim.on("md_preview", (e) => {
       const { win, state } = e.payload;
       session.setPreview(win, state);
-      reconcileIslands();
+      islandManager.reconcile();
     }),
     nvim.on("win_gutter", (e) => {
       session.setGutter(e.payload);
@@ -2109,14 +2060,14 @@ addEventListener("error", (e) => {
   }
 
   // winft events fired before we were listening; replay them (with the
-  // per-window live-preview flag). reconcileIslands() then mounts an island on
+  // per-window live-preview flag). IslandManager then mounts an island on
   // every previewed markdown window.
   try {
     for (const [win, buf, ft, mdp] of await nvim.winFiletypes()) {
       session.setWindowInfo(win, buf, ft);
       if (mdp === 0 || mdp === 1) session.setPreview(win, mdp);
     }
-    reconcileIslands();
+    islandManager.reconcile();
     jlog(`winfts replayed: ${JSON.stringify([...session.windowFiletypes])}`);
   } catch (e) {
     jlog("winfts failed: " + e);
