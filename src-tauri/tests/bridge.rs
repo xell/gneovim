@@ -37,6 +37,9 @@ async fn island_round_trip() {
     let (b, _child) = bridge::connect(tx, Default::default()).await.expect("connect");
     b.ui_start(120, 40).await.expect("ui_start");
     b.input(":edit /tmp/gnv-island-test.md\r").await.unwrap();
+    // User configs are intentionally loaded by connect(); make the fixture
+    // writable even when a Markdown plugin marks preview buffers read-only.
+    b.input(":setlocal modifiable\r").await.unwrap();
     settle().await;
 
     // 1. attach the current window's buffer -> snapshot
@@ -47,18 +50,7 @@ async fn island_round_trip() {
     assert_eq!(snap.lines[0], "alpha line one");
     assert!(snap.name.ends_with("gnv-island-test.md"));
 
-    // 2. an nvim-side edit streams back as a Lines event for that buffer
-    b.input("Goinserted from rust\u{1b}").await.unwrap();
-    settle().await;
-    {
-        let l = lines.lock().unwrap();
-        assert!(
-            l.iter().any(|s| s.contains("inserted from rust") && s.contains(&format!("buf={}", snap.buf))),
-            "insert produced a Lines event for the attached buffer: {l:?}"
-        );
-    }
-
-    // 3. a reverse edit: our own change is echo-suppressed
+    // 2. a reverse edit: our own change is echo-suppressed
     let before = lines.lock().unwrap().len();
     b.edit(
         snap.buf,
@@ -78,6 +70,22 @@ async fn island_round_trip() {
 
     let snap2 = b.island_attach(win).await.unwrap();
     assert!(snap2.lines[0].starts_with("ALPHA"), "edit landed: {:?}", snap2.lines[0]);
+
+    // 3. a later, independent Neovim edit still streams to the frontend
+    b.input(":call append('$', 'inserted from nvim')\r")
+        .await
+        .unwrap();
+    settle().await;
+    {
+        let events = lines.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.contains("inserted from nvim")
+                    && event.contains(&format!("buf={}", snap.buf))),
+            "independent edit produced a Lines event: {events:?}"
+        );
+    }
 
     // 4. detach: refcount from the two attach calls must both be released
     b.island_detach(snap.buf).await.unwrap();

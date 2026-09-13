@@ -6,9 +6,9 @@
 //! forwards those to the webview and calls the `Bridge` methods for the reverse
 //! direction.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
-    atomic::{AtomicBool, AtomicI64, Ordering},
+    atomic::{AtomicBool, Ordering},
     Arc, OnceLock,
 };
 use std::time::Duration;
@@ -37,9 +37,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 // earlier offsets stay valid). The island buffer is not always the current one.
 const LUA_APPLY_EDIT: &str = r#"
   local bufnr, regions = ...
+  local ticks = {}
   for _, r in ipairs(regions) do
     vim.api.nvim_buf_set_text(bufnr, r.sr, r.sc, r.er, r.ec, r.repl)
+    ticks[#ticks + 1] = vim.api.nvim_buf_get_changedtick(bufnr)
   end
+  return ticks
 "#;
 
 // ---------------------------------------------------------------------------
@@ -157,12 +160,23 @@ pub struct OpenSpec {
 #[derive(Clone)]
 struct Shared {
     tx: UnboundedSender<BridgeEvent>,
-    /// > 0 while we apply a CM6-originated edit; its echo lines events are dropped.
-    suppress: Arc<AtomicI64>,
+    /// Changedtick protocol for distinguishing CM6 edit echoes from independent
+    /// Neovim edits without relying on scheduler timing.
+    edit_sync: Arc<std::sync::Mutex<EditSync>>,
+    /// Only one reverse edit establishes a pending changedtick range at a time.
+    edit_lock: Arc<Mutex<()>>,
     /// Grid ops accumulated since the last `flush` (multigrid renderer).
     grid_batch: Arc<std::sync::Mutex<Vec<Json>>>,
     /// Set once `ui_attach` has run, so a webview reload does not attach twice.
     ui_attached: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct EditSync {
+    /// Lines notifications wait here while the matching edit request is in flight.
+    pending: HashMap<i64, Vec<(i64, LinesPayload)>>,
+    /// Exact changedticks produced by our own nvim_buf_set_text calls.
+    suppress: HashMap<i64, HashSet<i64>>,
 }
 
 /// Decode a Neovim ext handle (window/buffer/tabpage) to its integer id.
@@ -391,10 +405,8 @@ impl Handler for NvHandler {
             }
             // [buf, changedtick, firstline, lastline, linedata, more]
             "nvim_buf_lines_event" => {
-                if self.shared.suppress.load(Ordering::SeqCst) > 0 {
-                    return;
-                }
                 let buf = args.first().and_then(ext_id).unwrap_or(-1);
+                let changedtick = args.get(1).and_then(Value::as_i64).unwrap_or(-1);
                 let firstline = args.get(2).and_then(Value::as_i64).unwrap_or(0);
                 let lastline = args.get(3).and_then(Value::as_i64).unwrap_or(-1);
                 let linedata = args
@@ -406,12 +418,27 @@ impl Handler for NvHandler {
                             .collect()
                     })
                     .unwrap_or_default();
-                let _ = self.shared.tx.send(BridgeEvent::Lines(LinesPayload {
+                let payload = LinesPayload {
                     buf,
                     firstline,
                     lastline,
                     linedata,
-                }));
+                };
+                let mut sync = self.shared.edit_sync.lock().unwrap();
+                if let Some(pending) = sync.pending.get_mut(&buf) {
+                    pending.push((changedtick, payload));
+                    return;
+                }
+                if let Some(ticks) = sync.suppress.get_mut(&buf) {
+                    if ticks.remove(&changedtick) {
+                        if ticks.is_empty() {
+                            sync.suppress.remove(&buf);
+                        }
+                        return;
+                    }
+                }
+                drop(sync);
+                let _ = self.shared.tx.send(BridgeEvent::Lines(payload));
             }
             "gnv_cursor" => {
                 let win = args.first().and_then(Value::as_i64).unwrap_or(0);
@@ -804,7 +831,8 @@ pub async fn connect(
 
     let shared = Shared {
         tx,
-        suppress: Arc::new(AtomicI64::new(0)),
+        edit_sync: Arc::new(std::sync::Mutex::new(EditSync::default())),
+        edit_lock: Arc::new(Mutex::new(())),
         grid_batch: Arc::new(std::sync::Mutex::new(Vec::new())),
         ui_attached: Arc::new(AtomicBool::new(false)),
     };
@@ -1115,6 +1143,7 @@ impl Bridge {
         if !self.bufs.lock().await.contains_key(&buf) {
             return Ok(()); // island for this buffer is gone
         }
+        let _edit_guard = self.shared.edit_lock.lock().await;
         let lua_regions: Vec<Value> = regions
             .iter()
             .map(|r| {
@@ -1133,7 +1162,12 @@ impl Bridge {
             })
             .collect();
 
-        self.shared.suppress.fetch_add(1, Ordering::SeqCst);
+        self.shared
+            .edit_sync
+            .lock()
+            .unwrap()
+            .pending
+            .insert(buf, Vec::new());
         let res = self
             .nvim
             .exec_lua(
@@ -1141,12 +1175,36 @@ impl Bridge {
                 vec![Value::from(buf), Value::Array(lua_regions)],
             )
             .await;
-        // Let trailing lines events for this edit drain, then reopen.
-        let suppress = self.shared.suppress.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(3)).await;
-            suppress.fetch_sub(1, Ordering::SeqCst);
-        });
+
+        let own_ticks: HashSet<i64> = res
+            .as_ref()
+            .ok()
+            .and_then(Value::as_array)
+            .map(|ticks| ticks.iter().filter_map(Value::as_i64).collect())
+            .unwrap_or_default();
+        let forward = {
+            let mut sync = self.shared.edit_sync.lock().unwrap();
+            let pending = sync.pending.remove(&buf).unwrap_or_default();
+            let suppress = sync.suppress.entry(buf).or_default();
+            suppress.extend(own_ticks);
+            let forward = pending
+                .into_iter()
+                .filter_map(|(tick, payload)| {
+                    if suppress.remove(&tick) {
+                        None
+                    } else {
+                        Some(payload)
+                    }
+                })
+                .collect::<Vec<_>>();
+            if suppress.is_empty() {
+                sync.suppress.remove(&buf);
+            }
+            forward
+        };
+        for payload in forward {
+            let _ = self.shared.tx.send(BridgeEvent::Lines(payload));
+        }
         res.map(|_| ()).map_err(err)
     }
 
@@ -1173,25 +1231,35 @@ impl Bridge {
                 bufs.insert(id, BufState { buf, refs: 1 });
             }
         }
-        island_snapshot(&self.nvim, win, id).await
+        match island_snapshot(&self.nvim, win, id).await {
+            Ok(snapshot) => Ok(snapshot),
+            Err(error) => {
+                // Balance the refcount established above when the snapshot
+                // cannot be delivered to its caller.
+                if let Err(detach_error) = self.island_detach(id).await {
+                    log::warn!(
+                        "failed to roll back island attach for buffer {id}: {detach_error}"
+                    );
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Drop one island's hold on `buf`; detach when the last island goes.
     pub async fn island_detach(&self, buf: i64) -> Result<(), String> {
-        let gone = {
-            let mut bufs = self.bufs.lock().await;
-            match bufs.get_mut(&buf) {
-                Some(st) if st.refs <= 1 => bufs.remove(&buf),
-                Some(st) => {
-                    st.refs -= 1;
-                    None
-                }
-                None => None,
-            }
+        let mut bufs = self.bufs.lock().await;
+        let Some(st) = bufs.get_mut(&buf) else {
+            return Ok(());
         };
-        if let Some(st) = gone {
-            let _ = st.buf.detach().await;
+        if st.refs > 1 {
+            st.refs -= 1;
+            return Ok(());
         }
+        // Keep ownership until Neovim confirms the detach. A failed request can
+        // then be retried without losing the bridge's refcount state.
+        st.buf.detach().await.map_err(err)?;
+        bufs.remove(&buf);
         Ok(())
     }
 
