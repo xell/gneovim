@@ -28,7 +28,6 @@ import {
   tableCursorCell,
   tableHighlightCells,
 } from "./pure/markdown.js";
-import { diffInserted } from "./pure/editing.js";
 import {
   keyToNvim as encodeKeyToNvim,
   normalModePunctuation,
@@ -38,7 +37,6 @@ import { imageSource as resolveImageSource } from "./pure/image-source.js";
 import { visualRanges } from "./pure/visual-ranges.js";
 import { foldRanges, overlapsRanges } from "./pure/fold-ranges.js";
 import { bufferLineEdit } from "./pure/buffer-line-edit.js";
-import { externalEditRegions } from "./pure/external-edit-regions.js";
 import { semanticWordTarget as findSemanticWordTarget } from "./pure/semantic-word.js";
 import {
   headingMarkerRanges,
@@ -49,6 +47,7 @@ import {
 import { CursorScroller } from "./cursor-scroller.js";
 import { GutterController } from "./gutter-controller.js";
 import { IslandInputQueue } from "./island-input-queue.js";
+import { IslandInputController } from "./island-input-controller.js";
 
 // this webview's window label; event names are per-window (gnv://<label>/<kind>)
 // because emit_to() broadcasts to every webview in this app.
@@ -1004,7 +1003,16 @@ class Island {
       winId,
       log: jlog,
     });
-    this._compositionSettling = false;
+    this.inputController = new IslandInputController({
+      client: nvim,
+      inputQueue: this.inputQueue,
+      fromNvim,
+      getBuffer: () => this.bufnr,
+      getCursor: () => this._nvimCursor,
+      log: jlog,
+      requestFrame: (callback) => requestAnimationFrame(callback),
+      setTimer: (callback, delay) => setTimeout(callback, delay),
+    });
     this.el = document.createElement("div");
     this.el.className = "island";
     this.el.hidden = true;
@@ -1016,7 +1024,6 @@ class Island {
       requestFrame: (callback) => requestAnimationFrame(callback),
       cancelFrame: (id) => cancelAnimationFrame(id),
     });
-    this.compose = null; // { text, sel } snapshot while an IME composition runs
     this.view = new EditorView({
       doc: "",
       // No basicSetup. Neovim is the sole editor for a focused island, so CM
@@ -1040,49 +1047,24 @@ class Island {
         islandFoldField,
         this.gutterController.extension(),
         this.editableComp.of(EDITABLE_ON),
-        EditorView.updateListener.of((u) => this.onUpdate(u)),
-        EditorView.updateListener.of((u) => this.onExternalSelection(u)),
+        EditorView.updateListener.of((u) =>
+          this.inputController.onDocumentUpdate(u),
+        ),
+        EditorView.updateListener.of((u) =>
+          this.inputController.onSelectionUpdate(u),
+        ),
         EditorView.updateListener.of((u) => this.gutterController.onUpdate(u)),
         EditorView.domEventHandlers({
-          mousedown: (ev, v) => this.onMousedown(ev, v),
-          compositionstart: () => {
-            this.compose = {
-              text: this.view.state.doc.toString(),
-              sel: this.view.state.selection.main.head,
-            };
-            return false;
-          },
-          compositionend: (ev) => {
-            const committed = ev.data;
-            requestAnimationFrame(() => this.onComposeEnd(committed));
-            return false;
-          },
-          beforeinput: (ev) => {
-            // Safari can omit compositionend. CodeMirror recognizes the final
-            // insertText as its fallback completion signal; use that same
-            // signal after CM has finished reconciling its DOM observation.
-            if (this.compose && ev.inputType === "insertText") {
-              const committed = ev.data;
-              setTimeout(() => this.onComposeEnd(committed), 30);
-            } else if (
-              !this.compose &&
-              ev.inputType === "insertText" &&
-              ev.data
-            ) {
-              // Some macOS input sources emit full-width punctuation as a
-              // direct insertText with no composition. If CM accepts that DOM
-              // edit, onUpdate must use nvim_buf_set_text, which cannot advance
-              // Neovim's insert cursor. Route it as keyboard input instead.
-              ev.preventDefault();
-              this.queueNvimInput(ev.data.replace(/</g, "<lt>"));
-              return true;
-            }
-            return false;
-          },
+          mousedown: (ev, v) => this.inputController.onMousedown(ev, v),
+          compositionstart: () => this.inputController.onCompositionStart(),
+          compositionend: (ev) =>
+            this.inputController.onCompositionEnd(ev.data),
+          beforeinput: (ev) => this.inputController.onBeforeInput(ev),
         }),
       ],
       parent: this.el,
     });
+    this.inputController.attach(this.view);
     this.gutterController.attach(this.view);
     this.cursorScroller = new CursorScroller({
       view: this.view,
@@ -1354,43 +1336,6 @@ class Island {
     this.view.destroy();
     this.el.remove();
   }
-  onUpdate(u) {
-    if (!u.docChanged) return;
-    if (!u.transactions.some((tr) => !tr.annotation(fromNvim))) return;
-    // leave IME composition alone: forwarding it (and the buffer echo bouncing
-    // back) aborts the composition. onComposeEnd handles the committed text.
-    if (
-      this.compose ||
-      u.transactions.some((tr) => tr.isUserEvent("input.type.compose"))
-    )
-      return;
-    const regions = externalEditRegions(u.startState.doc, u.changes);
-    if (this.bufnr != null)
-      nvim.edit(this.bufnr, regions).catch((e) =>
-        jlog("external island edit failed: " + e),
-      );
-  }
-  onExternalSelection(u) {
-    // A mouse placement is already synchronized by onMousedown. This is the
-    // separate path used by desktop editors through AXSelectedTextRange. Only
-    // a collapsed selection is safe to represent with Neovim's one cursor.
-    if (
-      this.compose ||
-      this.view.composing ||
-      this._compositionSettling ||
-      u.docChanged ||
-      !u.selectionSet ||
-      u.transactions.some((tr) => tr.annotation(fromNvim) || tr.isUserEvent("select.pointer"))
-    )
-      return;
-    const selection = u.state.selection.main;
-    if (!selection.empty) return;
-    const line = u.state.doc.lineAt(selection.head);
-    const row = line.number - 1;
-    const col = byteLen(line.text.slice(0, selection.head - line.from));
-    if (this._nvimCursor?.row === row && this._nvimCursor.col === col) return;
-    this.queueNvimCursor(row, col);
-  }
   queueNvimCursor(row, col) {
     this.inputQueue.cursor(row, col);
   }
@@ -1399,31 +1344,6 @@ class Island {
   }
   semanticWordTarget() {
     return findSemanticWordTarget(this.view.state.doc, this._nvimCursor);
-  }
-  onComposeEnd(committed) {
-    const snap = this.compose;
-    this.compose = null;
-    if (!snap) return;
-    const now = this.view.state.doc.toString();
-    const text = committed || diffInserted(snap.text, now);
-    // Keep CodeMirror's settled composition in place. Neovim's line echo will
-    // be a no-op when it inserted the same text, or a minimal correction when a
-    // mapping changed it. Rolling the local text back first made CM measure two
-    // opposite document changes, causing the visible completion-time shake.
-    if (text) {
-      this._compositionSettling = true;
-      this.queueNvimInput(text.replace(/</g, "<lt>"));
-    }
-  }
-  onMousedown(ev, v) {
-    const pos = v.posAtCoords({ x: ev.clientX, y: ev.clientY });
-    if (pos == null) return false;
-    const line = v.state.doc.lineAt(pos);
-    this.queueNvimCursor(
-      line.number - 1,
-      byteLen(line.text.slice(0, pos - line.from)),
-    );
-    return false;
   }
   applyBufLines(a, lastline, linedata) {
     const doc = this.view.state.doc;
@@ -1439,7 +1359,7 @@ class Island {
       // Re-seat from the authoritative byte position after every line echo so
       // WebKit starts the next inline composition at the visible nvim cursor.
       this.syncSelectionToCursor();
-      this._compositionSettling = false;
+      this.inputController.settleComposition();
     } catch (err) {
       jlog("island desync " + err);
       islandManager.reconcile(true);
@@ -1492,7 +1412,7 @@ class Island {
   }
   syncSelectionToCursor() {
     const cursor = this._nvimCursor;
-    if (!cursor || this.compose || this.view.composing) return;
+    if (!cursor || this.inputController.isComposing()) return;
     const doc = this.view.state.doc;
     const line = doc.line(Math.min(cursor.row + 1, doc.lines));
     const anchor = Math.min(
