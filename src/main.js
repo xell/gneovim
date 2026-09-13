@@ -10,6 +10,7 @@ import { listen as tauriListen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { NvimClient } from "./nvim-client.js";
 import { SessionModel } from "./session-model.js";
+import { GridStore } from "./grid-store.js";
 import { byteLen, byteToCol } from "./pure/text-geometry.js";
 import { parseGuifont } from "./pure/guifont.js";
 import {
@@ -199,9 +200,7 @@ function hlCss(id) {
 class GridWin {
   constructor(id) {
     this.id = id;
-    this.cols = 0;
-    this.rows = 0;
-    this.cells = []; // rows of [char, hlId]
+    this.store = new GridStore();
     this.el = document.createElement("div");
     this.el.className = "grid gridwin";
     this.el.dataset.grid = id;
@@ -213,48 +212,33 @@ class GridWin {
     this.dirtyRows = new Set();
     this.fullDirty = true;
   }
+  get cols() {
+    return this.store.cols;
+  }
+  get rows() {
+    return this.store.rows;
+  }
+  get cells() {
+    return this.store.cells;
+  }
   resize(w, h) {
     // grid_resize does NOT imply a clear: Neovim keeps the overlapping cells and
     // only sends grid_line for what changed. Blanking here leaves stale rows
     // empty forever after a window shrinks and grows back (q:, devtools, ...).
-    const old = this.cells;
-    this.cells = Array.from({ length: h }, (_, r) =>
-      Array.from({ length: w }, (_, c) =>
-        old[r] && old[r][c] ? old[r][c] : [" ", 0],
-      ),
-    );
-    this.cols = w;
-    this.rows = h;
+    this.store.resize(w, h);
     this.fullDirty = true; // row count / width changed: rebuild all rows
   }
   clear() {
-    this.cells = Array.from({ length: this.rows }, () =>
-      Array.from({ length: this.cols }, () => [" ", 0]),
-    );
+    this.store.clear();
     this.fullDirty = true;
   }
   line(row, col, cells) {
-    const r = this.cells[row];
-    if (!r) return;
+    if (!this.store.line(row, col, cells)) return;
     this.dirtyRows.add(row);
-    let hl = 0;
-    let c = col;
-    for (const [text, cellHl, repeat] of cells) {
-      if (cellHl != null) hl = cellHl;
-      const n = repeat ?? 1;
-      for (let k = 0; k < n && c < this.cols; k++) r[c++] = [text, hl];
-    }
   }
-  scroll({ top, bot, left, right, rows }) {
-    if (!rows || bot <= top) return;
-    const move = (from, to) => {
-      for (let c = left; c < right; c++) this.cells[to][c] = this.cells[from][c];
-    };
-    if (rows > 0) {
-      for (let r = top + rows; r < bot; r++) move(r, r - rows);
-    } else {
-      for (let r = bot - 1 + rows; r >= top; r--) move(r, r - rows);
-    }
+  scroll(spec) {
+    if (!this.store.scroll(spec)) return;
+    const { top, bot, left, right, rows } = spec;
     // Full-width scroll: move the row nodes to match the cell shift so the
     // scrolled text is never re-serialized. Only the vacated band needs
     // repainting (Neovim's following grid_line fills it; mark it dirty so a
