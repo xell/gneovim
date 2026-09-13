@@ -44,12 +44,15 @@ That is one half of what showed up as the whole window "shaking" on plain `j` / 
 Matching the line's own `line-height` exactly made it worse, not better (the mismatch just moved to every line instead of only empty ones); a shorter fixed height had the same problem in the other direction.
 `position: absolute` removes the widget from the line's flow entirely, so its own height can never affect the line's measured height regardless of what it is.
 
-The other half was `Island.scrollTo`, called from the `win_viewport` grid op unconditionally on every redraw touching the window, including a bare cursor move that never actually scrolls (`win_viewport` carries `curline` / `curcol` too, so Neovim resends the same `topline` / `botline` on a plain `j` / `k`).
-`EditorView.scrollIntoView` is not a no-op just because its target is already visible: it still re-measures and re-aligns.
-When that re-measure lands in the same tick as the cursor widget arriving at or leaving the exact line being aligned to, `topline` itself, it can compute against a height CodeMirror has not finished settling into: one small corrective scroll, then a snap back.
-That is why only the very top line of a long, already-scrolled buffer shook, never the middle: `scrollTo` always re-aligns to `topline`, so only a decoration change landing on `topline` itself can race it.
-Fixed by having `scrollTo` track the last `{topline, botline, linecount}` it saw and skip the dispatch entirely when nothing about the viewport actually changed, removing the redundant re-align the race depended on.
-Reset that tracked state in `applyReset`, since a buffer switch reuses the same `Island` and must not skip its new buffer's first real scroll just because the numbers happen to coincide with the old buffer's last ones.
+The other half was aligning CodeMirror directly to every `win_viewport` update.
+Neovim measures viewport positions in fixed grid rows, while Markdown headings, wrapped prose, code blocks, and images give CodeMirror nonuniform measured heights.
+`EditorView.scrollIntoView` also remeasures and realigns even when its target is already visible, so applying it to repeated viewport notifications raced cursor decorations and produced a corrective scroll followed by a snap back.
+
+The preview now owns visual scrolling through `keepPositionInView`.
+It measures the actual cursor rectangle, compares it with the CodeMirror scroller, and changes `scrollTop` only when the cursor crosses the pixel scrolloff margin.
+`Island.scrollTo` no longer dispatches a CodeMirror scroll.
+It retains a deduplicated `{topline, botline, linecount}` key as model-level viewport state, preventing a future unconditional viewport alignment from being reintroduced accidentally.
+`applyReset` clears that key when the same Island object is reused for a new buffer.
 
 ## Buffer sync: minimal edits
 
@@ -69,16 +72,11 @@ The island renders `number` and `relativenumber` through a `lineNumbers()` in a 
 `numberwidth` sets a `--gutter-numw` CSS var used as the column min width.
 `signcolumn` and `foldcolumn` are carried in the payload but not painted yet; they get content with the display bridge.
 
-## End of buffer scroll
+## Document-edge scrolling
 
-The island box is `p.h` monospace cells tall, where `p.h` is the Neovim window's row count, but CodeMirror lines are taller (proportional serif), so the box fits roughly `0.66 * p.h` lines.
-Mid buffer this is invisible: Neovim keeps scrolling and re-sends `topline`, the island follows.
-At the end of the buffer Neovim stops scrolling once it believes the last line is on the last row, and pinning that `topline` to the top of the box left the last `~0.34 * p.h` lines clipped and unreachable (the count tracked `p.h`, so a split changed it).
-
-`Island.scrollTo` takes `botline` and `linecount` from `win_viewport`.
-When `botline >= linecount` (Neovim is already showing the end of the buffer) it sits the last line on the box bottom instead of pinning `topline`, so every trailing line that fits is shown.
-Away from the end, `topline` is pinned to the top as before.
-The one accepted cost is a jump of about `p.h - capacity` lines at the single scroll step where you cross into or out of the end zone.
+`keepPositionInView` adds equal block padding to the CodeMirror content based on Neovim's `scrolloff`, capped at half the visible scroller height.
+This gives the real scroller room beyond both document edges, allowing the first and last cursor lines to occupy the same pixel scrolloff zone as an interior line.
+Without that padding, the browser clamps `scrollTop` at zero or its maximum and makes scrolloff appear to stop working near the beginning and end of the buffer.
 
 ## The display bridge (`runtime/md_decor.lua`)
 
