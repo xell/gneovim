@@ -111,7 +111,6 @@ export class IslandInputController {
     // desktop editors using AXSelectedTextRange.
     if (
       this.composition ||
-      this.view.composing ||
       this.compositionSettling ||
       update.docChanged ||
       !update.selectionSet ||

@@ -1,6 +1,15 @@
 import { ChangeSet, EditorSelection, Text } from "@codemirror/state";
 import { describe, expect, it, vi } from "vitest";
 import { IslandInputController } from "./island-input-controller.js";
+import { IslandInputQueue } from "./island-input-queue.js";
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 function fixture({ buffer = 8, cursor = null } = {}) {
   const frames = [];
@@ -128,5 +137,72 @@ describe("IslandInputController", () => {
       },
     );
     expect(inputQueue.cursor).toHaveBeenCalledWith(0, 7);
+  });
+
+  it("does not forward selection changes during an owned composition", () => {
+    const { controller, fromNvim, inputQueue, view } = fixture();
+    controller.onCompositionStart();
+    controller.onSelectionUpdate({
+      docChanged: false,
+      selectionSet: true,
+      state: {
+        doc: view.state.doc,
+        selection: EditorSelection.single(2),
+      },
+      transactions: [transaction(fromNvim)],
+    });
+    expect(inputQueue.cursor).not.toHaveBeenCalled();
+  });
+
+  it("orders a Grammarly AX selection before its posted key", async () => {
+    const cursorRequest = deferred();
+    const client = {
+      cursorSet: vi.fn(() => cursorRequest.promise),
+      edit: vi.fn(() => Promise.resolve()),
+      input: vi.fn(() => Promise.resolve()),
+    };
+    const inputQueue = new IslandInputQueue({
+      client,
+      winId: 12,
+      log: vi.fn(),
+    });
+    const fromNvim = {};
+    const doc = Text.of(["ok", "ADHD people"]);
+    const view = {
+      // WebKit may leave this advisory flag set after its owned composition
+      // lifecycle has ended. It must not suppress a later AX cursor placement.
+      composing: true,
+      state: {
+        doc,
+        selection: EditorSelection.single(7),
+      },
+    };
+    const controller = new IslandInputController({
+      client,
+      inputQueue,
+      fromNvim,
+      getBuffer: () => 5,
+      getCursor: () => ({ row: 0, col: 2 }),
+      log: vi.fn(),
+      requestFrame: vi.fn(),
+      setTimer: vi.fn(),
+    });
+    controller.attach(view);
+
+    controller.onSelectionUpdate({
+      docChanged: false,
+      selectionSet: true,
+      state: view.state,
+      transactions: [transaction(fromNvim)],
+    });
+    inputQueue.input(",");
+    await Promise.resolve();
+
+    expect(client.cursorSet).toHaveBeenCalledWith(12, 1, 4);
+    expect(client.input).not.toHaveBeenCalled();
+
+    cursorRequest.resolve();
+    await inputQueue.pending;
+    expect(client.input).toHaveBeenCalledWith(",");
   });
 });

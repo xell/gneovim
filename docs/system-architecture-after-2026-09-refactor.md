@@ -2,9 +2,9 @@
 
 ## Purpose and status
 
-This document is the current architectural guide to gneovim after the refactoring described in `architecture-review-2026-09.md`. It explains the running system, identifies the modules that own important state and behavior, compares the current codebase with the previous structure, and preserves the critical information scattered through the older notes in this directory.
+This document is the current architectural guide to gneovim after the refactoring described in `architecture-review-2026-09.md`. It explains the running system, identifies the modules that own important state and behaviour, compares the current codebase with the previous structure, and preserves the critical information scattered through the older notes in this directory.
 
-The refactor was intentionally behavior preserving. It did not add, remove, or rename a Tauri command, Tauri event, Neovim notification, configuration option, editor feature, or visible rendering feature. The main change is that responsibilities which previously lived together in `src/main.js` now have explicit owners and tests.
+The refactor was intentionally behaviour-preserving. It did not add, remove, or rename a Tauri command, Tauri event, Neovim notification, configuration option, editor feature, or visible rendering feature. The main change is that responsibilities which previously lived together in `src/main.js` now have explicit owners and tests.
 
 The final automated baseline at completion is:
 
@@ -203,7 +203,7 @@ CodeMirror intentionally has no general editing keymap, history, completion, bra
 
 IME marked text is the narrow exception. `IslandInputController` lets WebKit and CodeMirror hold the temporary composition, sends the committed Unicode text once through the ordered input queue, and waits for Neovim's buffer echo before resuming external selection synchronization. Safari's missing `compositionend` fallback and direct `insertText` punctuation path remain explicit.
 
-Accessibility cursor placement, pointer placement, and subsequent keys share `IslandInputQueue`, so Neovim sees the cursor request before the correction or typed key. UTF 8 byte columns and CodeMirror UTF 16 positions are converted only through the shared text geometry helpers.
+Accessibility cursor placement, pointer placement, and subsequent keys share `IslandInputQueue`, so Neovim sees the cursor request before the correction or typed key. An owned IME composition snapshot and its post-commit settling interval suppress Accessibility synchronization, but CodeMirror's broad `view.composing` flag does not suppress it by itself: WebKit can leave that advisory flag set after composition has ended, and doing so would discard Grammarly's later AX cursor placement. UTF 8 byte columns and CodeMirror UTF 16 positions are converted only through the shared text geometry helpers.
 
 #### Decorations and presentation
 
@@ -309,7 +309,7 @@ This section gives one entry for every other note that existed in `docs/` at the
 
 **Topic to preserve:** Neovim owns ordinary editing; WebKit temporarily owns IME marked text; committed text goes once through `nvim_input`; direct `insertText` punctuation must also use input so Neovim advances its cursor; grid and command line IME use the hidden textarea; all Neovim columns are UTF 8 bytes while CodeMirror positions are UTF 16 units. The failed approaches and manual regression checklist remain valuable.
 
-**Critical changes or cautions:** Island IME and Accessibility methods moved to `IslandInputController`; ordered requests moved to `IslandInputQueue`; semantic word targeting moved to `src/pure/semantic-word.js`; coordinate conversion moved to `src/pure/text-geometry.js`. References to `onComposeEnd`, `onUpdate`, `onExternalSelection`, or composition fields directly on `Island` are stale names, not changed behavior.
+**Critical changes or cautions:** Island IME and Accessibility methods moved to `IslandInputController`; ordered requests moved to `IslandInputQueue`; semantic word targeting moved to `src/pure/semantic-word.js`; coordinate conversion moved to `src/pure/text-geometry.js`. References to `onComposeEnd`, `onUpdate`, `onExternalSelection`, or composition fields directly on `Island` are stale names, not changed behavior. The old note's instruction to reject every Accessibility selection while `EditorView.composing` is true is too broad: only the controller's owned composition snapshot and post-commit settling state are authoritative guards, because WebKit can leave the view flag stale.
 
 ### `macos-predictive-text-and-autocorrect.md`
 
