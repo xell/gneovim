@@ -45,6 +45,24 @@ const LUA_APPLY_EDIT: &str = r#"
   return ticks
 "#;
 
+const LUA_ISLAND_SNAPSHOT: &str = r#"
+  local win, expected_buf = ...
+  return vim.api.nvim_win_call(win, function()
+    local buf = vim.api.nvim_win_get_buf(win)
+    if buf ~= expected_buf then
+      error("window buffer changed during island attach")
+    end
+    return {
+      vim.api.nvim_buf_get_lines(buf, 0, -1, false),
+      vim.fn.line("."),
+      vim.fn.col("."),
+      vim.fn.mode(),
+      vim.wo.scrolloff,
+      vim.api.nvim_buf_get_name(buf),
+    }
+  end)
+"#;
+
 // ---------------------------------------------------------------------------
 // Wire payloads
 // ---------------------------------------------------------------------------
@@ -701,28 +719,34 @@ impl Handler for NvHandler {
 /// CodeMirror. Cursor is read from `win` specifically (not the current window).
 /// Columns are byte offsets, matching extmarks and `nvim_win_set_cursor`.
 async fn island_snapshot(nvim: &Nvim, win: i64, id: i64) -> Result<ResetPayload, String> {
-    let buf = Buffer::new(Value::from(id), nvim.clone());
-    let lines = buf.get_lines(0, -1, false).await.map_err(err)?;
-    let cur = nvim
+    let snapshot = nvim
         .exec_lua(
-            "local w = ...; return vim.api.nvim_win_call(w, function() \
-             return { vim.fn.line('.'), vim.fn.col('.'), vim.wo.scrolloff } end)",
-            vec![Value::from(win)],
+            LUA_ISLAND_SNAPSHOT,
+            vec![Value::from(win), Value::from(id)],
         )
         .await
         .map_err(err)?;
-    let arr = cur.as_array().ok_or("cursor lua shape")?;
-    let row = arr.first().and_then(Value::as_i64).unwrap_or(1) - 1;
-    let col = arr.get(1).and_then(Value::as_i64).unwrap_or(1) - 1;
-    let scrolloff = arr.get(2).and_then(Value::as_i64).unwrap_or(0);
-    let mode = nvim
-        .eval("mode()")
-        .await
-        .map_err(err)?
-        .as_str()
+    let fields = snapshot.as_array().ok_or("island snapshot lua shape")?;
+    let lines = fields
+        .first()
+        .and_then(Value::as_array)
+        .ok_or("island snapshot lines shape")?
+        .iter()
+        .map(|line| line.as_str().unwrap_or("").to_string())
+        .collect();
+    let row = fields.get(1).and_then(Value::as_i64).unwrap_or(1) - 1;
+    let col = fields.get(2).and_then(Value::as_i64).unwrap_or(1) - 1;
+    let mode = fields
+        .get(3)
+        .and_then(Value::as_str)
         .unwrap_or("n")
         .to_string();
-    let name = buf.get_name().await.unwrap_or_default();
+    let scrolloff = fields.get(4).and_then(Value::as_i64).unwrap_or(0);
+    let name = fields
+        .get(5)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
 
     Ok(ResetPayload {
         buf: id,
