@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test": "vitest run",
     "preview": "vite preview",
     "tauri": "tauri",
     "release": "osascript -e 'if application \"gneovim\" is running then quit application \"gneovim\"' >/dev/null 2>&1; sleep 1; npm run tauri build -- --bundles app && bash scripts/mac-glass-icon.sh src-tauri/target/release/bundle/macos/gneovim.app && rm -rf /Applications/gneovim.app && ditto src-tauri/target/release/bundle/macos/gneovim.app /Applications/gneovim.app && (xattr -dr com.apple.quarantine /Applications/gneovim.app >/dev/null 2>&1 || true)"
@@ -20,7 +21,8 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",
-    "vite": "^7.3.6"
+    "vite": "^7.3.6",
+    "vitest": "^3.2.4"
   },
   "allowScripts": {
     "fsevents@2.3.3": true,

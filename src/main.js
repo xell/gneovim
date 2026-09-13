@@ -8,6 +8,21 @@ import { markdown } from "@codemirror/lang-markdown";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { byteLen, byteToCol } from "./pure/text-geometry.js";
+import { parseGuifont } from "./pure/guifont.js";
+import {
+  imageLabel,
+  tableAlign,
+  tableCells,
+  tableCursorCell,
+  tableHighlightCells,
+} from "./pure/markdown.js";
+import { diffInserted, minimalEdit } from "./pure/editing.js";
+import {
+  keyToNvim as encodeKeyToNvim,
+  normalModePunctuation,
+} from "./pure/keymap.js";
+import { screenMetrics as calculateScreenMetrics } from "./pure/layout.js";
 
 // this webview's window label; event names are per-window (gnv://<label>/<kind>)
 // because emit_to() broadcasts to every webview in this app.
@@ -16,20 +31,6 @@ const winLabel = currentWin.label;
 const ev = (kind) => `gnv://${winLabel}/${kind}`;
 
 const viewportEl = document.getElementById("viewport");
-const te = new TextEncoder();
-const byteLen = (s) => te.encode(s).length;
-// Inverse of byteLen: the UTF-16 offset into `s` at byte column `byte`. Neovim
-// extmark / cursor columns are byte offsets; CodeMirror positions are UTF-16.
-function byteToCol(s, byte) {
-  let b = 0;
-  for (let i = 0; i < s.length; i++) {
-    if (b >= byte) return i;
-    const c = s.codePointAt(i);
-    b += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
-    if (c >= 0x10000) i++; // surrogate pair: skip the low surrogate
-  }
-  return s.length;
-}
 
 // mirror the webview console into the app log (the webview has no visible one)
 const jlog = (m) => invoke("js_log", { msg: String(m) }).catch(() => {});
@@ -84,20 +85,6 @@ function measureCell() {
   viewportEl.style.setProperty("--cell-h", cellH + "px");
 }
 
-// Parse `guifont` ("Family:h14,Fallback:h13" ...) -> { family, size } from the
-// first entry. Neovim does not validate it (no built-in GUI), so anything goes.
-function parseGuifont(s) {
-  const first = (s || "").split(",")[0].trim();
-  if (!first) return null;
-  const parts = first.split(":");
-  const family = parts[0].replace(/\\ /g, " ").replace(/_/g, " ").trim();
-  let size = null;
-  for (const p of parts.slice(1)) {
-    const m = /^h([\d.]+)$/.exec(p);
-    if (m) size = parseFloat(m[1]);
-  }
-  return { family, size };
-}
 function applyGuiOptRaw(name, value) {
   const root = document.documentElement.style;
   if (name === "guifont") {
@@ -1019,15 +1006,6 @@ function imageSource(url, bufferName) {
   }
 }
 
-function imageLabel(alt) {
-  const size = /^(.*)\|([1-9]\d*)$/.exec(alt);
-  if (!size) return { alt, caption: alt, width: null };
-  const width = Number(size[2]);
-  return Number.isSafeInteger(width)
-    ? { alt: size[1], caption: `${size[1]} (${width}px)`, width }
-    : { alt, caption: alt, width: null };
-}
-
 function imageDecorations(doc, bufferName, cursor) {
   const ranges = [];
   for (let number = 1; number <= doc.lines; number++) {
@@ -1081,95 +1059,6 @@ const markdownImageField = StateField.define({
   },
   provide: (field) => EditorView.decorations.from(field, (value) => value.deco),
 });
-
-function tableCells(text) {
-  if (!text.includes("|")) return null;
-  let row = text.trim();
-  if (row.startsWith("|")) row = row.slice(1);
-  if (row.endsWith("|")) row = row.slice(0, -1);
-  const cells = [];
-  let cell = "";
-  let escaped = false;
-  for (const ch of row) {
-    if (escaped) {
-      cell += ch;
-      escaped = false;
-    } else if (ch === "\\") escaped = true;
-    else if (ch === "|") {
-      cells.push(cell.trim());
-      cell = "";
-    } else cell += ch;
-  }
-  if (escaped) cell += "\\";
-  cells.push(cell.trim());
-  return cells;
-}
-
-// Locate a CodeMirror character offset in a source row within the text that
-// the corresponding HTML cell displays. Markdown's optional outer pipes and
-// padding are not displayed; an escaped character occupies one display slot.
-function tableCursorCell(text, column) {
-  let start = 0;
-  let end = text.length;
-  while (start < end && /\s/.test(text[start])) start++;
-  while (end > start && /\s/.test(text[end - 1])) end--;
-  if (text[start] === "|") start++;
-  if (text[end - 1] === "|") end--;
-
-  let cell = 0;
-  let cellStart = start;
-  let escaped = false;
-  const finishCell = (cellEnd) => {
-    let visibleStart = cellStart;
-    let visibleEnd = cellEnd;
-    while (visibleStart < visibleEnd && /\s/.test(text[visibleStart])) visibleStart++;
-    while (visibleEnd > visibleStart && /\s/.test(text[visibleEnd - 1])) visibleEnd--;
-    if (column <= visibleStart) return { cell, offset: 0 };
-    let offset = 0;
-    for (let i = visibleStart; i < Math.min(column, visibleEnd); i++) {
-      if (text[i] === "\\" && i + 1 < visibleEnd) i++;
-      offset++;
-    }
-    return { cell, offset };
-  };
-  for (let i = start; i <= end; i++) {
-    const boundary = i === end || (!escaped && text[i] === "|");
-    if (boundary) {
-      if (column <= i || i === end) return finishCell(i);
-      cell++;
-      cellStart = i + 1;
-    }
-    if (text[i] === "\\" && !escaped) escaped = true;
-    else escaped = false;
-  }
-  return { cell, offset: 0 };
-}
-
-function tableAlign(cells) {
-  const align = [];
-  for (const cell of cells) {
-    const spec = cell.trim();
-    if (!/^:?-{3,}:?$/.test(spec)) return null;
-    align.push(spec.startsWith(":") && spec.endsWith(":") ? "center" : spec.endsWith(":") ? "right" : "left");
-  }
-  return align;
-}
-
-function tableHighlightCells(doc, firstRow, lastRow, highlights) {
-  const out = [];
-  for (const [row, sc, ec, group] of highlights) {
-    if (row < firstRow || row > lastRow || row === firstRow + 1) continue;
-    const line = doc.line(row + 1);
-    const start = byteToCol(line.text, sc);
-    const end = byteToCol(line.text, ec);
-    const from = tableCursorCell(line.text, start);
-    const to = tableCursorCell(line.text, end);
-    if (from.cell !== to.cell) continue;
-    const displayRow = row === firstRow ? 0 : row - firstRow - 1;
-    out.push([displayRow, from.cell, from.offset, Math.max(1, to.offset - from.offset), group]);
-  }
-  return out;
-}
 
 function tableDecorations(doc, cursor, guardRow, highlights = []) {
   const ranges = [];
@@ -1399,20 +1288,6 @@ const nvimCursorField = StateField.define({
   },
   provide: (f) => EditorView.decorations.from(f, (v) => v.deco),
 });
-
-// The run of text present in `b` but not `a` (common prefix + suffix removed).
-function diffInserted(a, b) {
-  let p = 0;
-  while (p < a.length && p < b.length && a[p] === b[p]) p++;
-  let s = 0;
-  while (
-    s < a.length - p &&
-    s < b.length - p &&
-    a[a.length - 1 - s] === b[b.length - 1 - s]
-  )
-    s++;
-  return b.slice(p, b.length - s);
-}
 
 // Non-editable content is not focusable on its own; the tabindex keeps it the
 // keyboard's target so keydown still reaches the global nvim_input path.
@@ -1987,19 +1862,10 @@ class Island {
     // edit (common prefix + suffix removed) so decorations outside the actual
     // change map through untouched and do not flash / reflow the line.
     const cur = doc.sliceString(from, to);
-    let p = 0;
-    const mp = Math.min(cur.length, insert.length);
-    while (p < mp && cur.charCodeAt(p) === insert.charCodeAt(p)) p++;
-    let s = 0;
-    const ms = Math.min(cur.length - p, insert.length - p);
-    while (
-      s < ms &&
-      cur.charCodeAt(cur.length - 1 - s) === insert.charCodeAt(insert.length - 1 - s)
-    )
-      s++;
-    from += p;
-    to -= s;
-    insert = insert.slice(p, insert.length - s);
+    const edit = minimalEdit(cur, insert);
+    from += edit.from;
+    to = from - edit.from + edit.to;
+    insert = edit.insert;
     try {
       if (from !== to || insert) this.tx({ changes: { from, to, insert } });
       // Cursor and buffer notifications are independent. A multibyte cursor can
@@ -2422,12 +2288,7 @@ const MIN_PAD_X = 4; // minimum left/right breathing room, px
 // originX is the left margin; every grid is placed at scol*cellW + originX.
 function screenMetrics() {
   const el = document.documentElement;
-  const availW = el.clientWidth;
-  const availH = el.clientHeight;
-  const cols = Math.max(20, Math.floor((availW - 2 * MIN_PAD_X) / cellW));
-  const rows = Math.max(4, Math.floor(availH / cellH));
-  const padX = Math.max(MIN_PAD_X, Math.round((availW - cols * cellW) / 2));
-  return { cols, rows, padX };
+  return calculateScreenMetrics(el.clientWidth, el.clientHeight, cellW, cellH, MIN_PAD_X);
 }
 function applyScreen(m) {
   originX = m.padX;
@@ -2635,39 +2496,6 @@ addEventListener("error", (e) => {
 // ---------------------------------------------------------------------------
 // keyboard -> nvim_input
 // ---------------------------------------------------------------------------
-const NAMED = {
-  Enter: "CR",
-  Backspace: "BS",
-  Tab: "Tab",
-  Escape: "Esc",
-  Delete: "Del",
-  ArrowUp: "Up",
-  ArrowDown: "Down",
-  ArrowLeft: "Left",
-  ArrowRight: "Right",
-  Home: "Home",
-  End: "End",
-  PageUp: "PageUp",
-  PageDown: "PageDown",
-  Insert: "Insert",
-  " ": "Space",
-  Help: "Help",
-  Undo: "Undo",
-};
-const MOD_ONLY = new Set([
-  "Shift",
-  "Control",
-  "Alt",
-  "Meta",
-  "CapsLock",
-  "Dead",
-  "Unidentified",
-  "Process",
-  "AltGraph",
-  "Fn",
-  "FnLock",
-]);
-
 // from config [input] option_is_meta; Option+<key> -> <M-...> instead of é/•/…
 let optionIsMeta = true;
 // from config [input] block_ime_in_normal_mode; islands go non-editable outside
@@ -2676,39 +2504,6 @@ let blockImeInNormalMode = true;
 // from config [input] forward_cmd_keys; send Cmd+<key> to nvim as <D-...>
 let forwardCmdKeys = false;
 
-// physical-key -> character, to recover the key when Option composed it away
-const CODE_CHAR = {
-  Minus: "-",
-  Equal: "=",
-  BracketLeft: "[",
-  BracketRight: "]",
-  Backslash: "\\",
-  Semicolon: ";",
-  Quote: "'",
-  Backquote: "`",
-  Comma: ",",
-  Period: ".",
-  Slash: "/",
-  Space: " ",
-};
-const SHIFT_CODE_CHAR = {
-  Minus: "_",
-  Equal: "+",
-  BracketLeft: "{",
-  BracketRight: "}",
-  Backslash: "|",
-  Semicolon: ":",
-  Quote: '"',
-  Backquote: "~",
-  Comma: "<",
-  Period: ">",
-  Slash: "?",
-};
-function normalModePunctuation(e) {
-  if (e.metaKey || e.ctrlKey || e.altKey) return null;
-  if (!Object.hasOwn(SHIFT_CODE_CHAR, e.code)) return null;
-  return (e.shiftKey ? SHIFT_CODE_CHAR : CODE_CHAR)[e.code] ?? null;
-}
 function normalModeActive(island) {
   if (cmdlineActive) return false;
   if (island) return island.mode === "n";
@@ -2718,61 +2513,8 @@ function normalModeActive(island) {
     ? lastCursorPayload.mode === "n"
     : modeName_ === "normal";
 }
-function baseFromCode(e) {
-  let m;
-  if ((m = /^Key([A-Z])$/.exec(e.code))) return m[1].toLowerCase();
-  if ((m = /^(?:Digit|Numpad)([0-9])$/.exec(e.code))) return m[1];
-  return CODE_CHAR[e.code] ?? null;
-}
-
 function keyToNvim(e) {
-  if (e.isComposing || e.keyCode === 229) return null; // mid-IME composition
-  // Cmd is the macOS app/menu modifier; only forward it if asked.
-  if (e.metaKey && !forwardCmdKeys) return null;
-  const k = e.key;
-  const isF = /^F([1-9]|1\d|2[0-4])$/.test(k);
-
-  // Option-as-Meta: on macOS Option+<key> is a dead key at the OS level, so
-  // e.key is "Dead" or a composed glyph. Recover the real key from e.code.
-  if (optionIsMeta && e.altKey && !e.ctrlKey && !e.metaKey) {
-    if (e.code === "AltLeft" || e.code === "AltRight") return null;
-    const bc = baseFromCode(e);
-    let base =
-      NAMED[k] ??
-      (isF ? k : undefined) ??
-      NAMED[bc] ??
-      bc ??
-      (k.length === 1 && k.charCodeAt(0) < 0x80 ? k : undefined);
-    if (base == null) return null;
-    return `<M-${e.shiftKey ? "S-" : ""}${base === "<" ? "lt" : base}>`;
-  }
-
-  if (MOD_ONLY.has(k)) return null;
-
-  let base = NAMED[k];
-  let named = base !== undefined;
-  if (!named && isF) {
-    base = k;
-    named = true;
-  }
-  if (!named) {
-    if (k.length !== 1) return null;
-    // Option composed a character (option_is_meta off): send it literally
-    if (e.altKey && !e.ctrlKey && !e.metaKey && k.charCodeAt(0) > 0x7f) return k;
-    base = k === "<" ? "lt" : k;
-    if (/[A-Za-z]/.test(base) && (e.ctrlKey || e.metaKey || e.altKey)) {
-      base = base.toLowerCase();
-    }
-  }
-
-  let mods = "";
-  if (e.metaKey) mods += "D-";
-  if (e.ctrlKey) mods += "C-";
-  if (e.altKey) mods += "M-";
-  if (e.shiftKey && (named || mods)) mods += "S-";
-
-  if (mods || named || base === "lt") return `<${mods}${base}>`;
-  return base;
+  return encodeKeyToNvim(e, { optionIsMeta, forwardCmdKeys });
 }
 
 function islandLookup() {

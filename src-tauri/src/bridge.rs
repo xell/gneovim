@@ -241,6 +241,101 @@ fn grid_op(ev: &str, a: &[Value]) -> Option<Json> {
     })
 }
 
+#[cfg(test)]
+mod redraw_wire_tests {
+    use super::*;
+
+    #[test]
+    fn ext_id_accepts_integer_and_msgpack_extension_handles() {
+        assert_eq!(ext_id(&Value::from(42)), Some(42));
+
+        let mut encoded = Vec::new();
+        rmpv::encode::write_value(&mut encoded, &Value::from(73)).unwrap();
+        assert_eq!(ext_id(&Value::Ext(0, encoded)), Some(73));
+        assert_eq!(ext_id(&Value::Nil), None);
+    }
+
+    #[test]
+    fn attr_map_keeps_only_supported_wire_values() {
+        let attrs = Value::Map(vec![
+            (Value::from("foreground"), Value::from(0x112233)),
+            (Value::from("bold"), Value::from(true)),
+            (Value::from("url"), Value::from("https://example.test")),
+            (
+                Value::from("unsupported"),
+                Value::Array(vec![Value::from(1)]),
+            ),
+            (Value::from(5), Value::from("non-string key")),
+        ]);
+
+        assert_eq!(
+            attr_map(&attrs),
+            json!({
+                "foreground": 0x112233,
+                "bold": true,
+                "url": "https://example.test"
+            })
+        );
+    }
+
+    #[test]
+    fn grid_line_shape_and_cell_defaults_are_frozen() {
+        let args = vec![
+            Value::from(2),
+            Value::from(4),
+            Value::from(6),
+            Value::Array(vec![
+                Value::Array(vec![Value::from("a"), Value::from(9), Value::from(3)]),
+                Value::Array(vec![Value::from("b")]),
+            ]),
+            Value::from(true),
+        ];
+
+        assert_eq!(
+            grid_op("grid_line", &args),
+            Some(json!({
+                "op": "line",
+                "grid": 2,
+                "row": 4,
+                "col": 6,
+                "cells": [["a", 9, 3], ["b", null, null]],
+                "wrap": true
+            }))
+        );
+    }
+
+    #[test]
+    fn window_and_mode_shapes_are_frozen() {
+        assert_eq!(
+            grid_op(
+                "win_pos",
+                &[
+                    Value::from(3),
+                    Value::from(1000),
+                    Value::from(1),
+                    Value::from(2),
+                    Value::from(80),
+                    Value::from(24),
+                ],
+            ),
+            Some(json!({
+                "op": "win_pos",
+                "grid": 3,
+                "win": 1000,
+                "srow": 1,
+                "scol": 2,
+                "w": 80,
+                "h": 24
+            }))
+        );
+        assert_eq!(
+            grid_op("mode_change", &[Value::from("insert"), Value::from(1)]),
+            Some(json!({"op": "mode", "name": "insert", "idx": 1}))
+        );
+        assert_eq!(grid_op("unknown", &[]), None);
+    }
+}
+
 struct BufState {
     buf: Buffer<NWriter>,
     /// how many islands are currently showing this buffer
