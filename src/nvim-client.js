@@ -45,7 +45,11 @@ export class NvimClient {
   }
 
   detachIsland(buf) {
-    return this.invoke("island_detach", { buf });
+    return this.invoke("island_detach", { buf }).catch(() =>
+      // Detach is idempotent in Rust. A retry is safe whether the first request
+      // failed before execution or only lost its response.
+      this.invoke("island_detach", { buf }),
+    );
   }
 
   resize(cols, rows) {

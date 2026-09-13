@@ -38,7 +38,11 @@ export class IslandManager {
         this.islands.delete(win);
         const buffer = island.bufnr;
         island.destroy();
-        if (buffer != null) this.nvim.detachIsland(buffer).catch(() => {});
+        if (buffer != null) {
+          this.nvim
+            .detachIsland(buffer)
+            .catch((error) => this.reportError("island_detach failed: " + error));
+        }
       }
     }
 
@@ -54,7 +58,11 @@ export class IslandManager {
       } else if (force || (wantedBuffer != null && current.bufnr !== wantedBuffer)) {
         const oldBuffer = current.bufnr;
         current.bufnr = null;
-        if (oldBuffer != null) this.nvim.detachIsland(oldBuffer).catch(() => {});
+        if (oldBuffer != null) {
+          this.nvim
+            .detachIsland(oldBuffer)
+            .catch((error) => this.reportError("island_detach failed: " + error));
+        }
         this.attach(current);
       }
     }

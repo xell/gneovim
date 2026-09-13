@@ -71,6 +71,21 @@ describe("NvimClient", () => {
     ]);
   });
 
+  it("retries the idempotent island detach once", async () => {
+    const invoke = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("response lost"))
+      .mockResolvedValueOnce();
+    const nvim = new NvimClient({ invoke, listen: vi.fn(), windowLabel: "main" });
+
+    await nvim.detachIsland(7);
+
+    expect(invoke.mock.calls).toEqual([
+      ["island_detach", { buf: 7 }],
+      ["island_detach", { buf: 7 }],
+    ]);
+  });
+
   it("preserves commands with no payload", () => {
     const { invoke, nvim } = client();
 
