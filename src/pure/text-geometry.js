@@ -14,3 +14,13 @@ export function byteToCol(text, byte) {
   }
   return text.length;
 }
+
+// Convert a Neovim half-open byte range on a zero-based row into an absolute
+// CodeMirror UTF-16 range.
+export function byteRange(doc, row, startByte, endByte) {
+  if (row < 0 || row >= doc.lines) return null;
+  const line = doc.line(row + 1);
+  const from = line.from + byteToCol(line.text, startByte);
+  const to = Math.min(line.from + byteToCol(line.text, endByte), line.to);
+  return to > from ? { from, to } : null;
+}

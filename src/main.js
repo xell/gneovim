@@ -19,7 +19,7 @@ import {
   colorLuma,
   rgbHex,
 } from "./highlight-registry.js";
-import { byteLen, byteToCol } from "./pure/text-geometry.js";
+import { byteLen, byteRange, byteToCol } from "./pure/text-geometry.js";
 import { parseGuifont } from "./pure/guifont.js";
 import {
   imageLabel,
@@ -1198,12 +1198,7 @@ class Island {
   }
   // byte range [sc, ec) on buffer row `row` -> CM [from, to), or null.
   _range(row, sc, ec) {
-    const doc = this.view.state.doc;
-    if (row < 0 || row >= doc.lines) return null;
-    const line = doc.line(row + 1);
-    const from = line.from + byteToCol(line.text, sc);
-    const to = Math.min(line.from + byteToCol(line.text, ec), line.to);
-    return to > from ? { from, to } : null;
+    return byteRange(this.view.state.doc, row, sc, ec);
   }
   applyDecor() {
     const d = this.decor;
