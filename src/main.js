@@ -35,6 +35,7 @@ import {
 } from "./pure/keymap.js";
 import { screenMetrics as calculateScreenMetrics } from "./pure/layout.js";
 import { imageSource as resolveImageSource } from "./pure/image-source.js";
+import { visualRanges } from "./pure/visual-ranges.js";
 
 // this webview's window label; event names are per-window (gnv://<label>/<kind>)
 // because emit_to() broadcasts to every webview in this app.
@@ -1315,9 +1316,8 @@ class Island {
       }
     }
     // visual/select range: a background mark, may overlap anything.
-    for (const [row, sc, ec] of d?.visual ?? []) {
-      const r = this._range(row, sc, ec);
-      if (r && !inFold(r.from, r.to)) ranges.push(VISUAL_MARK.range(r.from, r.to));
+    for (const range of visualRanges(doc, d?.visual, inFold)) {
+      ranges.push(VISUAL_MARK.range(range.from, range.to));
     }
     // A closed fold's own first line: everything else about it is untouched
     // (see foldLines above), this is the only visual difference from the
