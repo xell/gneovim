@@ -5,9 +5,10 @@ import "../styles.css";
 import { EditorView, Decoration, WidgetType, lineNumbers } from "@codemirror/view";
 import { Annotation, StateEffect, StateField, Compartment } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { listen as tauriListen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { NvimClient } from "./nvim-client.js";
 import { byteLen, byteToCol } from "./pure/text-geometry.js";
 import { parseGuifont } from "./pure/guifont.js";
 import {
@@ -28,12 +29,12 @@ import { screenMetrics as calculateScreenMetrics } from "./pure/layout.js";
 // because emit_to() broadcasts to every webview in this app.
 const currentWin = getCurrentWebviewWindow();
 const winLabel = currentWin.label;
-const ev = (kind) => `gnv://${winLabel}/${kind}`;
+const nvim = new NvimClient({ invoke: tauriInvoke, listen: tauriListen, windowLabel: winLabel });
 
 const viewportEl = document.getElementById("viewport");
 
 // mirror the webview console into the app log (the webview has no visible one)
-const jlog = (m) => invoke("js_log", { msg: String(m) }).catch(() => {});
+const jlog = (m) => nvim.log(m).catch(() => {});
 addEventListener("error", (e) =>
   jlog(`ERROR ${e.message} @ ${e.filename}:${e.lineno}\n${e.error?.stack || ""}`),
 );
@@ -448,7 +449,7 @@ function reconcileIslands(force = false) {
       islands.delete(wid);
       const b = isl.bufnr;
       isl.destroy();
-      if (b != null) invoke("island_detach", { buf: b }).catch(() => {});
+      if (b != null) nvim.detachIsland(b).catch(() => {});
     }
   }
   for (const wid of desired.keys()) {
@@ -462,7 +463,7 @@ function reconcileIslands(force = false) {
     } else if (force || (wantBuf != null && cur.bufnr !== wantBuf)) {
       const old = cur.bufnr;
       cur.bufnr = null;
-      if (old != null) invoke("island_detach", { buf: old }).catch(() => {});
+      if (old != null) nvim.detachIsland(old).catch(() => {});
       attachIsland(cur);
     }
   }
@@ -471,14 +472,15 @@ function reconcileIslands(force = false) {
 }
 
 function attachIsland(isl) {
-  invoke("island_attach", { win: isl.winId })
+  nvim
+    .attachIsland(isl.winId)
     .then((snap) => {
       if (islands.get(isl.winId) !== isl) return; // unmounted while awaiting
       isl.bufnr = snap.buf;
       isl.applyReset(snap);
       layout();
       // no md_decor trigger event has fired for this window yet; pull once.
-      invoke("nvim_md_decor").catch(() => {});
+      nvim.refreshMarkdownDecorations().catch(() => {});
     })
     .catch((e) => jlog("island_attach failed: " + e));
 }
@@ -624,7 +626,7 @@ function imeFlush() {
   const v = imeEl.value;
   imeEl.value = "";
   if (v && gridTextInputActive())
-    invoke("nvim_input", { keys: v.replace(/</g, "<lt>") });
+    nvim.input(v.replace(/</g, "<lt>"));
 }
 imeEl.addEventListener("compositionstart", () => {
   imeComposing = true;
@@ -663,10 +665,10 @@ function updateImeFocus() {
 }
 addEventListener("focus", () => {
   updateImeFocus(); // regain focus after cmd-tab
-  invoke("nvim_input", { keys: "<FocusGained>" }).catch(() => {});
+  nvim.input("<FocusGained>").catch(() => {});
 });
 addEventListener("blur", () => {
-  invoke("nvim_input", { keys: "<FocusLost>" }).catch(() => {});
+  nvim.input("<FocusLost>").catch(() => {});
 });
 let blinkTimer = 0;
 function stopBlink() {
@@ -1745,7 +1747,7 @@ class Island {
     });
     regions.reverse();
     if (this.bufnr != null)
-      invoke("nvim_edit", { buf: this.bufnr, regions }).catch((e) =>
+      nvim.edit(this.bufnr, regions).catch((e) =>
         jlog("external island edit failed: " + e),
       );
   }
@@ -1772,17 +1774,17 @@ class Island {
   }
   queueNvimCursor(row, col) {
     this._nvimInputQueue = this._nvimInputQueue
-      .then(() => invoke("nvim_cursor_set", { win: this.winId, row, col }))
+      .then(() => nvim.cursorSet(this.winId, row, col))
       .catch((e) => jlog("island cursor set failed: " + e));
   }
   queueNvimInput(keys) {
     this._nvimInputQueue = this._nvimInputQueue
-      .then(() => invoke("nvim_input", { keys }))
+      .then(() => nvim.input(keys))
       .catch((e) => jlog("island input failed: " + e));
   }
   queueSemanticWord(row, col) {
     this._nvimInputQueue = this._nvimInputQueue
-      .then(() => invoke("nvim_cursor_set", { win: this.winId, row, col }))
+      .then(() => nvim.cursorSet(this.winId, row, col))
       .catch((e) => jlog("island semantic word failed: " + e));
   }
   semanticWordTarget() {
@@ -2312,7 +2314,7 @@ function pushSize() {
     const m = screenMetrics();
     if (m.cols === lastSize.cols && m.rows === lastSize.rows) return;
     lastSize = { cols: m.cols, rows: m.rows };
-    invoke("nvim_resize", { cols: m.cols, rows: m.rows }).catch(() => {});
+    nvim.resize(m.cols, m.rows).catch(() => {});
   }, 40); // coalesce a live drag into one nvim resize per frame-ish
 }
 
@@ -2327,7 +2329,7 @@ addEventListener("error", (e) => {
 
 (async function boot() {
   try {
-    const cfg = await invoke("gnv_config");
+    const cfg = await nvim.config();
     optionIsMeta = cfg?.input?.option_is_meta ?? true;
     blockImeInNormalMode = cfg?.input?.block_ime_in_normal_mode ?? true;
     forwardCmdKeys = cfg?.input?.forward_cmd_keys ?? false;
@@ -2353,22 +2355,22 @@ addEventListener("error", (e) => {
 
   // register every listener BEFORE anything can trigger a redraw
   await Promise.all([
-    listen(ev("grid"), (e) => applyGridBatch(e.payload)),
-    listen(ev("winft"), (e) => {
+    nvim.on("grid", (e) => applyGridBatch(e.payload)),
+    nvim.on("winft", (e) => {
       winFt.set(e.payload.win, e.payload.ft || "");
       if (e.payload.buf != null) winBuf.set(e.payload.win, e.payload.buf);
       reconcileIslands();
     }),
-    listen(ev("reset"), (e) => {
+    nvim.on("reset", (e) => {
       for (const isl of islands.values())
         if (isl.bufnr === e.payload.buf) isl.applyReset(e.payload);
     }),
-    listen(ev("lines"), (e) => {
+    nvim.on("lines", (e) => {
       const { buf, firstline, lastline, linedata } = e.payload;
       for (const isl of islands.values())
         if (isl.bufnr === buf) isl.applyBufLines(firstline, lastline, linedata);
     }),
-    listen(ev("cursor"), (e) => {
+    nvim.on("cursor", (e) => {
       // CursorMoved reports the current window explicitly. Never infer its
       // buffer from cursorGrid: a redraw can deliver this notification before
       // its grid_cursor_goto, which previously applied another window's row to
@@ -2383,34 +2385,34 @@ addEventListener("error", (e) => {
           e.payload.scrolloff,
         );
     }),
-    listen(ev("cmdline"), () => {
+    nvim.on("cmdline", () => {
       cmdlineActive = true;
       updateImeFocus();
     }),
-    listen(ev("cmdline_hide"), () => {
+    nvim.on("cmdline_hide", () => {
       cmdlineActive = false;
       updateImeFocus();
     }),
-    listen(ev("focus"), () => repaintNow()),
-    listen(ev("look_up"), () => islandLookup()),
-    listen(ev("guiopt"), (e) => applyGuiOpt(e.payload.name, e.payload.value)),
-    listen(ev("md_preview"), (e) => {
+    nvim.on("focus", () => repaintNow()),
+    nvim.on("look_up", () => islandLookup()),
+    nvim.on("guiopt", (e) => applyGuiOpt(e.payload.name, e.payload.value)),
+    nvim.on("md_preview", (e) => {
       const { win, state } = e.payload;
       if (state === -1) previewWins.delete(win);
       else previewWins.set(win, state === 1);
       reconcileIslands();
     }),
-    listen(ev("win_gutter"), (e) => {
+    nvim.on("win_gutter", (e) => {
       winGutter.set(e.payload.win, e.payload);
       islands.get(e.payload.win)?.setGutter(e.payload);
     }),
-    listen(ev("md_decor"), (e) => {
+    nvim.on("md_decor", (e) => {
       const d = JSON.parse(e.payload.json);
       if (d.hl?.defs) mergeHlDefs(d.hl.defs);
       const isl = islands.get(e.payload.win);
       if (isl) isl.setDecor(d);
     }),
-    listen(ev("gone"), (e) => showGone(e.payload)),
+    nvim.on("gone", (e) => showGone(e.payload)),
   ]);
 
   jlog(`listeners ready; cellW=${cellW.toFixed(2)} cellH=${cellH.toFixed(2)}`);
@@ -2422,7 +2424,7 @@ addEventListener("error", (e) => {
   applyScreen(m0);
   for (let i = 0; i < 100; i++) {
     try {
-      await invoke("nvim_ui_start", { cols: m0.cols, rows: m0.rows });
+      await nvim.uiStart(m0.cols, m0.rows);
       jlog(`ui_start ok ${m0.cols}x${m0.rows} pad=${m0.padX}`);
       break;
     } catch (e) {
@@ -2435,7 +2437,7 @@ addEventListener("error", (e) => {
   // per-window live-preview flag). reconcileIslands() then mounts an island on
   // every previewed markdown window.
   try {
-    for (const [win, buf, ft, mdp] of await invoke("nvim_winfts")) {
+    for (const [win, buf, ft, mdp] of await nvim.winFiletypes()) {
       winFt.set(win, ft || "");
       if (buf != null) winBuf.set(win, buf);
       if (mdp === 0 || mdp === 1) previewWins.set(win, mdp === 1);
@@ -2455,7 +2457,7 @@ addEventListener("error", (e) => {
       numberwidth,
       signcolumn,
       foldcolumn,
-    ] of await invoke("nvim_wingutters")) {
+    ] of await nvim.windowGutters()) {
       const g = { win, number, relativenumber, numberwidth, signcolumn, foldcolumn };
       winGutter.set(win, g);
       islands.get(win)?.setGutter(g);
@@ -2465,12 +2467,12 @@ addEventListener("error", (e) => {
   }
 
   // display-bridge payloads also fire before we listen; nudge a re-push.
-  invoke("nvim_md_decor").catch((e) => jlog("md_decor failed: " + e));
+  nvim.refreshMarkdownDecorations().catch((e) => jlog("md_decor failed: " + e));
 
   // GUI options (guifont / linespace) set before we were listening
   try {
     let changed = false;
-    for (const [name, value] of await invoke("nvim_guiopts")) {
+    for (const [name, value] of await nvim.guiOptions()) {
       applyGuiOptRaw(name, value);
       if (value) changed = true;
     }
@@ -2547,7 +2549,7 @@ function islandLookup() {
     return false;
   }
   jlog(`look up: island sent ${JSON.stringify(word)}`);
-  invoke("show_definition", { text: word, x: coords.left, y: coords.bottom }).catch((err) =>
+  nvim.showDefinition(word, coords.left, coords.bottom).catch((err) =>
     jlog("show_definition failed: " + err),
   );
   return true;
@@ -2593,7 +2595,7 @@ addEventListener("keydown", (e) => {
     e.preventDefault();
     const keys = normalPunctuation === "<" ? "<lt>" : normalPunctuation;
     if (isl) isl.queueNvimInput(keys);
-    else invoke("nvim_input", { keys });
+    else nvim.input(keys);
     return;
   }
   const plain = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
@@ -2634,7 +2636,7 @@ addEventListener("keydown", (e) => {
     return;
   e.preventDefault();
   if (isl) isl.queueNvimInput(keys);
-  else invoke("nvim_input", { keys });
+  else nvim.input(keys);
 });
 
 // ---------------------------------------------------------------------------
@@ -2659,13 +2661,7 @@ function mouseMods(e) {
   );
 }
 const nvimMouse = (button, action, e, cell) =>
-  invoke("nvim_mouse", {
-    button,
-    action,
-    modifier: mouseMods(e),
-    row: cell.row,
-    col: cell.col,
-  }).catch(() => {});
+  nvim.mouse(button, action, mouseMods(e), cell.row, cell.col).catch(() => {});
 
 let drag = null; // { button, row, col }
 viewportEl.addEventListener("mousedown", (e) => {
