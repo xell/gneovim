@@ -43,6 +43,7 @@ import {
   quoteMarkerRanges,
   structuralLineStarts,
 } from "./pure/markdown-decoration-plan.js";
+import { CursorScroller } from "./cursor-scroller.js";
 
 // this webview's window label; event names are per-window (gnv://<label>/<kind>)
 // because emit_to() broadcasts to every webview in this app.
@@ -992,9 +993,6 @@ class Island {
     this.decor = null; // last md_decor payload (parsed)
     this._lastViewport = null; // last {topline,botline,linecount} scrollTo saw
     this.scrolloff = 0;
-    this._cursorScrollRaf = 0;
-    this._cursorScrollHideTimer = 0;
-    this._scrollPadding = null;
     // The DOM selection normally mirrors this Neovim cursor. External desktop
     // editors may move it through macOS Accessibility before posting their
     // correction keys, so serialize island cursor and key requests.
@@ -1078,6 +1076,15 @@ class Island {
         }),
       ],
       parent: this.el,
+    });
+    this.cursorScroller = new CursorScroller({
+      view: this.view,
+      isHidden: () => this.el.hidden,
+      cellHeight: () => cellH,
+      requestFrame: (callback) => requestAnimationFrame(callback),
+      cancelFrame: (id) => cancelAnimationFrame(id),
+      setTimer: (callback, delay) => setTimeout(callback, delay),
+      clearTimer: (id) => clearTimeout(id),
     });
     this.applyFontZoom(effectiveGuiFontSize() / guiFontBaseSize);
   }
@@ -1369,8 +1376,7 @@ class Island {
   }
   destroy() {
     if (this._gutterRaf) cancelAnimationFrame(this._gutterRaf);
-    if (this._cursorScrollRaf) cancelAnimationFrame(this._cursorScrollRaf);
-    if (this._cursorScrollHideTimer) clearTimeout(this._cursorScrollHideTimer);
+    this.cursorScroller.destroy();
     this.view.destroy();
     this.el.remove();
   }
@@ -1588,52 +1594,7 @@ class Island {
     this.keepPositionInView(this._nvimCursor);
   }
   keepPositionInView(position) {
-    if (this._cursorScrollRaf) cancelAnimationFrame(this._cursorScrollRaf);
-    this._cursorScrollRaf = requestAnimationFrame(() => {
-      this._cursorScrollRaf = 0;
-      if (!position || this.el.hidden) return;
-      const scroller = this.view.scrollDOM;
-      if (!scroller.clientHeight) return;
-      const height = scroller.clientHeight;
-      const margin = Math.min(this.scrolloff * cellH, height / 2);
-      // The real scroller needs room beyond the document edges. Without this,
-      // scrollTop clamps at zero/max and the first/last cursor line cannot
-      // occupy the same scrolloff zone as an interior line.
-      if (this._scrollPadding !== margin) {
-        const padding = `${margin}px`;
-        this.view.contentDOM.style.paddingBlockStart = padding;
-        this.view.contentDOM.style.paddingBlockEnd = padding;
-        this._scrollPadding = margin;
-      }
-      const line = this.view.state.doc.line(
-        Math.min(position.row + 1, this.view.state.doc.lines),
-      );
-      const pos = Math.min(
-        line.from + byteToCol(line.text, position.col),
-        line.to,
-      );
-      const rect = this.view.coordsAtPos(pos);
-      if (!rect) return;
-      const bounds = scroller.getBoundingClientRect();
-      const top = rect.top - bounds.top;
-      const bottom = rect.bottom - bounds.top;
-      let delta = 0;
-      if (margin === height / 2) delta = (top + bottom) / 2 - height / 2;
-      else if (top < margin) delta = top - margin;
-      else if (bottom > height - margin) delta = bottom - (height - margin);
-      if (delta) {
-        // WebKit reveals an overlay scrollbar for every programmatic scrollTop
-        // change. Keep it hidden across a cursor-key burst, but leave native
-        // wheel/trackpad scrolling and its scrollbar entirely untouched.
-        scroller.classList.add("cm-nvim-cursor-scroll");
-        clearTimeout(this._cursorScrollHideTimer);
-        this._cursorScrollHideTimer = setTimeout(() => {
-          scroller.classList.remove("cm-nvim-cursor-scroll");
-          this._cursorScrollHideTimer = 0;
-        }, 180);
-        scroller.scrollTop += delta;
-      }
-    });
+    this.cursorScroller.keepInView(position, this.scrolloff);
   }
   clearCursor() {
     this.tx({ effects: setNvimCursor.of(null) });
