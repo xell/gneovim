@@ -2,7 +2,7 @@
 // a CodeMirror island for each markdown window, one nvim driving both.
 
 import "../styles.css";
-import { EditorView, Decoration, WidgetType } from "@codemirror/view";
+import { EditorView, Decoration } from "@codemirror/view";
 import { Annotation, StateEffect, Compartment } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
@@ -26,22 +26,15 @@ import {
   normalModePunctuation,
 } from "./pure/keymap.js";
 import { screenMetrics as calculateScreenMetrics } from "./pure/layout.js";
-import { visualRanges } from "./pure/visual-ranges.js";
-import { foldRanges, overlapsRanges } from "./pure/fold-ranges.js";
 import { bufferLineEdit } from "./pure/buffer-line-edit.js";
 import { semanticWordTarget as findSemanticWordTarget } from "./pure/semantic-word.js";
-import {
-  headingMarkerRanges,
-  nonOverlappingSpans,
-  quoteMarkerRanges,
-  structuralLineStarts,
-} from "./pure/markdown-decoration-plan.js";
 import { CursorScroller } from "./cursor-scroller.js";
 import { GutterController } from "./gutter-controller.js";
 import { IslandInputQueue } from "./island-input-queue.js";
 import { IslandInputController } from "./island-input-controller.js";
 import { createIslandDecorationState } from "./island-decoration-state.js";
 import { createMarkdownPresentation } from "./markdown-presentation.js";
+import { IslandDisplayDecorations } from "./island-display-decorations.js";
 
 // this webview's window label; event names are per-window (gnv://<label>/<kind>)
 // because emit_to() broadcasts to every webview in this app.
@@ -429,6 +422,10 @@ function placeGridCursor() {
 }
 
 const fromNvim = Annotation.define();
+const islandDecorationState = createIslandDecorationState({
+  document,
+  log: jlog,
+});
 const {
   concealHide: CONCEAL_HIDE,
   islandDecorField,
@@ -439,7 +436,7 @@ const {
   setIslandFolds,
   setNvimCursor,
   visualMark: VISUAL_MARK,
-} = createIslandDecorationState({ document, log: jlog });
+} = islandDecorationState;
 // `guard_row` is supplied by md_decor.lua after applying Neovim's
 // 'concealcursor' rule. -1 means conceal remains active on the cursor line.
 const setTableConcealGuard = StateEffect.define();
@@ -458,78 +455,6 @@ const {
   setTableConcealGuard,
   setTableHighlights,
 });
-// Replacement glyph for an extmark conceal at conceallevel 1 (the `cchar`).
-// conceallevel >= 2 sends an empty string and gets a plain Decoration.replace.
-class ConcealWidget extends WidgetType {
-  constructor(text) {
-    super();
-    this.text = text;
-  }
-  eq(o) {
-    return o.text === this.text;
-  }
-  toDOM() {
-    const s = document.createElement("span");
-    s.className = "cm-concealed";
-    s.textContent = this.text;
-    return s;
-  }
-}
-// Replaces a concealed ATX "#.. " run on an H1-H3 line. Not a Neovim conceal:
-// the island hides these itself, independent of conceallevel, as part of the
-// heading size / icon styling (see applyDecor). H4-H6 just hide, no icon.
-class HeadingIconWidget extends WidgetType {
-  constructor(level, cursorMode = null) {
-    super();
-    this.level = level;
-    this.cursorMode = cursorMode;
-  }
-  eq(o) {
-    return o.level === this.level && o.cursorMode === this.cursorMode;
-  }
-  toDOM() {
-    const s = document.createElement("span");
-    const cursorClass =
-      this.cursorMode == null
-        ? ""
-        : this.cursorMode[0] === "i"
-          ? " cm-heading-icon-cursor-bar"
-          : " cm-heading-icon-cursor-block";
-    s.className = `cm-heading-icon${cursorClass}`;
-    const glyph = document.createElement("span");
-    glyph.className = `cm-heading-icon-glyph cm-heading-icon-${this.level}`;
-    s.append(glyph);
-    return s;
-  }
-}
-// An overlay virt_text extmark (hop.nvim's jump-target letters and similar):
-// new content drawn in place of the buffer text it covers, not a recolouring
-// of it. Each segment gets the same stable class as any other highlight group.
-class OverlayWidget extends WidgetType {
-  constructor(segs) {
-    super();
-    this.segs = segs;
-  }
-  eq(o) {
-    return (
-      o.segs.length === this.segs.length &&
-      o.segs.every(([t, g], i) => t === this.segs[i][0] && g === this.segs[i][1])
-    );
-  }
-  toDOM() {
-    const s = document.createElement("span");
-    for (const [text, group] of this.segs) {
-      const t = document.createElement("span");
-      if (group) t.className = highlights.islandClass(group);
-      t.textContent = text;
-      s.append(t);
-    }
-    return s;
-  }
-}
-// A semantic presentation for the Markdown table source. The widget is
-// deliberately non-editable: edits must continue to target the Markdown
-// buffer, where CodeMirror can map them and Neovim remains authoritative.
 // Non-editable content is not focusable on its own; the tabindex keeps it the
 // keyboard's target so keydown still reaches the global nvim_input path.
 const EDITABLE_ON = EditorView.editable.of(true);
@@ -631,6 +556,28 @@ class Island {
       setTimer: (callback, delay) => setTimeout(callback, delay),
       clearTimer: (id) => clearTimeout(id),
     });
+    this.displayDecorations = new IslandDisplayDecorations({
+      document,
+      highlights,
+      view: this.view,
+      element: this.el,
+      decorationState: islandDecorationState,
+      setTableConcealGuard,
+      setTableHighlights,
+      getCursor: () => this._nvimCursor,
+      getMode: () => this.mode,
+      cancelPendingZeroScrolloff: () => {
+        if (!this._pendingZeroScrolloff) return;
+        clearTimeout(this._pendingZeroScrolloff);
+        this._pendingZeroScrolloff = 0;
+      },
+      keepPositionInView: (position) =>
+        this.keepPositionInView(position),
+      keepCursorInView: () => this.keepCursorInView(),
+      requestFrame: (callback) => requestAnimationFrame(callback),
+      forceRepaint,
+      log: jlog,
+    });
     this.applyFontZoom(effectiveGuiFontSize() / guiFontBaseSize);
   }
   applyFontZoom(globalScale) {
@@ -677,57 +624,14 @@ class Island {
   //   Decorations are view-only, so nothing here reaches nvim_edit. `hl.defs` is merged globally by the
   //   listener; this only consumes `hl.runs` / `hl.virt`.
   setDecor(d) {
-    this.decor = d;
-    this._easyMotionOverlay = (d?.hl?.runs ?? []).some(([, , , group]) =>
-      /^EasyMotion(?:Target|Shade)/.test(group),
-    );
-    if (this._easyMotionOverlay && this._pendingZeroScrolloff) {
-      clearTimeout(this._pendingZeroScrolloff);
-      this._pendingZeroScrolloff = 0;
-    }
-    if (d?.visual_hl) this.el.style.setProperty("--visual-bg", d.visual_hl);
-    else this.el.style.removeProperty("--visual-bg");
-    if (d?.accent_fg) this.el.style.setProperty("--accent", d.accent_fg);
-    else this.el.style.removeProperty("--accent");
-    // The table owns replacement DOM text, so ordinary CM marks cannot paint
-    // inside it. Mirror interactive and search highlights into those text
-    // nodes. Skip EasyMotionShade: its whole-line run would dim every cell.
-    const tableHighlights = (d?.hl?.runs ?? []).filter(
-      ([, , , group]) =>
-        /^EasyMotionTarget/.test(group) ||
-        group === "Search" ||
-        group === "IncSearch",
-    );
-    const tableHighlightsKey = JSON.stringify(tableHighlights);
-    const tableEffects = [setTableConcealGuard.of(d?.guard_row ?? null)];
-    if (this._tableHighlightsKey !== tableHighlightsKey) {
-      this._tableHighlightsKey = tableHighlightsKey;
-      tableEffects.push(setTableHighlights.of(tableHighlights));
-    }
-    this.view.dispatch({
-      effects: tableEffects,
-    });
-    this.applyDecor();
-    const incsearch = d?.incsearch ?? null;
-    const incsearchKey = incsearch ? `${incsearch[0]}/${incsearch[1]}` : "";
-    if (incsearchKey !== this._incsearchKey) {
-      const wasSearching = !!this._incsearchKey;
-      this._incsearchKey = incsearchKey;
-      if (incsearch) {
-        this.keepPositionInView({ row: incsearch[0], col: incsearch[1] });
-      } else if (wasSearching) {
-        // Enter will shortly replace _nvimCursor with the accepted result;
-        // Escape leaves it at the original cursor. Defer one frame so either
-        // case follows the authoritative cursor event without a false bounce.
-        requestAnimationFrame(() => this.keepCursorInView());
-      }
-    }
+    this.displayDecorations.set(d);
   }
   // byte range [sc, ec) on buffer row `row` -> CM [from, to), or null.
   _range(row, sc, ec) {
     return byteRange(this.view.state.doc, row, sc, ec);
   }
   applyDecor() {
+    return this.displayDecorations.apply();
     const d = this.decor;
     const doc = this.view.state.doc;
 
@@ -931,11 +835,17 @@ class Island {
     // causes the distracting out-and-back jump. Wait long enough for the
     // display bridge to identify the EasyMotion matches. A real :set
     // scrolloff=0 has no such overlay and still applies normally.
-    if (scrolloffChanged && nextScrolloff === 0 && !this._easyMotionOverlay) {
+    if (
+      scrolloffChanged &&
+      nextScrolloff === 0 &&
+      !this.displayDecorations.easyMotionOverlay
+    ) {
       clearTimeout(this._pendingZeroScrolloff);
       this._pendingZeroScrolloff = setTimeout(() => {
         this._pendingZeroScrolloff = 0;
-        if (!this._easyMotionOverlay) this.applyCursor(row, col, mode, 0);
+        if (!this.displayDecorations.easyMotionOverlay) {
+          this.applyCursor(row, col, mode, 0);
+        }
       }, 80);
       return;
     }
