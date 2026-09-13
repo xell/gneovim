@@ -1,0 +1,85 @@
+// Owns the frontend's mirror of Neovim window relationships. Rendering and
+// editor modules may query this model, but transport event ordering is resolved
+// here rather than by coordinating several unrelated maps.
+export class SessionModel {
+  constructor() {
+    this.windowPositions = new Map();
+    this.gridWindows = new Map();
+    this.windowFiletypes = new Map();
+    this.windowBuffers = new Map();
+    this.previewWindows = new Map();
+    this.windowGutters = new Map();
+  }
+
+  positionForGrid(grid) {
+    return this.windowPositions.get(grid);
+  }
+
+  windowForGrid(grid) {
+    return this.gridWindows.get(grid);
+  }
+
+  filetypeForWindow(win) {
+    return this.windowFiletypes.get(win) || "";
+  }
+
+  bufferForWindow(win) {
+    return this.windowBuffers.get(win);
+  }
+
+  gutterForWindow(win) {
+    return this.windowGutters.get(win);
+  }
+
+  isMarkdownWindow(win) {
+    return this.filetypeForWindow(win).includes("markdown");
+  }
+
+  wantsIsland(win, livePreviewDefault) {
+    if (!this.isMarkdownWindow(win)) return false;
+    return this.previewWindows.has(win)
+      ? this.previewWindows.get(win)
+      : livePreviewDefault;
+  }
+
+  desiredIslands(livePreviewDefault) {
+    const desired = new Map();
+    for (const [grid, win] of this.gridWindows) {
+      if (this.wantsIsland(win, livePreviewDefault)) desired.set(win, grid);
+    }
+    return desired;
+  }
+
+  setWindowInfo(win, buf, filetype) {
+    this.windowFiletypes.set(win, filetype || "");
+    if (buf != null) this.windowBuffers.set(win, buf);
+  }
+
+  setPreview(win, state) {
+    if (state === -1) this.previewWindows.delete(win);
+    else this.previewWindows.set(win, state === 1 || state === true);
+  }
+
+  setGutter(payload) {
+    this.windowGutters.set(payload.win, payload);
+  }
+
+  placeGrid(grid, position, win = null) {
+    this.windowPositions.set(grid, position);
+    if (win != null) this.gridWindows.set(grid, win);
+  }
+
+  hideGrid(grid) {
+    this.windowPositions.delete(grid);
+  }
+
+  destroyGrid(grid) {
+    this.windowPositions.delete(grid);
+    const goneWindow = this.gridWindows.get(grid);
+    this.gridWindows.delete(grid);
+    if (goneWindow != null && ![...this.gridWindows.values()].includes(goneWindow)) {
+      this.previewWindows.delete(goneWindow);
+    }
+    return goneWindow;
+  }
+}

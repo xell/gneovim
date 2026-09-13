@@ -9,6 +9,7 @@ import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { NvimClient } from "./nvim-client.js";
+import { SessionModel } from "./session-model.js";
 import { byteLen, byteToCol } from "./pure/text-geometry.js";
 import { parseGuifont } from "./pure/guifont.js";
 import {
@@ -331,20 +332,15 @@ class GridWin {
 }
 
 const grids = new Map(); // gridId -> GridWin
-const winPos = new Map(); // gridId -> {srow,scol,w,h,float,zindex}
-const gridToWin = new Map(); // gridId -> winId
-const winFt = new Map(); // winId -> filetype
-const winBuf = new Map(); // winId -> bufnr
+const session = new SessionModel();
 const islands = new Map(); // winId -> Island (one CM instance per markdown window)
 let islandGridIds = new Set(); // gridIds currently rendered as an island
 // winId -> bool: markdown-live-preview flag, from runtime/md_preview.lua's
 // `w:gnv_md_preview` (gnv://<label>/md_preview events + the winfts replay).
 // Absent -> fall back to livePreviewDefault.
-const previewWins = new Map();
 // winId -> { number, relativenumber, numberwidth, signcolumn, foldcolumn }, the
 // window's gutter options mirrored from Neovim (runtime/md_preview.lua feed +
 // the nvim_wingutters replay). Applied to the island's gutter compartment.
-const winGutter = new Map();
 let livePreviewDefault = true; // from gnv_config [markdown] live_preview_default
 let modeName_ = "n";
 
@@ -430,19 +426,14 @@ function gw(id) {
   return g;
 }
 
-const isMarkdown = (wid) => (winFt.get(wid) || "").includes("markdown");
 // A window gets a CM island only if it is markdown AND its live-preview flag is
 // on (explicit per-window value, else the configured default). Turning it off
 // drops the window back to plain grid rendering like every other window.
-const wantIsland = (wid) =>
-  isMarkdown(wid) &&
-  (previewWins.has(wid) ? previewWins.get(wid) : livePreviewDefault);
 
 // Mount an Island over every previewed markdown window, unmount the rest,
 // re-point any whose buffer changed. `force` re-attaches every island.
 function reconcileIslands(force = false) {
-  const desired = new Map(); // winId -> gridId
-  for (const [gid, wid] of gridToWin) if (wantIsland(wid)) desired.set(wid, gid);
+  const desired = session.desiredIslands(livePreviewDefault);
 
   for (const [wid, isl] of [...islands]) {
     if (!desired.has(wid)) {
@@ -454,12 +445,13 @@ function reconcileIslands(force = false) {
   }
   for (const wid of desired.keys()) {
     const cur = islands.get(wid);
-    const wantBuf = winBuf.get(wid);
+    const wantBuf = session.bufferForWindow(wid);
     if (!cur) {
       const isl = new Island(wid);
       islands.set(wid, isl);
       attachIsland(isl);
-      if (winGutter.has(wid)) isl.setGutter(winGutter.get(wid));
+      const gutter = session.gutterForWindow(wid);
+      if (gutter) isl.setGutter(gutter);
     } else if (force || (wantBuf != null && cur.bufnr !== wantBuf)) {
       const old = cur.bufnr;
       cur.bufnr = null;
@@ -491,7 +483,7 @@ function attachIsland(isl) {
     .catch((e) => jlog("island_attach failed: " + e));
 }
 
-const islandForGrid = (gid) => islands.get(gridToWin.get(gid));
+const islandForGrid = (gid) => islands.get(session.windowForGrid(gid));
 
 function place(el, p) {
   el.style.left = `${p.scol * cellW + originX}px`;
@@ -528,7 +520,7 @@ function floatTopPx(p) {
   let agrid = fa.agrid;
   let arow = fa.arow;
   if (agrid === 1) {
-    const wp = winPos.get(cursorGrid);
+    const wp = session.positionForGrid(cursorGrid);
     if (!wp || arow == null || arow < wp.srow || arow >= wp.srow + wp.h) return null;
     agrid = cursorGrid;
     arow = arow - wp.srow;
@@ -554,7 +546,7 @@ function layout() {
       g.el.hidden = false;
       continue;
     }
-    const p = winPos.get(gid);
+    const p = session.positionForGrid(gid);
     const isl = islandForGrid(gid);
     if (isl) {
       g.el.hidden = true;
@@ -700,7 +692,7 @@ function startBlink() {
 
 function placeGridCursor() {
   const g = grids.get(cursorGrid);
-  const p = winPos.get(cursorGrid);
+  const p = session.positionForGrid(cursorGrid);
   if (!g || !g.cursor || !p || islandForGrid(cursorGrid)) {
     gridCursorEl.hidden = true;
     stopBlink();
@@ -1905,7 +1897,7 @@ class Island {
     this.scrolloff = nextScrolloff;
     // if this island holds the cursor, keep its .cm-content focused so hasFocus
     // is reliable (needed for the insert-mode IME carve-out), in every mode
-    if (gridToWin.get(cursorGrid) === this.winId && !this.view.hasFocus)
+    if (session.windowForGrid(cursorGrid) === this.winId && !this.view.hasFocus)
       this.view.focus();
     // editable only in insert / replace / select mode, unless the guard is off
     this.setEditable(!blockImeInNormalMode || /^[iRsS\x13]/.test(mode));
@@ -2058,7 +2050,7 @@ function renderGridOps(ops) {
         // A float can shrink or grow via grid_resize alone, with no fresh
         // win_float_pos. Keep the placed element's size in step or its old
         // height lingers as a blank band below the real rows.
-        const wp = winPos.get(o.grid);
+        const wp = session.positionForGrid(o.grid);
         if (wp && (wp.w !== o.w || wp.h !== o.h)) {
           wp.w = o.w;
           wp.h = o.h;
@@ -2074,12 +2066,7 @@ function renderGridOps(ops) {
         const g = grids.get(o.grid);
         if (g) g.el.remove();
         grids.delete(o.grid);
-        winPos.delete(o.grid);
-        const goneWin = gridToWin.get(o.grid);
-        gridToWin.delete(o.grid);
-        // window ids are reused; drop its stale preview flag
-        if (goneWin != null && ![...gridToWin.values()].includes(goneWin))
-          previewWins.delete(goneWin);
+        session.destroyGrid(o.grid);
         layoutDirty = true;
         break;
       }
@@ -2112,8 +2099,11 @@ function renderGridOps(ops) {
         }
         break;
       case "win_pos":
-        winPos.set(o.grid, { srow: o.srow, scol: o.scol, w: o.w, h: o.h });
-        if (o.win != null) gridToWin.set(o.grid, o.win);
+        session.placeGrid(
+          o.grid,
+          { srow: o.srow, scol: o.scol, w: o.w, h: o.h },
+          o.win,
+        );
         layoutDirty = true;
         break;
       case "win_float": {
@@ -2122,7 +2112,7 @@ function renderGridOps(ops) {
         const h = fg.rows || 5;
         // position is relative to anchor_grid (grid 1 = whole screen, at 0,0)
         const ap =
-          o.agrid != null && o.agrid !== 1 ? winPos.get(o.agrid) : null;
+          o.agrid != null && o.agrid !== 1 ? session.positionForGrid(o.agrid) : null;
         let srow = (ap ? ap.srow : 0) + (o.arow ?? 0);
         let scol = (ap ? ap.scol : 0) + (o.acol ?? 0);
         const anchor = o.anchor || "NW"; // which float corner sits at (row,col)
@@ -2147,16 +2137,19 @@ function renderGridOps(ops) {
         // the global cursorGrid pointer is left stale from whatever grid last
         // actually had a cursor move. floatTopPx reads the anchor grid's own
         // last-known `.cursor` row instead, which is set regardless.
-        winPos.set(o.grid, {
-          srow: Math.round(srow),
-          scol: Math.round(scol),
-          w,
-          h,
-          float: true,
-          zindex: o.zindex ?? 50,
-          floatAnchor: { agrid: o.agrid, arow: o.arow, anchorS: anchor[0] === "S" },
-        });
-        if (o.win != null) gridToWin.set(o.grid, o.win);
+        session.placeGrid(
+          o.grid,
+          {
+            srow: Math.round(srow),
+            scol: Math.round(scol),
+            w,
+            h,
+            float: true,
+            zindex: o.zindex ?? 50,
+            floatAnchor: { agrid: o.agrid, arow: o.arow, anchorS: anchor[0] === "S" },
+          },
+          o.win,
+        );
         layoutDirty = true;
         break;
       }
@@ -2164,13 +2157,13 @@ function renderGridOps(ops) {
       case "win_close": {
         const g = grids.get(o.grid);
         if (g) g.el.hidden = true;
-        winPos.delete(o.grid);
+        session.hideGrid(o.grid);
         layoutDirty = true;
         break;
       }
       case "msg_pos": {
         const mg = grids.get(o.grid) || {};
-        winPos.set(o.grid, {
+        session.placeGrid(o.grid, {
           srow: o.row,
           scol: 0,
           w: mg.cols || (grids.get(1) || {}).cols || 200,
@@ -2362,8 +2355,7 @@ addEventListener("error", (e) => {
   await Promise.all([
     nvim.on("grid", (e) => applyGridBatch(e.payload)),
     nvim.on("winft", (e) => {
-      winFt.set(e.payload.win, e.payload.ft || "");
-      if (e.payload.buf != null) winBuf.set(e.payload.win, e.payload.buf);
+      session.setWindowInfo(e.payload.win, e.payload.buf, e.payload.ft);
       reconcileIslands();
     }),
     nvim.on("reset", (e) => {
@@ -2403,12 +2395,11 @@ addEventListener("error", (e) => {
     nvim.on("guiopt", (e) => applyGuiOpt(e.payload.name, e.payload.value)),
     nvim.on("md_preview", (e) => {
       const { win, state } = e.payload;
-      if (state === -1) previewWins.delete(win);
-      else previewWins.set(win, state === 1);
+      session.setPreview(win, state);
       reconcileIslands();
     }),
     nvim.on("win_gutter", (e) => {
-      winGutter.set(e.payload.win, e.payload);
+      session.setGutter(e.payload);
       islands.get(e.payload.win)?.setGutter(e.payload);
     }),
     nvim.on("md_decor", (e) => {
@@ -2449,12 +2440,11 @@ addEventListener("error", (e) => {
   // every previewed markdown window.
   try {
     for (const [win, buf, ft, mdp] of await nvim.winFiletypes()) {
-      winFt.set(win, ft || "");
-      if (buf != null) winBuf.set(win, buf);
-      if (mdp === 0 || mdp === 1) previewWins.set(win, mdp === 1);
+      session.setWindowInfo(win, buf, ft);
+      if (mdp === 0 || mdp === 1) session.setPreview(win, mdp);
     }
     reconcileIslands();
-    jlog(`winfts replayed: ${JSON.stringify([...winFt])}`);
+    jlog(`winfts replayed: ${JSON.stringify([...session.windowFiletypes])}`);
   } catch (e) {
     jlog("winfts failed: " + e);
   }
@@ -2470,7 +2460,7 @@ addEventListener("error", (e) => {
       foldcolumn,
     ] of await nvim.windowGutters()) {
       const g = { win, number, relativenumber, numberwidth, signcolumn, foldcolumn };
-      winGutter.set(win, g);
+      session.setGutter(g);
       islands.get(win)?.setGutter(g);
     }
   } catch (e) {
@@ -2499,8 +2489,8 @@ addEventListener("error", (e) => {
   setTimeout(
     () =>
       jlog(
-        `state: grids=${grids.size} winPos=${winPos.size} ` +
-          `islands=${islands.size} winFt=${JSON.stringify([...winFt])}`,
+        `state: grids=${grids.size} winPos=${session.windowPositions.size} ` +
+          `islands=${islands.size} winFt=${JSON.stringify([...session.windowFiletypes])}`,
       ),
     800,
   );
