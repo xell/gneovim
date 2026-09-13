@@ -28,7 +28,7 @@ import {
   tableCursorCell,
   tableHighlightCells,
 } from "./pure/markdown.js";
-import { diffInserted, minimalEdit } from "./pure/editing.js";
+import { diffInserted } from "./pure/editing.js";
 import {
   keyToNvim as encodeKeyToNvim,
   normalModePunctuation,
@@ -37,6 +37,7 @@ import { screenMetrics as calculateScreenMetrics } from "./pure/layout.js";
 import { imageSource as resolveImageSource } from "./pure/image-source.js";
 import { visualRanges } from "./pure/visual-ranges.js";
 import { foldRanges, overlapsRanges } from "./pure/fold-ranges.js";
+import { bufferLineEdit } from "./pure/buffer-line-edit.js";
 import { semanticWordTarget as findSemanticWordTarget } from "./pure/semantic-word.js";
 import {
   headingMarkerRanges,
@@ -1438,41 +1439,13 @@ class Island {
   }
   applyBufLines(a, lastline, linedata) {
     const doc = this.view.state.doc;
-    const L = doc.lines;
-    const b = lastline < 0 ? L : lastline;
-    let from;
-    let to;
-    let insert;
-    if (a >= L) {
-      from = doc.length;
-      to = doc.length;
-      insert = linedata.map((l) => "\n" + l).join("");
-    } else if (b >= L) {
-      if (a === 0) {
-        from = 0;
-        to = doc.length;
-        insert = linedata.join("\n");
-      } else {
-        from = doc.line(a).to;
-        to = doc.length;
-        insert = linedata.length ? "\n" + linedata.join("\n") : "";
-      }
-    } else {
-      from = doc.line(a + 1).from;
-      to = doc.line(b + 1).from;
-      insert = linedata.map((l) => l + "\n").join("");
-    }
-    // `nvim_buf_attach` reports at line granularity, so the block above replaces
-    // whole lines even for a one-character keystroke. Shrink to the minimal
+    // `nvim_buf_attach` reports at line granularity, so its range replaces whole
+    // lines even for a one-character keystroke. Shrink to the minimal
     // edit (common prefix + suffix removed) so decorations outside the actual
     // change map through untouched and do not flash / reflow the line.
-    const cur = doc.sliceString(from, to);
-    const edit = minimalEdit(cur, insert);
-    from += edit.from;
-    to = from - edit.from + edit.to;
-    insert = edit.insert;
+    const edit = bufferLineEdit(doc, a, lastline, linedata);
     try {
-      if (from !== to || insert) this.tx({ changes: { from, to, insert } });
+      if (edit) this.tx({ changes: edit });
       // Cursor and buffer notifications are independent. A multibyte cursor can
       // arrive while CM still has the old line and be clamped to its old end.
       // Re-seat from the authoritative byte position after every line echo so
