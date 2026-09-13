@@ -54,6 +54,19 @@ Use `EditorView.domEventHandlers` for composition events. Do not attach a
 second listener directly to `.cm-content`: CodeMirror already owns that DOM
 event lifecycle, and listener ordering can hide or race the final event.
 
+Grid windows have no editable DOM of their own, so they use the hidden `#ime`
+textarea at the grid cursor as their macOS composition surface. Neovim's command
+line is also grid-rendered, but cannot be recognized as Insert mode:
+`mode_change` may still look Normal while `/`, `?`, or `:` owns the keyboard.
+The `gnv_cmdline` and `gnv_cmdline_hide` notifications therefore make command
+line activity an explicit second editable context for `#ime`. Plain text and
+committed compositions flow from that textarea through `nvim_input`; Enter,
+Backspace, and other named or modified keys retain the ordinary keydown path.
+This applies to every Neovim command-line type, including search and
+`input()`-style prompts. While it is active, Markdown island Normal-mode
+punctuation and semantic-motion interception must be bypassed even if the
+underlying cursor grid still belongs to an island.
+
 Safari can omit `compositionend`. A final `beforeinput` with
 `inputType == "insertText"` while a composition snapshot exists is the fallback
 completion signal. Defer the handoff until CodeMirror has finished reconciling

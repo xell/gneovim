@@ -613,6 +613,10 @@ let curMode = null; // modeInfo entry for the current mode
 // committed text to nvim via nvim_input, which inserts it and moves the cursor.
 // ---------------------------------------------------------------------------
 let imeComposing = false;
+// CmdlineEnter/Changed and CmdlineLeave notifications make command-line input
+// another editable grid context. UI mode_change alone cannot identify it:
+// Neovim draws the command line on a grid while its mode may still look normal.
+let cmdlineActive = false;
 // A hidden <textarea> is the keyboard/IME sink for grid windows (the standard
 // pattern: Monaco, ace, CodeMirror 5). It stays focused so macOS keeps the
 // user's input source, and is readOnly outside insert mode so the OS IME has
@@ -632,7 +636,7 @@ viewportEl.append(imeEl);
 function imeFlush() {
   const v = imeEl.value;
   imeEl.value = "";
-  if (v && gridInsertActive())
+  if (v && gridTextInputActive())
     invoke("nvim_input", { keys: v.replace(/</g, "<lt>") });
 }
 imeEl.addEventListener("compositionstart", () => {
@@ -640,7 +644,7 @@ imeEl.addEventListener("compositionstart", () => {
 });
 imeEl.addEventListener("compositionend", () => {
   imeComposing = false;
-  imeFlush(); // discards if we somehow composed outside insert mode
+  imeFlush(); // discards if we somehow composed outside an editable context
 });
 imeEl.addEventListener("input", () => {
   if (!imeComposing) imeFlush();
@@ -649,16 +653,20 @@ imeEl.addEventListener("input", () => {
 function gridInsertActive() {
   return !islandForGrid(cursorGrid) && /^(insert|replace)/.test(modeName_);
 }
+function gridTextInputActive() {
+  return cmdlineActive || gridInsertActive();
+}
 // #ime stays FOCUSED whenever a grid window holds the cursor, in every mode, so
 // macOS keeps the user's chosen input source. It is only contenteditable in
-// insert mode; outside insert mode a focused-but-non-editable element gives the
-// OS IME nothing to compose into, so normal-mode keys reach nvim untouched.
+// insert/replace mode or while Neovim owns a command line; outside either, a
+// focused-but-non-editable element gives the OS IME nothing to compose into, so
+// normal-mode keys reach nvim untouched.
 function updateImeFocus() {
-  if (islandForGrid(cursorGrid)) {
+  if (!cmdlineActive && islandForGrid(cursorGrid)) {
     if (document.activeElement === imeEl) imeEl.blur();
     return;
   }
-  const ro = !gridInsertActive();
+  const ro = !gridTextInputActive();
   if (imeEl.readOnly !== ro) imeEl.readOnly = ro;
   if (ro && imeComposing) {
     imeComposing = false; // left insert mid-composition: drop it
@@ -2514,8 +2522,14 @@ addEventListener("error", (e) => {
           e.payload.scrolloff,
         );
     }),
-    listen(ev("cmdline"), () => {}),
-    listen(ev("cmdline_hide"), () => {}),
+    listen(ev("cmdline"), () => {
+      cmdlineActive = true;
+      updateImeFocus();
+    }),
+    listen(ev("cmdline_hide"), () => {
+      cmdlineActive = false;
+      updateImeFocus();
+    }),
     listen(ev("focus"), () => repaintNow()),
     listen(ev("look_up"), () => islandLookup()),
     listen(ev("guiopt"), (e) => applyGuiOpt(e.payload.name, e.payload.value)),
@@ -2811,7 +2825,10 @@ let islandNativeWPending = false;
 addEventListener("keydown", (e) => {
   if (imeComposing) return; // IME is mid-composition; let #ime + the OS handle it
   if (handleFontZoom(e)) return;
-  const isl = islandForGrid(cursorGrid);
+  // A command line temporarily belongs to Neovim, even when the underlying
+  // cursor grid is a Markdown island. Do not apply island Normal-mode physical
+  // punctuation or semantic-motion interception to command-line text.
+  const isl = cmdlineActive ? null : islandForGrid(cursorGrid);
   const normalPunctuation =
     isl?.mode === "n" ? normalModePunctuation(e) : null;
   if (normalPunctuation != null) {
@@ -2853,10 +2870,11 @@ addEventListener("keydown", (e) => {
   if (e.key === "w" || e.key === "Escape") islandNativeWPending = false;
   const keys = keyToNvim(e);
   if (keys === null) return; // mid-composition / lone modifier
-  // grid window in insert mode: plain text goes into the #ime textarea for the
-  // OS IME; its input / compositionend forward to nvim. Control keys pass here.
+  // Editable grid context (insert/replace or command line): plain text goes into
+  // the #ime textarea for the OS IME; input/compositionend forward it to nvim.
+  // Named and modified keys, including Enter and Backspace, still pass here.
   if (
-    gridInsertActive() &&
+    gridTextInputActive() &&
     document.activeElement === imeEl &&
     !keys.startsWith("<")
   )
