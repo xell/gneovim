@@ -534,8 +534,19 @@ class Island {
       // nvimCursorField decoration (bar, block, or EOL block); CM's native
       // caret is hidden and drawSelection is unused, so no CM-derived caret
       // can lag a keystroke behind the buffer echo.
+      //
+      // markdown() defaults addKeymap to true, silently installing its own
+      // Prec.high Enter/Backspace bindings (insertNewlineContinueMarkup /
+      // deleteMarkupBackward) alongside CM's normal keydown handling on
+      // contentDOM. Neovim's global keydown listener still also forwards
+      // that same key (preventDefault doesn't stop propagation to window),
+      // so a list-continuing Enter ran twice: once as CM's own local edit,
+      // once as Neovim's formatoptions continuation landing on top of it,
+      // producing a duplicated "- " line only in the island. addKeymap:
+      // false keeps this the single no-keymap surface the rest of this
+      // comment describes.
       extensions: [
-        markdown(),
+        markdown({ addKeymap: false }),
         markdownTableField,
         markdownImageField,
         EditorView.lineWrapping,
