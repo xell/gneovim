@@ -1,11 +1,17 @@
 import { byteToCol } from "./text-geometry.js";
 
+// `caption` (the source-line replacement shown while the cursor is off the
+// image line) is always the literal alt text, unmodified: a computed
+// "label (600px)" form used to look friendlier, but it fabricates a string
+// ("(", "px", ")") that never exists in the buffer, which confused Neovim
+// search and hop.nvim hint matching run against it. `alt` and `width` still
+// split the |N suffix for the actual <img> element.
 export function imageLabel(alt) {
   const size = /^(.*)\|([1-9]\d*)$/.exec(alt);
   if (!size) return { alt, caption: alt, width: null };
   const width = Number(size[2]);
   return Number.isSafeInteger(width)
-    ? { alt: size[1], caption: `${size[1]} (${width}px)`, width }
+    ? { alt: size[1], caption: alt, width }
     : { alt, caption: alt, width: null };
 }
 
@@ -97,6 +103,27 @@ export function tableHighlightCells(doc, firstRow, lastRow, highlights) {
     if (from.cell !== to.cell) continue;
     const displayRow = row === firstRow ? 0 : row - firstRow - 1;
     out.push([displayRow, from.cell, from.offset, Math.max(1, to.offset - from.offset), group]);
+  }
+  return out;
+}
+
+// Same idea as tableHighlightCells, for a Markdown image's caption widget: a
+// single span (the alt text) rather than a grid of cells. `altStart`/`altEnd`
+// are the caption's own character bounds within the source line (the alt
+// text is copied verbatim into the caption, so its offsets there and here
+// are identical); a highlight that only partly overlaps the caption (it also
+// covers the `![`, the `]()`, or the URL, none of which the caption shows)
+// is clipped to the part that does.
+export function imageCaptionHighlights(doc, row, altStart, altEnd, highlights) {
+  const out = [];
+  for (const [highlightRow, startColumn, endColumn, group] of highlights) {
+    if (highlightRow !== row) continue;
+    const line = doc.line(row + 1);
+    const start = byteToCol(line.text, startColumn);
+    const end = byteToCol(line.text, endColumn);
+    const from = Math.max(start, altStart) - altStart;
+    const to = Math.min(end, altEnd) - altStart;
+    if (to > from) out.push([from, to - from, group]);
   }
   return out;
 }

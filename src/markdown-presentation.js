@@ -1,6 +1,7 @@
 import { StateField } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import {
+  imageCaptionHighlights,
   imageLabel,
   tableAlign,
   tableCells,
@@ -18,8 +19,60 @@ export function createMarkdownPresentation({
   setCursor,
   setImageBase,
   setTableConcealGuard,
-  setTableHighlights,
+  setInteractiveHighlights,
 }) {
+  // Both the table and the image caption widget replace real source text
+  // with their own DOM, so Neovim search/incsearch/hop highlights that land
+  // on that text (an ordinary Decoration.mark elsewhere) never reach it: a
+  // Decoration.mark on a byte hidden behind another field's Decoration.replace
+  // has nothing left to mark. This renders those highlights inline instead,
+  // fed by the same interactive-highlight list (Search / IncSearch /
+  // EasyMotionTarget / HopPreview) both widgets are given.
+  function appendHighlightedText(container, text, spans) {
+    const boundaries = [
+      ...new Set([
+        0,
+        text.length,
+        ...spans.flatMap(({ from, to }) => [from, to]),
+      ]),
+    ].sort((a, b) => a - b);
+    for (let index = 0; index + 1 < boundaries.length; index++) {
+      const from = boundaries[index];
+      const to = boundaries[index + 1];
+      const groups = [
+        ...new Set(
+          spans
+            .filter((span) => span.from < to && span.to > from)
+            .map((span) => span.group),
+        ),
+      ];
+      if (groups.length) {
+        const mark = document.createElement("span");
+        // Search and IncSearch may overlap. Preserve every class so the
+        // registry's Neovim-derived priority determines the visible style.
+        mark.className = groups
+          .map((group) => highlights.islandClass(group))
+          .join(" ");
+        mark.textContent = text.slice(from, to);
+        container.append(mark);
+      } else {
+        container.append(document.createTextNode(text.slice(from, to)));
+      }
+    }
+    if (!container.childNodes.length) {
+      container.append(document.createTextNode(""));
+    }
+  }
+
+  function clampSpans(text, entries) {
+    return entries
+      .map(([start, length, group]) => ({
+        from: Math.max(0, Math.min(start, text.length)),
+        to: Math.max(0, Math.min(start + length, text.length)),
+        group,
+      }))
+      .filter(({ from, to }) => to > from);
+  }
   class MarkdownTableWidget extends WidgetType {
     constructor(header, align, rows, cursor, cellHighlights) {
       super();
@@ -85,46 +138,18 @@ export function createMarkdownPresentation({
   }
 
   function appendTableText(cell, text, cellHighlights) {
-    const spans = cellHighlights
-      .map(([, , start, length, group]) => ({
-        from: Math.max(0, Math.min(start, text.length)),
-        to: Math.max(0, Math.min(start + length, text.length)),
-        group,
-      }))
-      .filter(({ from, to }) => to > from);
-    const boundaries = [
-      ...new Set([
-        0,
-        text.length,
-        ...spans.flatMap(({ from, to }) => [from, to]),
-      ]),
-    ].sort((a, b) => a - b);
-    for (let index = 0; index + 1 < boundaries.length; index++) {
-      const from = boundaries[index];
-      const to = boundaries[index + 1];
-      const groups = [
-        ...new Set(
-          spans
-            .filter((span) => span.from < to && span.to > from)
-            .map((span) => span.group),
-        ),
-      ];
-      if (groups.length) {
-        const mark = document.createElement("span");
-        // Search and IncSearch may overlap. Preserve every class so the
-        // registry's Neovim-derived priority determines the visible style.
-        mark.className = groups
-          .map((group) => highlights.islandClass(group))
-          .join(" ");
-        mark.textContent = text.slice(from, to);
-        cell.append(mark);
-      } else {
-        cell.append(document.createTextNode(text.slice(from, to)));
-      }
-    }
-    if (!cell.childNodes.length) {
-      cell.append(document.createTextNode(""));
-    }
+    appendHighlightedText(
+      cell,
+      text,
+      clampSpans(
+        text,
+        cellHighlights.map(([, , start, length, group]) => [
+          start,
+          length,
+          group,
+        ]),
+      ),
+    );
   }
 
   function addTableCursor(cell, cursor) {
@@ -194,24 +219,30 @@ export function createMarkdownPresentation({
   }
 
   class MarkdownImageSourceWidget extends WidgetType {
-    constructor(alt) {
+    constructor(text, captionHighlights) {
       super();
-      this.alt = alt;
+      this.text = text;
+      this.captionHighlights = captionHighlights;
+      this.key = JSON.stringify([text, captionHighlights]);
     }
 
     eq(other) {
-      return other.alt === this.alt;
+      return other.key === this.key;
     }
 
     toDOM() {
       const source = document.createElement("span");
       source.className = "cm-markdown-image-source";
-      source.textContent = this.alt;
+      appendHighlightedText(
+        source,
+        this.text,
+        clampSpans(this.text, this.captionHighlights),
+      );
       return source;
     }
   }
 
-  function imageDecorations(doc, bufferName, cursor) {
+  function imageDecorations(doc, bufferName, cursor, interactiveHighlights = []) {
     const ranges = [];
     for (let number = 1; number <= doc.lines; number++) {
       const line = doc.line(number);
@@ -228,9 +259,24 @@ export function createMarkdownPresentation({
       if (!src) continue;
       const label = imageLabel(match[1]);
       if (cursor?.row !== number - 1) {
+        // The alt text is copied verbatim into the caption (see imageLabel),
+        // so its bounds in the source line are also its bounds in the
+        // caption: the leading "![" is the only fixed prefix ahead of it.
+        const altStart = /^\s*/.exec(line.text)[0].length + 2;
+        const altEnd = altStart + match[1].length;
+        const captionHighlights = imageCaptionHighlights(
+          doc,
+          number - 1,
+          altStart,
+          altEnd,
+          interactiveHighlights,
+        );
         ranges.push(
           Decoration.replace({
-            widget: new MarkdownImageSourceWidget(label.caption),
+            widget: new MarkdownImageSourceWidget(
+              label.caption,
+              captionHighlights,
+            ),
           }).range(line.from, line.to),
         );
       }
@@ -254,24 +300,32 @@ export function createMarkdownPresentation({
       deco: imageDecorations(state.doc, "", null),
       bufferName: "",
       cursor: null,
+      highlights: [],
     }),
     update(value, transaction) {
       let bufferName = value.bufferName;
       let cursor = value.cursor;
+      let interactiveHighlights = value.highlights;
       for (const effect of transaction.effects) {
         if (effect.is(setImageBase)) bufferName = effect.value;
         if (effect.is(setCursor)) cursor = effect.value;
+        if (effect.is(setInteractiveHighlights)) {
+          interactiveHighlights = effect.value;
+        }
       }
       return transaction.docChanged ||
         bufferName !== value.bufferName ||
-        cursor !== value.cursor
+        cursor !== value.cursor ||
+        interactiveHighlights !== value.highlights
         ? {
             deco: imageDecorations(
               transaction.state.doc,
               bufferName,
               cursor,
+              interactiveHighlights,
             ),
             bufferName,
+            highlights: interactiveHighlights,
             cursor,
           }
         : value;
@@ -385,7 +439,7 @@ export function createMarkdownPresentation({
         if (effect.is(setTableConcealGuard)) {
           guardRow = effect.value;
         }
-        if (effect.is(setTableHighlights)) {
+        if (effect.is(setInteractiveHighlights)) {
           tableHighlights = effect.value;
         }
       }

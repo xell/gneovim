@@ -454,7 +454,11 @@ const {
 // `guard_row` is supplied by md_decor.lua after applying Neovim's
 // 'concealcursor' rule. -1 means conceal remains active on the cursor line.
 const setTableConcealGuard = StateEffect.define();
-const setTableHighlights = StateEffect.define();
+// Shared by markdownTableField and markdownImageField: both widgets replace
+// real source text with their own DOM, so Search/IncSearch/EasyMotionTarget/
+// HopPreview highlights on that text (an ordinary Decoration.mark elsewhere)
+// need to be fed to them directly instead. See markdown-presentation.js.
+const setInteractiveHighlights = StateEffect.define();
 const setIslandImageBase = StateEffect.define();
 const {
   markdownImageField,
@@ -467,7 +471,7 @@ const {
   setCursor: setNvimCursor,
   setImageBase: setIslandImageBase,
   setTableConcealGuard,
-  setTableHighlights,
+  setInteractiveHighlights,
 });
 // Non-editable content is not focusable on its own; the tabindex keeps it the
 // keyboard's target so keydown still reaches the global nvim_input path.
@@ -608,7 +612,7 @@ class Island {
       element: this.el,
       decorationState: islandDecorationState,
       setTableConcealGuard,
-      setTableHighlights,
+      setInteractiveHighlights,
       getCursor: () => this._nvimCursor,
       getMode: () => this.mode,
       cancelPendingZeroScrolloff: () => {

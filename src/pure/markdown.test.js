@@ -1,11 +1,18 @@
+import { Text } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
-import { imageLabel, tableAlign, tableCells, tableCursorCell } from "./markdown.js";
+import {
+  imageCaptionHighlights,
+  imageLabel,
+  tableAlign,
+  tableCells,
+  tableCursorCell,
+} from "./markdown.js";
 
 describe("Markdown image labels", () => {
-  it("extracts a numeric width suffix", () => {
+  it("extracts a numeric width suffix but leaves the caption verbatim", () => {
     expect(imageLabel("diagram|320")).toEqual({
       alt: "diagram",
-      caption: "diagram (320px)",
+      caption: "diagram|320",
       width: 320,
     });
     expect(imageLabel("diagram|0")).toEqual({
@@ -13,6 +20,21 @@ describe("Markdown image labels", () => {
       caption: "diagram|0",
       width: null,
     });
+  });
+
+  it("maps a highlight run onto the caption, clipped to the alt text", () => {
+    const doc = Text.of(["![diagram|320](a/fake/path)"]);
+    // "diagram|320" runs from column 2 to 13 in the source line.
+    expect(imageCaptionHighlights(doc, 0, 2, 13, [[0, 4, 8, "Search"]])).toEqual([
+      [2, 4, "Search"],
+    ]);
+    // A match reaching into "](a/fake" is clipped to what the caption shows.
+    expect(imageCaptionHighlights(doc, 0, 2, 13, [[0, 10, 18, "Search"]])).toEqual([
+      [8, 3, "Search"],
+    ]);
+    // A different row, or a match entirely outside the alt text, drops out.
+    expect(imageCaptionHighlights(doc, 0, 2, 13, [[1, 4, 8, "Search"]])).toEqual([]);
+    expect(imageCaptionHighlights(doc, 0, 2, 13, [[0, 15, 20, "Search"]])).toEqual([]);
   });
 });
 

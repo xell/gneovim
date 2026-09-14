@@ -9,7 +9,7 @@ function fixture(doc = "# Title\n> quote\nbody") {
     log: vi.fn(),
   });
   const setTableConcealGuard = StateEffect.define();
-  const setTableHighlights = StateEffect.define();
+  const setInteractiveHighlights = StateEffect.define();
   let state = EditorState.create({
     doc,
     extensions: [
@@ -43,7 +43,7 @@ function fixture(doc = "# Title\n> quote\nbody") {
     element: { style },
     decorationState,
     setTableConcealGuard,
-    setTableHighlights,
+    setInteractiveHighlights,
     getCursor: () => ({ row: 0, col: 0 }),
     getMode: () => "n",
     cancelPendingZeroScrolloff: vi.fn(),

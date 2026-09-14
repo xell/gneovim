@@ -103,7 +103,7 @@ export class IslandDisplayDecorations {
     element,
     decorationState,
     setTableConcealGuard,
-    setTableHighlights,
+    setInteractiveHighlights,
     getCursor,
     getMode,
     cancelPendingZeroScrolloff,
@@ -119,7 +119,7 @@ export class IslandDisplayDecorations {
     this.element = element;
     this.decorationState = decorationState;
     this.setTableConcealGuard = setTableConcealGuard;
-    this.setTableHighlights = setTableHighlights;
+    this.setInteractiveHighlights = setInteractiveHighlights;
     this.getCursor = getCursor;
     this.getMode = getMode;
     this.cancelPendingZeroScrolloff = cancelPendingZeroScrolloff;
@@ -130,7 +130,7 @@ export class IslandDisplayDecorations {
     this.log = log;
     this.payload = null;
     this.easyMotionOverlay = false;
-    this.tableHighlightsKey = null;
+    this.interactiveHighlightsKey = null;
     this.incsearchKey = "";
   }
 
@@ -152,23 +152,34 @@ export class IslandDisplayDecorations {
       this.element.style.removeProperty("--accent");
     }
 
-    // Replacement table DOM needs interactive and search highlights copied
-    // into its own text nodes. EasyMotionShade would dim every table cell.
-    const tableHighlights = (payload?.hl?.runs ?? []).filter(
+    // The table and image-caption widgets replace real source text with
+    // their own DOM (see markdown-presentation.js), so interactive and
+    // search highlights need to be copied into it directly; an ordinary
+    // Decoration.mark on that text has nothing left to mark. EasyMotionShade
+    // would dim every table cell, and HopUnmatched likewise (hop.nvim's own
+    // dim_unmatched), so neither is let through; HopPreview is hop's own
+    // IncSearch-alike highlight extmark for the pattern typed so far in its
+    // first ("type a pattern") step, an ordinary hl_group extmark like
+    // Search/IncSearch, not the virt_text overlay hop's second ("pick a hint
+    // letter") step draws.
+    const interactiveHighlights = (payload?.hl?.runs ?? []).filter(
       ([, , , group]) =>
         /^EasyMotionTarget/.test(group) ||
         group === "Search" ||
-        group === "IncSearch",
+        group === "IncSearch" ||
+        group === "HopPreview",
     );
-    const tableHighlightsKey = JSON.stringify(tableHighlights);
-    const tableEffects = [
+    const interactiveHighlightsKey = JSON.stringify(interactiveHighlights);
+    const interactiveEffects = [
       this.setTableConcealGuard.of(payload?.guard_row ?? null),
     ];
-    if (this.tableHighlightsKey !== tableHighlightsKey) {
-      this.tableHighlightsKey = tableHighlightsKey;
-      tableEffects.push(this.setTableHighlights.of(tableHighlights));
+    if (this.interactiveHighlightsKey !== interactiveHighlightsKey) {
+      this.interactiveHighlightsKey = interactiveHighlightsKey;
+      interactiveEffects.push(
+        this.setInteractiveHighlights.of(interactiveHighlights),
+      );
     }
-    this.view.dispatch({ effects: tableEffects });
+    this.view.dispatch({ effects: interactiveEffects });
     this.apply();
 
     const incsearch = payload?.incsearch ?? null;
