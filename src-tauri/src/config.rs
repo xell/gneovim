@@ -25,12 +25,19 @@ pub struct Markdown {
     /// preview island by default. Per-window overridable at runtime with
     /// `:MarkdownLivePreviewOn` / `Off` / `Toggle`. Default true.
     pub live_preview_default: bool,
+    /// Whether a markdown island lets Grammarly Desktop act on its text by
+    /// default. When false the island carries the `data-gramm="false"` and
+    /// `data-enable-grammarly="false"` opt-out attributes. Per-window
+    /// overridable at runtime with `:GrammarlyOn` / `Off` / `Toggle`.
+    /// Default true.
+    pub grammarly_default: bool,
 }
 
 impl Default for Markdown {
     fn default() -> Self {
         Self {
             live_preview_default: true,
+            grammarly_default: true,
         }
     }
 }

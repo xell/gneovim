@@ -19,13 +19,25 @@ describe("SessionModel", () => {
   it("keeps a shared window alive until its final grid is destroyed", () => {
     const model = new SessionModel();
     model.setPreview(1000, 1);
+    model.setGrammarly(1000, 0);
     model.placeGrid(2, {}, 1000);
     model.placeGrid(3, {}, 1000);
 
     model.destroyGrid(2);
     expect(model.previewWindows.get(1000)).toBe(true);
+    expect(model.grammarlyForWindow(1000)).toBe(false);
     model.destroyGrid(3);
     expect(model.previewWindows.has(1000)).toBe(false);
+    expect(model.grammarlyForWindow(1000)).toBe(true);
+  });
+
+  it("treats an unknown or cleared Grammarly flag as allowed", () => {
+    const model = new SessionModel();
+    expect(model.grammarlyForWindow(1000)).toBe(true);
+    model.setGrammarly(1000, 0);
+    expect(model.grammarlyForWindow(1000)).toBe(false);
+    model.setGrammarly(1000, -1);
+    expect(model.grammarlyForWindow(1000)).toBe(true);
   });
 
   it("hides positions without forgetting grid ownership", () => {

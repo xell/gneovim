@@ -4,11 +4,15 @@
 --
 --   :MarkdownLivePreviewOn / Off / Toggle    current window
 --   :MarkdownLivePreviewOn! / ...             every markdown window in the tab
+--   :GrammarlyOn / Off / Toggle               current markdown window
+--   :GrammarlyOn! / ...                       every markdown window in the tab
 --
 -- Each window carries `w:gnv_md_preview` (0 or 1) while it is a markdown
 -- window, unset otherwise, so it can be read from a statusline or a script.
+-- `w:gnv_grammarly` (0 or 1) follows the same lifecycle: when 0, the window's
+-- island advertises itself to Grammarly as opted out.
 
-local chan, default, version = ...
+local chan, default, version, grammarly_default = ...
 
 vim.g.gneovim = true
 vim.g.gneovim_version = version
@@ -85,6 +89,24 @@ local function set_preview(win, on)
   end
 end
 
+-- Grammarly opt out, per window. The island sets the `data-gramm="false"` and
+-- `data-enable-grammarly="false"` attributes Grammarly documents for web
+-- content when the flag is 0. Same pcall rationale as notify().
+local function get_grammarly(win)
+  local ok, v = pcall(vim.api.nvim_win_get_var, win, 'gnv_grammarly')
+  return ok and v or nil
+end
+
+local function notify_grammarly(win, val)
+  pcall(vim.rpcnotify, chan, 'gnv_grammarly', win, val)
+end
+
+local function set_grammarly(win, on)
+  local v = on and 1 or 0
+  pcall(vim.api.nvim_win_set_var, win, 'gnv_grammarly', v)
+  notify_grammarly(win, v)
+end
+
 -- Mirror a markdown window's gutter options into the GUI so its CM island can
 -- draw the same number column Neovim would. signcolumn / foldcolumn ride along
 -- for a later pass. Same pcall rationale as notify().
@@ -109,9 +131,18 @@ local function reconcile(win)
     if get_flag(win) == nil then
       set_preview(win, default == 1)
     end
-  elseif get_flag(win) ~= nil then
-    set_flag(win, nil)
-    notify(win, -1)
+    if get_grammarly(win) == nil then
+      set_grammarly(win, grammarly_default == 1)
+    end
+  else
+    if get_flag(win) ~= nil then
+      set_flag(win, nil)
+      notify(win, -1)
+    end
+    if get_grammarly(win) ~= nil then
+      pcall(vim.api.nvim_win_del_var, win, 'gnv_grammarly')
+      notify_grammarly(win, -1)
+    end
   end
 end
 
@@ -161,27 +192,30 @@ local function targets(bang)
   return out
 end
 
-local function apply(action, bang)
+local function apply(name, action, bang, get, set)
   local wins = targets(bang)
   if #wins == 0 then
     vim.notify(
-      'MarkdownLivePreview: no markdown window' .. (bang and ' in this tabpage' or ''),
+      name .. ': no markdown window' .. (bang and ' in this tabpage' or ''),
       vim.log.levels.WARN
     )
     return
   end
   for _, w in ipairs(wins) do
-    local on = action == 'on' or (action == 'toggle' and get_flag(w) ~= 1)
-    set_preview(w, on)
+    local on = action == 'on' or (action == 'toggle' and get(w) ~= 1)
+    set(w, on)
   end
 end
 
 for _, spec in ipairs({
-  { 'MarkdownLivePreviewOn', 'on' },
-  { 'MarkdownLivePreviewOff', 'off' },
-  { 'MarkdownLivePreviewToggle', 'toggle' },
+  { 'MarkdownLivePreviewOn', 'on', 'MarkdownLivePreview', get_flag, set_preview },
+  { 'MarkdownLivePreviewOff', 'off', 'MarkdownLivePreview', get_flag, set_preview },
+  { 'MarkdownLivePreviewToggle', 'toggle', 'MarkdownLivePreview', get_flag, set_preview },
+  { 'GrammarlyOn', 'on', 'Grammarly', get_grammarly, set_grammarly },
+  { 'GrammarlyOff', 'off', 'Grammarly', get_grammarly, set_grammarly },
+  { 'GrammarlyToggle', 'toggle', 'Grammarly', get_grammarly, set_grammarly },
 }) do
   vim.api.nvim_create_user_command(spec[1], function(o)
-    apply(spec[2], o.bang)
-  end, { bang = true, desc = 'gneovim: markdown live preview (' .. spec[2] .. ')' })
+    apply(spec[3], spec[2], o.bang, spec[4], spec[5])
+  end, { bang = true, desc = 'gneovim: ' .. spec[3] .. ' (' .. spec[2] .. ')' })
 end

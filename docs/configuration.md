@@ -68,6 +68,10 @@ open_files_in = "window"
 # island by default. Overridable per window at runtime (see below). Default
 # true.
 live_preview_default = true
+# Whether a markdown island is published to macOS Accessibility, which is how
+# Grammarly Desktop reads and corrects it, by default. Overridable per window
+# at runtime with :GrammarlyOn / Off / Toggle. Default true.
+grammarly_default = true
 ```
 
 ## Markdown live preview
@@ -87,6 +91,29 @@ the *same* markdown file can differ, and you can read the flag from a statusline
 or a script. gneovim also sets `g:gneovim` and registers itself via
 `nvim_set_client_info`; check `vim.g.gneovim` from a `UIEnter` autocmd (it is
 not set yet when `init.lua` first runs).
+
+## Grammarly in a markdown island
+
+Grammarly Desktop reads a markdown island through macOS Accessibility and
+corrects it with posted keys (see `grammarly-markdown-island.md`). Three
+commands, available only in gneovim and only for markdown windows, let a window
+opt out:
+
+    :GrammarlyOn                 the island is a normal text field for Grammarly
+    :GrammarlyOff                the island advertises Grammarly's opt-out
+    :GrammarlyToggle
+    :Grammarly...!               with a bang: every markdown window in the tabpage
+
+Grammarly Desktop is a separate process; it can only reach the island through
+the macOS Accessibility tree. While Neovim's cursor is in an island whose flag
+is off, the app withholds that GUI window's web content from Accessibility: an
+Accessibility client sees a focused group with no children and no text, so
+there is nothing to read, select, or correct. Moving the cursor to a grid
+window or to an allowed island publishes the content again. Editing, IME, and
+rendering are untouched; VoiceOver and dictation lose that window's web
+content while it is hidden, which is the intended trade. The state lives in
+`w:gnv_grammarly` (`1` on, `0` off) and `[markdown] grammarly_default` sets the
+initial value.
 
 ## Closing and quitting
 

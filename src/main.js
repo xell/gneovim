@@ -159,6 +159,24 @@ const islands = islandManager.islands; // read-only access for rendering and eve
 // the nvim_wingutters replay). Applied to the island's gutter compartment.
 let livePreviewDefault = true; // from gnv_config [markdown] live_preview_default
 
+// `:GrammarlyOff` (w:gnv_grammarly = 0). While Neovim's cursor is in such an
+// island, the app withholds this window's web content from macOS
+// Accessibility (lib.rs webview_accessibility), which is the only channel an
+// external client like Grammarly Desktop has into the island. Grid windows
+// and allowed islands re-expose it. Sent only on change.
+let accessibilityHidden = null; // null: not yet sent (a reload keeps native state)
+function syncGrammarlyAccessibility() {
+  const win = session.windowForGrid(session.cursorGrid);
+  const hidden =
+    win != null && islands.has(win) && !session.grammarlyForWindow(win);
+  if (hidden === accessibilityHidden) return;
+  accessibilityHidden = hidden;
+  jlog(`grammarly: web content ${hidden ? "hidden from" : "exposed to"} accessibility`);
+  nvim
+    .setAccessibilityHidden(hidden)
+    .catch((e) => jlog("set_accessibility_hidden failed: " + e));
+}
+
 function gw(id) {
   let g = grids.get(id);
   if (!g) {
@@ -801,7 +819,12 @@ const gridCoordinator = new GridCoordinator({
 });
 const redrawScheduler = new RedrawScheduler({
   requestFrame: (callback) => requestAnimationFrame(callback),
-  render: (ops) => gridCoordinator.render(ops),
+  render: (ops) => {
+    gridCoordinator.render(ops);
+    // grid_cursor_goto may hand the cursor to or from an opted-out island
+    // without any gnv_cursor notification (e.g. leaving the command line).
+    syncGrammarlyAccessibility();
+  },
 });
 function applyGridBatch(ops) {
   redrawScheduler.enqueue(ops);
@@ -951,6 +974,7 @@ addEventListener("error", (e) => {
           e.payload.mode,
           e.payload.scrolloff,
         );
+      syncGrammarlyAccessibility();
     }),
     nvim.on("cmdline", () => {
       session.setCmdlineActive(true);
@@ -967,10 +991,15 @@ addEventListener("error", (e) => {
       const { win, state } = e.payload;
       session.setPreview(win, state);
       islandManager.reconcile();
+      syncGrammarlyAccessibility();
     }),
     nvim.on("win_gutter", (e) => {
       session.setGutter(e.payload);
       islands.get(e.payload.win)?.setGutter(e.payload);
+    }),
+    nvim.on("grammarly", (e) => {
+      session.setGrammarly(e.payload.win, e.payload.state);
+      syncGrammarlyAccessibility();
     }),
     nvim.on("md_decor", (e) => {
       let d;
@@ -1035,6 +1064,16 @@ addEventListener("error", (e) => {
     }
   } catch (e) {
     jlog("wingutters failed: " + e);
+  }
+
+  // Grammarly flags (md_preview.lua) likewise; pull them.
+  try {
+    for (const [win, state] of await nvim.windowGrammarly()) {
+      session.setGrammarly(win, state);
+    }
+    syncGrammarlyAccessibility();
+  } catch (e) {
+    jlog("wingrammarly failed: " + e);
   }
 
   // display-bridge payloads also fire before we listen; nudge a re-push.

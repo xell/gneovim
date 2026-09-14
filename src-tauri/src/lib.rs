@@ -129,6 +129,168 @@ fn install_native_shortcut_monitor() {
     log::info!("native shortcut monitor installed");
 }
 
+/// Withhold a WKWebView's web content from macOS Accessibility on request.
+///
+/// Accessibility clients such as Grammarly Desktop reach the markdown island
+/// only through the AX tree: the WKWebView answers `AXChildren`,
+/// `AXFocusedUIElement`, and hit tests with a remote element that the web
+/// process serves. While a webview is hidden here, those three answers become
+/// the webview itself with no children, so the client sees a focused group with
+/// no text and nothing to select or correct. Web content stays fully
+/// functional; only its accessibility projection is withheld, which also
+/// affects VoiceOver and dictation for that window, by design.
+///
+/// The override is installed once by swizzling WKWebView's legacy
+/// `NSAccessibility` methods (the ones WebKit implements) and consults a set of
+/// hidden webview pointers, so it is per window and can be toggled at runtime.
+#[cfg(target_os = "macos")]
+mod webview_accessibility {
+    use std::{
+        ffi::c_void,
+        sync::{Mutex, OnceLock},
+    };
+
+    use objc2::{
+        rc::Retained,
+        runtime::{AnyClass, AnyObject, Imp, Sel},
+        sel,
+    };
+    use objc2_foundation::{NSArray, NSPoint, NSString};
+
+    static HIDDEN: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    static ORIGINAL_ATTRIBUTE_VALUE: OnceLock<usize> = OnceLock::new();
+    static ORIGINAL_FOCUSED_ELEMENT: OnceLock<usize> = OnceLock::new();
+    static ORIGINAL_HIT_TEST: OnceLock<usize> = OnceLock::new();
+
+    #[link(name = "AppKit", kind = "framework")]
+    unsafe extern "C" {
+        fn NSAccessibilityPostNotification(element: *mut AnyObject, notification: &NSString);
+    }
+
+    fn is_hidden(view: &AnyObject) -> bool {
+        let key = view as *const AnyObject as usize;
+        HIDDEN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&key)
+    }
+
+    unsafe extern "C-unwind" fn attribute_value(
+        this: &AnyObject,
+        sel: Sel,
+        attribute: &NSString,
+    ) -> *mut AnyObject {
+        if is_hidden(this) && attribute.to_string() == "AXChildren" {
+            let empty: Retained<NSArray<AnyObject>> = NSArray::new();
+            return Retained::autorelease_return(empty) as *mut AnyObject;
+        }
+        let original: unsafe extern "C-unwind" fn(&AnyObject, Sel, &NSString) -> *mut AnyObject =
+            unsafe { std::mem::transmute(*ORIGINAL_ATTRIBUTE_VALUE.get().unwrap()) };
+        unsafe { original(this, sel, attribute) }
+    }
+
+    unsafe extern "C-unwind" fn focused_element(this: &AnyObject, sel: Sel) -> *mut AnyObject {
+        if is_hidden(this) {
+            return this as *const AnyObject as *mut AnyObject;
+        }
+        let original: unsafe extern "C-unwind" fn(&AnyObject, Sel) -> *mut AnyObject =
+            unsafe { std::mem::transmute(*ORIGINAL_FOCUSED_ELEMENT.get().unwrap()) };
+        unsafe { original(this, sel) }
+    }
+
+    unsafe extern "C-unwind" fn hit_test(
+        this: &AnyObject,
+        sel: Sel,
+        point: NSPoint,
+    ) -> *mut AnyObject {
+        if is_hidden(this) {
+            return this as *const AnyObject as *mut AnyObject;
+        }
+        let original: unsafe extern "C-unwind" fn(&AnyObject, Sel, NSPoint) -> *mut AnyObject =
+            unsafe { std::mem::transmute(*ORIGINAL_HIT_TEST.get().unwrap()) };
+        unsafe { original(this, sel, point) }
+    }
+
+    /// Swizzle once, at app setup. Every method must be one WKWebView itself
+    /// implements; a method inherited from NSView would change every view.
+    pub fn install() {
+        let Some(class) = AnyClass::get(c"WKWebView") else {
+            log::warn!("accessibility override: WKWebView class not found");
+            return;
+        };
+        let own: Vec<String> = class
+            .instance_methods()
+            .iter()
+            .map(|m| m.name().to_string())
+            .collect();
+        let swaps: [(Sel, Imp, &OnceLock<usize>); 3] = unsafe {
+            [
+                (
+                    sel!(accessibilityAttributeValue:),
+                    std::mem::transmute(
+                        attribute_value
+                            as unsafe extern "C-unwind" fn(&AnyObject, Sel, &NSString) -> *mut AnyObject,
+                    ),
+                    &ORIGINAL_ATTRIBUTE_VALUE,
+                ),
+                (
+                    sel!(accessibilityFocusedUIElement),
+                    std::mem::transmute(
+                        focused_element as unsafe extern "C-unwind" fn(&AnyObject, Sel) -> *mut AnyObject,
+                    ),
+                    &ORIGINAL_FOCUSED_ELEMENT,
+                ),
+                (
+                    sel!(accessibilityHitTest:),
+                    std::mem::transmute(
+                        hit_test as unsafe extern "C-unwind" fn(&AnyObject, Sel, NSPoint) -> *mut AnyObject,
+                    ),
+                    &ORIGINAL_HIT_TEST,
+                ),
+            ]
+        };
+        for (sel, replacement, slot) in swaps {
+            let name = sel.name().to_string_lossy().into_owned();
+            if !own.iter().any(|m| m == &name) {
+                log::warn!("accessibility override: WKWebView does not implement {name}");
+                continue;
+            }
+            let Some(method) = class.instance_method(sel) else {
+                continue;
+            };
+            let original = unsafe { method.set_implementation(replacement) };
+            let _ = slot.set(original as usize);
+        }
+        log::info!("accessibility override installed");
+    }
+
+    /// Main thread only (Tauri's `with_webview` callback). `view` is the live
+    /// WKWebView pointer for that window.
+    pub fn set_hidden(view: *mut c_void, hidden: bool) {
+        if view.is_null() || ORIGINAL_ATTRIBUTE_VALUE.get().is_none() {
+            return;
+        }
+        let key = view as usize;
+        {
+            let mut hidden_views = HIDDEN
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let index = hidden_views.iter().position(|&v| v == key);
+            match (hidden, index) {
+                (true, None) => hidden_views.push(key),
+                (false, Some(i)) => {
+                    hidden_views.swap_remove(i);
+                }
+                _ => return, // no change
+            }
+        }
+        // Clients cache the focused element; tell them to look again.
+        let notification = NSString::from_str("AXFocusedUIElementChanged");
+        unsafe { NSAccessibilityPostNotification(view as *mut AnyObject, &notification) };
+        log::info!("accessibility override: webview {}", if hidden { "hidden" } else { "exposed" });
+    }
+}
+
 /// WKWebView consumes Command-Control-D in `performKeyEquivalent:` before
 /// AppKit reaches its local event monitors or Tauri's menu callback. Carbon's
 /// application hot-key event is delivered before that webview dispatch.
@@ -720,6 +882,7 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec) {
                     BridgeEvent::WinFt(p) => emit_app.emit(&ev("winft"), p),
                     BridgeEvent::GuiOpt(p) => emit_app.emit(&ev("guiopt"), p),
                     BridgeEvent::MdPreview(p) => emit_app.emit(&ev("md_preview"), p),
+                    BridgeEvent::Grammarly(p) => emit_app.emit(&ev("grammarly"), p),
                     BridgeEvent::WinGutter(p) => emit_app.emit(&ev("win_gutter"), p),
                     BridgeEvent::MdDecor(p) => emit_app.emit(&ev("md_decor"), p),
                     // Spawn a new gui-tab (its own nvim) loaded with the
@@ -1036,6 +1199,34 @@ async fn nvim_guiopts(
     bridge_for(&app, window.label()).await?.gui_opts().await
 }
 
+/// Withhold or restore this window's web content in the macOS Accessibility
+/// tree. Driven by the frontend whenever the cursor enters or leaves a markdown
+/// island whose `w:gnv_grammarly` flag is 0.
+#[tauri::command]
+fn set_accessibility_hidden(window: tauri::WebviewWindow, hidden: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        window
+            .with_webview(move |webview| {
+                webview_accessibility::set_hidden(webview.inner(), hidden);
+            })
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, hidden);
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn nvim_wingrammarly(
+    app: AppHandle,
+    window: tauri::Window,
+) -> Result<Vec<(i64, i64)>, String> {
+    bridge_for(&app, window.label()).await?.win_grammarly().await
+}
+
 #[tauri::command]
 async fn nvim_wingutters(
     app: AppHandle,
@@ -1245,6 +1436,8 @@ pub fn run() {
             nvim_winfts,
             nvim_guiopts,
             nvim_wingutters,
+            nvim_wingrammarly,
+            set_accessibility_hidden,
             nvim_md_decor,
             nvim_paste_clip,
             nvim_clip_yank,
@@ -1343,6 +1536,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 install_native_shortcut_monitor();
+                webview_accessibility::install();
                 lookup_hotkey::install(app.handle().clone());
                 if let Some(win) = app.get_webview_window("main") {
                     apply_corner_radius(&win);

@@ -109,6 +109,38 @@ line to the app log. Check that line before modelling any future report.
   request. Grammarly also sets it merely to highlight a detected range, and
   Select mode would expose typed correction characters to `vmap` mappings.
 
+## Opting a window out
+
+`:GrammarlyOff` (and `On` / `Toggle`, with `!` for every markdown window in
+the tabpage) sets `w:gnv_grammarly`; `[markdown] grammarly_default` sets the
+initial value. The flag is enforced natively, not in the DOM: Grammarly's
+documented web opt-out attributes (`data-gramm="false"` and friends) were tried
+first and Grammarly Desktop ignores them, as expected for a client that reads
+native Accessibility rather than HTML.
+
+`syncGrammarlyAccessibility` in `main.js` computes one boolean per GUI window,
+"the cursor is in an island whose flag is off", re-evaluates it on every
+cursor event, redraw batch, preview change, and flag change, and calls
+`set_accessibility_hidden` only when it changes. In `lib.rs`,
+`webview_accessibility` swizzles the three WKWebView methods that publish web
+content to macOS Accessibility, `accessibilityAttributeValue:` (for
+`AXChildren`), `accessibilityFocusedUIElement`, and `accessibilityHitTest:`,
+and answers with the webview itself and no children while that webview is in
+the hidden set. The web process and its content are untouched; only the
+projection into the AX tree is withheld, and a
+`AXFocusedUIElementChanged` notification is posted so clients re-query.
+
+Observed with the driver below: while hidden, the focused element is an
+`AXGroup` with no children, no `AXValue`, and no selection attributes, and
+setting `AXSelectedTextRange` has nothing to act on; typing in the island keeps
+working; `On` restores the `AXTextArea` immediately. VoiceOver and dictation
+lose that window's web content while hidden, by design.
+
+One caveat remains for a client that already holds a handle to the island's
+remote element from before the toggle: the handle stays valid until the web
+process drops it. In practice Grammarly re-detects the field on focus changes,
+which is what the posted notification triggers.
+
 ## Reproducing without Grammarly
 
 `scripts/ax-driver.swift` drives the two channels Grammarly has, against the

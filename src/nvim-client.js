@@ -84,6 +84,14 @@ export class NvimClient {
     return this.invoke("nvim_wingutters");
   }
 
+  windowGrammarly() {
+    return this.invoke("nvim_wingrammarly");
+  }
+
+  setAccessibilityHidden(hidden) {
+    return this.invoke("set_accessibility_hidden", { hidden });
+  }
+
   refreshMarkdownDecorations() {
     return this.invoke("nvim_md_decor");
   }

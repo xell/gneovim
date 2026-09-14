@@ -9,6 +9,7 @@ export class SessionModel {
     this.windowBuffers = new Map();
     this.previewWindows = new Map();
     this.windowGutters = new Map();
+    this.grammarlyWindows = new Map();
     this.cursorGrid = 1;
     this.lastCursor = null;
     this.modeName = "n";
@@ -35,6 +36,11 @@ export class SessionModel {
 
   gutterForWindow(win) {
     return this.windowGutters.get(win);
+  }
+
+  // Whether Grammarly may act on the window's island. Unknown means allowed.
+  grammarlyForWindow(win) {
+    return this.grammarlyWindows.get(win) ?? true;
   }
 
   isMarkdownWindow(win) {
@@ -68,6 +74,11 @@ export class SessionModel {
 
   setGutter(payload) {
     this.windowGutters.set(payload.win, payload);
+  }
+
+  setGrammarly(win, state) {
+    if (state === -1) this.grammarlyWindows.delete(win);
+    else this.grammarlyWindows.set(win, state === 1 || state === true);
   }
 
   moveGridCursor(grid) {
@@ -114,6 +125,7 @@ export class SessionModel {
     this.gridWindows.delete(grid);
     if (goneWindow != null && ![...this.gridWindows.values()].includes(goneWindow)) {
       this.previewWindows.delete(goneWindow);
+      this.grammarlyWindows.delete(goneWindow);
     }
     return goneWindow;
   }

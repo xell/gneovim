@@ -93,6 +93,7 @@ describe("NvimClient", () => {
     nvim.winFiletypes();
     nvim.guiOptions();
     nvim.windowGutters();
+    nvim.windowGrammarly();
     nvim.refreshMarkdownDecorations();
 
     expect(invoke.mock.calls).toEqual([
@@ -100,6 +101,7 @@ describe("NvimClient", () => {
       ["nvim_winfts"],
       ["nvim_guiopts"],
       ["nvim_wingutters"],
+      ["nvim_wingrammarly"],
       ["nvim_md_decor"],
     ]);
   });
