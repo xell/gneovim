@@ -104,16 +104,16 @@ opt out:
     :GrammarlyToggle
     :Grammarly...!               with a bang: every markdown window in the tabpage
 
-Grammarly Desktop is a separate process; it can only reach the island through
-the macOS Accessibility tree. While Neovim's cursor is in an island whose flag
-is off, the app withholds that GUI window's web content from Accessibility: an
-Accessibility client sees a focused group with no children and no text, so
-there is nothing to read, select, or correct. Moving the cursor to a grid
-window or to an allowed island publishes the content again. Editing, IME, and
-rendering are untouched; VoiceOver and dictation lose that window's web
-content while it is hidden, which is the intended trade. The state lives in
-`w:gnv_grammarly` (`1` on, `0` off) and `[markdown] grammarly_default` sets the
-initial value.
+Grammarly Desktop is a separate process; it can only reach the window through
+the macOS Accessibility tree. The app publishes its web content there only
+while Neovim's cursor is in a markdown island whose flag is on. Everywhere
+else, grid windows, the `:` command line, command-line windows (`q:`, `q/`),
+and islands whose flag is off, an Accessibility client sees a focused group
+with no children and no text, so Grammarly has nothing to attach to and shows
+no floating button. Editing, IME, and rendering are untouched; VoiceOver and
+dictation only ever see an allowed island, which is the intended trade. The
+state lives in `w:gnv_grammarly` (`1` on, `0` off) and `[markdown]
+grammarly_default` sets the initial value.
 
 ## Closing and quitting
 

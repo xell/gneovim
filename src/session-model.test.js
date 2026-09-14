@@ -31,6 +31,25 @@ describe("SessionModel", () => {
     expect(model.grammarlyForWindow(1000)).toBe(true);
   });
 
+  it("publishes accessibility only for an allowed island outside the command line", () => {
+    const model = new SessionModel();
+    model.placeGrid(2, {}, 1000);
+    model.placeGrid(3, {}, 1001);
+    const isIsland = (win) => win === 1000;
+
+    model.moveGridCursor(3);
+    expect(model.accessibilityExposed(isIsland)).toBe(false);
+    model.moveGridCursor(2);
+    expect(model.accessibilityExposed(isIsland)).toBe(true);
+    model.setCmdlineActive(true);
+    expect(model.accessibilityExposed(isIsland)).toBe(false);
+    model.setCmdlineActive(false);
+    model.setGrammarly(1000, 0);
+    expect(model.accessibilityExposed(isIsland)).toBe(false);
+    model.setGrammarly(1000, 1);
+    expect(model.accessibilityExposed(isIsland)).toBe(true);
+  });
+
   it("treats an unknown or cleared Grammarly flag as allowed", () => {
     const model = new SessionModel();
     expect(model.grammarlyForWindow(1000)).toBe(true);

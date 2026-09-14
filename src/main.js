@@ -159,16 +159,15 @@ const islands = islandManager.islands; // read-only access for rendering and eve
 // the nvim_wingutters replay). Applied to the island's gutter compartment.
 let livePreviewDefault = true; // from gnv_config [markdown] live_preview_default
 
-// `:GrammarlyOff` (w:gnv_grammarly = 0). While Neovim's cursor is in such an
-// island, the app withholds this window's web content from macOS
-// Accessibility (lib.rs webview_accessibility), which is the only channel an
-// external client like Grammarly Desktop has into the island. Grid windows
-// and allowed islands re-expose it. Sent only on change.
+// macOS Accessibility is the only channel an external client like Grammarly
+// Desktop has into the webview. Publish the web content only while the cursor
+// is in an island whose `:GrammarlyOn` flag (w:gnv_grammarly) is set; grid
+// windows, the command line, and command-line windows stay withheld (lib.rs
+// webview_accessibility), so Grammarly never attaches there. Sent only on
+// change.
 let accessibilityHidden = null; // null: not yet sent (a reload keeps native state)
 function syncGrammarlyAccessibility() {
-  const win = session.windowForGrid(session.cursorGrid);
-  const hidden =
-    win != null && islands.has(win) && !session.grammarlyForWindow(win);
+  const hidden = !session.accessibilityExposed((win) => islands.has(win));
   if (hidden === accessibilityHidden) return;
   accessibilityHidden = hidden;
   jlog(`grammarly: web content ${hidden ? "hidden from" : "exposed to"} accessibility`);
@@ -979,10 +978,12 @@ addEventListener("error", (e) => {
     nvim.on("cmdline", () => {
       session.setCmdlineActive(true);
       updateImeFocus();
+      syncGrammarlyAccessibility();
     }),
     nvim.on("cmdline_hide", () => {
       session.setCmdlineActive(false);
       updateImeFocus();
+      syncGrammarlyAccessibility();
     }),
     nvim.on("focus", () => repaintNow()),
     nvim.on("look_up", () => islandLookup()),

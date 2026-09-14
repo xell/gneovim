@@ -43,6 +43,17 @@ export class SessionModel {
     return this.grammarlyWindows.get(win) ?? true;
   }
 
+  // Whether the webview's content should be published to macOS Accessibility:
+  // only while the cursor is in an allowed island and no command line owns it.
+  // Grid windows, the command line, and command-line windows are never
+  // published, so an external client such as Grammarly has nothing to attach
+  // to there.
+  accessibilityExposed(isIsland) {
+    if (this.cmdlineActive) return false;
+    const win = this.windowForGrid(this.cursorGrid);
+    return win != null && isIsland(win) && this.grammarlyForWindow(win);
+  }
+
   isMarkdownWindow(win) {
     return this.filetypeForWindow(win).includes("markdown");
   }

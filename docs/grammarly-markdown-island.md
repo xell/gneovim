@@ -118,10 +118,14 @@ documented web opt-out attributes (`data-gramm="false"` and friends) were tried
 first and Grammarly Desktop ignores them, as expected for a client that reads
 native Accessibility rather than HTML.
 
-`syncGrammarlyAccessibility` in `main.js` computes one boolean per GUI window,
-"the cursor is in an island whose flag is off", re-evaluates it on every
-cursor event, redraw batch, preview change, and flag change, and calls
-`set_accessibility_hidden` only when it changes. In `lib.rs`,
+`SessionModel.accessibilityExposed` decides one boolean per GUI window: the
+web content is published only while the cursor is in an island whose flag is
+on and no command line is active. Grid windows, the command line, and
+command-line windows are never published, because Grammarly attaches its
+floating button to any focused text there while having nothing useful to do.
+`syncGrammarlyAccessibility` in `main.js` re-evaluates it on every cursor
+event, redraw batch, command-line enter and leave, preview change, and flag
+change, and calls `set_accessibility_hidden` only when it changes. In `lib.rs`,
 `webview_accessibility` swizzles the three WKWebView methods that publish web
 content to macOS Accessibility, `accessibilityAttributeValue:` (for
 `AXChildren`), `accessibilityFocusedUIElement`, and `accessibilityHitTest:`,
