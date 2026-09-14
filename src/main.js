@@ -796,6 +796,13 @@ class Island {
   keepPositionInView(position) {
     this.cursorScroller.keepInView(position, this.scrolloff);
   }
+  // `zz`: Neovim's own topline is irrelevant to the island (the preview owns
+  // its own pixel scroll, see keepPositionInView), so `zz` is otherwise a
+  // silent no-op here even though it is still forwarded to Neovim like any
+  // other key.
+  centerCursor() {
+    this.cursorScroller.center(this._nvimCursor, this.scrolloff);
+  }
   clearCursor() {
     this.tx({ effects: setNvimCursor.of(null) });
     // cursor left this island; drop focus so keys go to the global path
@@ -1226,6 +1233,10 @@ function handleFontZoom(e) {
 }
 
 let islandNativeWPending = false;
+// The island awaiting the second key of a Normal-mode `zz`, or null. Scoped
+// to one island by object identity, so switching focus mid-sequence cannot
+// let a stray `z` in a different island complete someone else's `zz`.
+let islandPendingZ = null;
 addEventListener("keydown", (e) => {
   if (imeComposing) return; // IME is mid-composition; let #ime + the OS handle it
   if (handleFontZoom(e)) return;
@@ -1274,6 +1285,20 @@ addEventListener("keydown", (e) => {
     }
   }
   if (e.key === "w" || e.key === "Escape") islandNativeWPending = false;
+  // `zz`: Neovim still gets both keys, unchanged, like any other Normal-mode
+  // command; the island just also centers its own pixel scroll on the
+  // second one, since Neovim's resulting topline change is otherwise
+  // invisible to it (see Island.centerCursor).
+  if (isl && isl.mode === "n" && plain && e.key === "z") {
+    if (islandPendingZ === isl) {
+      isl.centerCursor();
+      islandPendingZ = null; // completed; a further z starts a new pair
+    } else {
+      islandPendingZ = isl;
+    }
+  } else {
+    islandPendingZ = null;
+  }
   const keys = keyToNvim(e);
   if (keys === null) return; // mid-composition / lone modifier
   // Editable grid context (insert/replace or command line): plain text goes into

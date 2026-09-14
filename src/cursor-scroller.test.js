@@ -60,6 +60,17 @@ describe("CursorScroller", () => {
     expect(classes.has("cm-nvim-cursor-scroll")).toBe(false);
   });
 
+  it("unconditionally centers the cursor line on center()", () => {
+    const { cursorScroller, frames, scroller, view } = fixture();
+    cursorScroller.center({ row: 1, col: 1 }, 2);
+    [...frames.values()][0]();
+
+    // Same geometry as the scrolloff test (top: 5, bottom: 15, height: 100),
+    // but centered regardless of whether the cursor was already in view.
+    expect(view.coordsAtPos).toHaveBeenCalledWith(7);
+    expect(scroller.scrollTop).toBe(10);
+  });
+
   it("cancels superseded frames and pending timers on destroy", () => {
     const { cursorScroller, frames, timers } = fixture();
     cursorScroller.keepInView({ row: 0, col: 0 }, 2);

@@ -24,6 +24,19 @@ export class CursorScroller {
   }
 
   keepInView(position, scrolloff) {
+    this.scrollToPosition(position, scrolloff, false);
+  }
+
+  // `zz`: unconditionally centers the cursor line, same geometry as
+  // keepInView's own scrolloff-filling centre branch (see there). The block
+  // padding that branch already relies on is what makes this honour
+  // scrolloff "as much as possible" near a document edge: the scroller has
+  // no further room to centre into once it runs out of padding.
+  center(position, scrolloff) {
+    this.scrollToPosition(position, scrolloff, true);
+  }
+
+  scrollToPosition(position, scrolloff, force) {
     if (this.frame) this.cancelFrame(this.frame);
     this.frame = this.requestFrame(() => {
       this.frame = 0;
@@ -52,7 +65,7 @@ export class CursorScroller {
       const top = rect.top - bounds.top;
       const bottom = rect.bottom - bounds.top;
       let delta = 0;
-      if (margin === height / 2) delta = (top + bottom) / 2 - height / 2;
+      if (force || margin === height / 2) delta = (top + bottom) / 2 - height / 2;
       else if (top < margin) delta = top - margin;
       else if (bottom > height - margin) delta = bottom - (height - margin);
       if (!delta) return;
