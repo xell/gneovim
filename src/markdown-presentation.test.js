@@ -8,6 +8,7 @@ function fixture(doc, convertFileSrc = vi.fn((path) => `asset:${path}`)) {
     setImageBase: StateEffect.define(),
     setTableConcealGuard: StateEffect.define(),
     setInteractiveHighlights: StateEffect.define(),
+    setInteractiveOverlays: StateEffect.define(),
   };
   const presentation = createMarkdownPresentation({
     document: {},

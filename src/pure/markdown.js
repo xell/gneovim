@@ -127,3 +127,41 @@ export function imageCaptionHighlights(doc, row, altStart, altEnd, highlights) {
   }
   return out;
 }
+
+// Same cell mapping as tableHighlightCells, for overlay virt_text extmarks
+// (hop.nvim's jump-target hint letters, drawn over the buffer text they
+// cover rather than colouring it): `hideBytes` is the buffer-byte width the
+// overlay covers, in place of a second column, and `segments` (the overlay's
+// own [text, group] pairs) rides through instead of a single group name.
+export function tableOverlayCells(doc, firstRow, lastRow, virt) {
+  const out = [];
+  for (const [row, column, hideBytes, segments] of virt) {
+    if (row < firstRow || row > lastRow || row === firstRow + 1) continue;
+    const line = doc.line(row + 1);
+    const start = byteToCol(line.text, column);
+    const end = byteToCol(line.text, column + hideBytes);
+    const from = tableCursorCell(line.text, start);
+    const to = tableCursorCell(line.text, end);
+    if (from.cell !== to.cell) continue;
+    const displayRow = row === firstRow ? 0 : row - firstRow - 1;
+    out.push([displayRow, from.cell, from.offset, Math.max(1, to.offset - from.offset), segments]);
+  }
+  return out;
+}
+
+// Same idea as imageCaptionHighlights, for overlay virt_text extmarks; see
+// tableOverlayCells for why `hideBytes` and `segments` replace the highlight
+// shape's end column and group name.
+export function imageCaptionOverlays(doc, row, altStart, altEnd, virt) {
+  const out = [];
+  for (const [virtRow, column, hideBytes, segments] of virt) {
+    if (virtRow !== row) continue;
+    const line = doc.line(row + 1);
+    const start = byteToCol(line.text, column);
+    const end = byteToCol(line.text, column + hideBytes);
+    const from = Math.max(start, altStart) - altStart;
+    const to = Math.min(end, altEnd) - altStart;
+    if (to > from) out.push([from, to - from, segments]);
+  }
+  return out;
+}

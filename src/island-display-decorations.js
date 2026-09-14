@@ -104,6 +104,7 @@ export class IslandDisplayDecorations {
     decorationState,
     setTableConcealGuard,
     setInteractiveHighlights,
+    setInteractiveOverlays,
     getCursor,
     getMode,
     cancelPendingZeroScrolloff,
@@ -120,6 +121,7 @@ export class IslandDisplayDecorations {
     this.decorationState = decorationState;
     this.setTableConcealGuard = setTableConcealGuard;
     this.setInteractiveHighlights = setInteractiveHighlights;
+    this.setInteractiveOverlays = setInteractiveOverlays;
     this.getCursor = getCursor;
     this.getMode = getMode;
     this.cancelPendingZeroScrolloff = cancelPendingZeroScrolloff;
@@ -131,6 +133,7 @@ export class IslandDisplayDecorations {
     this.payload = null;
     this.easyMotionOverlay = false;
     this.interactiveHighlightsKey = null;
+    this.interactiveOverlaysKey = null;
     this.incsearchKey = "";
   }
 
@@ -177,6 +180,19 @@ export class IslandDisplayDecorations {
       this.interactiveHighlightsKey = interactiveHighlightsKey;
       interactiveEffects.push(
         this.setInteractiveHighlights.of(interactiveHighlights),
+      );
+    }
+    // hop.nvim's per-target hint letters (virt_text overlay, hl.virt): every
+    // entry is a candidate, tableOverlayCells / imageCaptionOverlays drop
+    // whatever isn't actually inside that table's rows or that image's
+    // caption. Unlike interactiveHighlights this needs no group filtering:
+    // hl.virt only ever carries overlay extmarks in the first place.
+    const interactiveOverlays = payload?.hl?.virt ?? [];
+    const interactiveOverlaysKey = JSON.stringify(interactiveOverlays);
+    if (this.interactiveOverlaysKey !== interactiveOverlaysKey) {
+      this.interactiveOverlaysKey = interactiveOverlaysKey;
+      interactiveEffects.push(
+        this.setInteractiveOverlays.of(interactiveOverlays),
       );
     }
     this.view.dispatch({ effects: interactiveEffects });

@@ -2,11 +2,13 @@ import { StateField } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import {
   imageCaptionHighlights,
+  imageCaptionOverlays,
   imageLabel,
   tableAlign,
   tableCells,
   tableCursorCell,
   tableHighlightCells,
+  tableOverlayCells,
 } from "./pure/markdown.js";
 import { imageSource } from "./pure/image-source.js";
 import { byteToCol } from "./pure/text-geometry.js";
@@ -20,25 +22,44 @@ export function createMarkdownPresentation({
   setImageBase,
   setTableConcealGuard,
   setInteractiveHighlights,
+  setInteractiveOverlays,
 }) {
   // Both the table and the image caption widget replace real source text
-  // with their own DOM, so Neovim search/incsearch/hop highlights that land
-  // on that text (an ordinary Decoration.mark elsewhere) never reach it: a
-  // Decoration.mark on a byte hidden behind another field's Decoration.replace
-  // has nothing left to mark. This renders those highlights inline instead,
-  // fed by the same interactive-highlight list (Search / IncSearch /
-  // EasyMotionTarget / HopPreview) both widgets are given.
-  function appendHighlightedText(container, text, spans) {
+  // with their own DOM, so a Neovim decoration that targets that text never
+  // reaches it: a Decoration.mark or Decoration.replace on a byte hidden
+  // behind another field's Decoration.replace has nothing left to mark or
+  // replace. This renders both kinds inline instead: `spans` (Search /
+  // IncSearch / EasyMotionTarget / HopPreview) colour the underlying text,
+  // `overlays` (hop.nvim's per-target hint letters) replace it outright and
+  // take priority over a `spans` colour on the same characters, matching the
+  // non-table/image OverlayWidget elsewhere in this codebase.
+  function appendHighlightedText(container, text, spans, overlays = []) {
     const boundaries = [
       ...new Set([
         0,
         text.length,
         ...spans.flatMap(({ from, to }) => [from, to]),
+        ...overlays.flatMap(({ from, to }) => [from, to]),
       ]),
     ].sort((a, b) => a - b);
     for (let index = 0; index + 1 < boundaries.length; index++) {
       const from = boundaries[index];
       const to = boundaries[index + 1];
+      const overlay = overlays.find(
+        (span) => span.from <= from && span.to >= to,
+      );
+      if (overlay) {
+        for (const [segmentText, group] of overlay.segments) {
+          const segment = document.createElement("span");
+          if (group) segment.className = highlights.islandClass(group);
+          segment.textContent = segmentText;
+          container.append(segment);
+        }
+        // The overlay's whole range is rendered from its first slice; skip
+        // past any further boundaries still inside it.
+        index = boundaries.indexOf(overlay.to) - 1;
+        continue;
+      }
       const groups = [
         ...new Set(
           spans
@@ -73,20 +94,32 @@ export function createMarkdownPresentation({
       }))
       .filter(({ from, to }) => to > from);
   }
+
+  function clampOverlaySpans(text, entries) {
+    return entries
+      .map(([start, length, segments]) => ({
+        from: Math.max(0, Math.min(start, text.length)),
+        to: Math.max(0, Math.min(start + length, text.length)),
+        segments,
+      }))
+      .filter(({ from, to }) => to > from);
+  }
   class MarkdownTableWidget extends WidgetType {
-    constructor(header, align, rows, cursor, cellHighlights) {
+    constructor(header, align, rows, cursor, cellHighlights, cellOverlays) {
       super();
       this.header = header;
       this.align = align;
       this.rows = rows;
       this.cursor = cursor;
       this.cellHighlights = cellHighlights;
+      this.cellOverlays = cellOverlays;
       this.key = JSON.stringify([
         header,
         align,
         rows,
         cursor,
         cellHighlights,
+        cellOverlays,
       ]);
     }
 
@@ -114,6 +147,10 @@ export function createMarkdownPresentation({
               ([highlightRow, highlightCell]) =>
                 highlightRow === rowIndex && highlightCell === index,
             ),
+            this.cellOverlays.filter(
+              ([overlayRow, overlayCell]) =>
+                overlayRow === rowIndex && overlayCell === index,
+            ),
           );
           if (
             this.cursor?.row === rowIndex &&
@@ -137,7 +174,7 @@ export function createMarkdownPresentation({
     }
   }
 
-  function appendTableText(cell, text, cellHighlights) {
+  function appendTableText(cell, text, cellHighlights, cellOverlays = []) {
     appendHighlightedText(
       cell,
       text,
@@ -147,6 +184,14 @@ export function createMarkdownPresentation({
           start,
           length,
           group,
+        ]),
+      ),
+      clampOverlaySpans(
+        text,
+        cellOverlays.map(([, , start, length, segments]) => [
+          start,
+          length,
+          segments,
         ]),
       ),
     );
@@ -219,11 +264,12 @@ export function createMarkdownPresentation({
   }
 
   class MarkdownImageSourceWidget extends WidgetType {
-    constructor(text, captionHighlights) {
+    constructor(text, captionHighlights, captionOverlays) {
       super();
       this.text = text;
       this.captionHighlights = captionHighlights;
-      this.key = JSON.stringify([text, captionHighlights]);
+      this.captionOverlays = captionOverlays;
+      this.key = JSON.stringify([text, captionHighlights, captionOverlays]);
     }
 
     eq(other) {
@@ -237,12 +283,19 @@ export function createMarkdownPresentation({
         source,
         this.text,
         clampSpans(this.text, this.captionHighlights),
+        clampOverlaySpans(this.text, this.captionOverlays),
       );
       return source;
     }
   }
 
-  function imageDecorations(doc, bufferName, cursor, interactiveHighlights = []) {
+  function imageDecorations(
+    doc,
+    bufferName,
+    cursor,
+    interactiveHighlights = [],
+    interactiveOverlays = [],
+  ) {
     const ranges = [];
     for (let number = 1; number <= doc.lines; number++) {
       const line = doc.line(number);
@@ -271,11 +324,19 @@ export function createMarkdownPresentation({
           altEnd,
           interactiveHighlights,
         );
+        const captionOverlays = imageCaptionOverlays(
+          doc,
+          number - 1,
+          altStart,
+          altEnd,
+          interactiveOverlays,
+        );
         ranges.push(
           Decoration.replace({
             widget: new MarkdownImageSourceWidget(
               label.caption,
               captionHighlights,
+              captionOverlays,
             ),
           }).range(line.from, line.to),
         );
@@ -301,31 +362,39 @@ export function createMarkdownPresentation({
       bufferName: "",
       cursor: null,
       highlights: [],
+      overlays: [],
     }),
     update(value, transaction) {
       let bufferName = value.bufferName;
       let cursor = value.cursor;
       let interactiveHighlights = value.highlights;
+      let interactiveOverlays = value.overlays;
       for (const effect of transaction.effects) {
         if (effect.is(setImageBase)) bufferName = effect.value;
         if (effect.is(setCursor)) cursor = effect.value;
         if (effect.is(setInteractiveHighlights)) {
           interactiveHighlights = effect.value;
         }
+        if (effect.is(setInteractiveOverlays)) {
+          interactiveOverlays = effect.value;
+        }
       }
       return transaction.docChanged ||
         bufferName !== value.bufferName ||
         cursor !== value.cursor ||
-        interactiveHighlights !== value.highlights
+        interactiveHighlights !== value.highlights ||
+        interactiveOverlays !== value.overlays
         ? {
             deco: imageDecorations(
               transaction.state.doc,
               bufferName,
               cursor,
               interactiveHighlights,
+              interactiveOverlays,
             ),
             bufferName,
             highlights: interactiveHighlights,
+            overlays: interactiveOverlays,
             cursor,
           }
         : value;
@@ -334,7 +403,13 @@ export function createMarkdownPresentation({
       EditorView.decorations.from(field, (value) => value.deco),
   });
 
-  function tableDecorations(doc, cursor, guardRow, tableHighlights = []) {
+  function tableDecorations(
+    doc,
+    cursor,
+    guardRow,
+    tableHighlights = [],
+    tableOverlays = [],
+  ) {
     const ranges = [];
     let fence = null;
     for (let number = 1; number < doc.lines; number++) {
@@ -405,6 +480,12 @@ export function createMarkdownPresentation({
           end - 1,
           tableHighlights,
         );
+        const cellOverlays = tableOverlayCells(
+          doc,
+          number - 1,
+          end - 1,
+          tableOverlays,
+        );
         ranges.push(
           Decoration.replace({
             block: true,
@@ -414,6 +495,7 @@ export function createMarkdownPresentation({
               rows,
               tableCursor,
               cellHighlights,
+              cellOverlays,
             ),
           }).range(line.from, last.to),
         );
@@ -429,11 +511,13 @@ export function createMarkdownPresentation({
       cursor: null,
       guardRow: null,
       highlights: [],
+      overlays: [],
     }),
     update(value, transaction) {
       let cursor = value.cursor;
       let guardRow = value.guardRow;
       let tableHighlights = value.highlights;
+      let tableOverlays = value.overlays;
       for (const effect of transaction.effects) {
         if (effect.is(setCursor)) cursor = effect.value;
         if (effect.is(setTableConcealGuard)) {
@@ -442,21 +526,27 @@ export function createMarkdownPresentation({
         if (effect.is(setInteractiveHighlights)) {
           tableHighlights = effect.value;
         }
+        if (effect.is(setInteractiveOverlays)) {
+          tableOverlays = effect.value;
+        }
       }
       return transaction.docChanged ||
         cursor !== value.cursor ||
         guardRow !== value.guardRow ||
-        tableHighlights !== value.highlights
+        tableHighlights !== value.highlights ||
+        tableOverlays !== value.overlays
         ? {
             deco: tableDecorations(
               transaction.state.doc,
               cursor,
               guardRow,
               tableHighlights,
+              tableOverlays,
             ),
             cursor,
             guardRow,
             highlights: tableHighlights,
+            overlays: tableOverlays,
           }
         : value;
     },
