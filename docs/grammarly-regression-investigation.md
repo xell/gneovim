@@ -4,6 +4,18 @@
 
 **Resolved on 2026-09-14.** The cause was not a refactor regression in the cursor bridge. Grammarly Desktop selects the error span as a *ranged* Accessibility selection and then types the correction over it, and every island path only honoured a *collapsed* external selection. The sections after "Resolution" are kept as the record of the three earlier attempts and why they could not work.
 
+**Regressed again on 2026-09-15 by `bea7c4b`, re-resolved the same day.** See "Second regression" below: an unrelated fast-typing-burst fix gated every collapsed-caret mismatch behind a 250ms quiet window, which also silently dropped genuine Grammarly corrections.
+
+## Second regression: the fast-typing-burst fix (2026-09-15)
+
+`bea7c4b` ("Stop chasing a stale DOM caret during fast typing bursts") fixed a real, separately-confirmed bug: during ordinary fast own typing, the DOM's native Selection can read one keystroke behind CodeMirror's own already-applied position, and honouring that as an external move corrupted the buffer. Its fix added `EXTERNAL_CARET_QUIET_MS`, a 250ms quiet window since the *previous* key (own or external) that every collapsed-caret mismatch had to clear before being trusted.
+
+That gate shared its trigger with Grammarly's own collapsed-placement path (`syncSelectionBeforeInput`'s `range.from === range.to` branch), which is exactly the path a plain "place a caret here, then type" correction uses. Grammarly applies every correction in a detected range one after another, reading `AXValue` back in between rather than waiting for a human pause, so a second correction posted less than 250ms after the first (or after the user's own last keystroke) was silently dropped. Grammarly then read back a result that never landed and stopped, which looked exactly like "Grammarly does nothing" — reported live the same day.
+
+Reasoning about the original bug shape more precisely: the stale DOM read isn't just "recent", it is *exactly* wherever Neovim's cursor stood one call ago (`priorCursor`), because that's the one position CodeMirror's DOM rendering hasn't caught up to yet. `IslandInputController` now compares a mismatch against `priorCursor` instead of timing it: a mismatch equal to `priorCursor` (and no longer equal to the current cursor) is the known stale-echo artifact and is suppressed unconditionally; everything else — including a second external placement one millisecond after the first — is honoured immediately. `src/island-input-controller.test.js` covers both shapes: a synthetic fast-typing burst with a moving one-behind DOM read, and two distinct Grammarly-style corrections posted back to back with no pause.
+
+This was found and fixed by static reasoning plus the existing unit test harness (constructing the exact "moving stale target" shape the original commit described, and confirming `EXTERNAL_CARET_QUIET_MS` was not actually load-bearing for the frozen-target shape its own test used). It was **not** re-verified live against real Grammarly Desktop or `scripts/ax-driver.swift`; do that before considering this closed, per the decision rule below.
+
 ## Resolution
 
 ### What was observed live

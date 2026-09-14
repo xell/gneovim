@@ -9,20 +9,32 @@ import { byteLen } from "./pure/text-geometry.js";
 const TEXT_KEYS = new Set(["<lt>", "<Space>", "<CR>", "<Tab>"]);
 const DELETE_KEYS = new Set(["<BS>", "<Del>"]);
 
-// A collapsed-caret mismatch is only trusted as an external move (Grammarly,
-// an accessibility client) when at least this long has passed since the
-// previous key. Confirmed live (2026-09-15): during an ordinary fast typing
-// burst, the DOM's own native Selection can lag one keystroke behind
-// CodeMirror's already-applied position; every gap "external caret" read as
-// real and honoured moved Neovim's cursor backward to that stale spot, which
-// made the *next* real keystroke land there too, so the next check found
-// the same "mismatch" again. That feedback loop reproduced as a seemingly
-// frozen cursor and, worse, real corruption of the buffer (repeated and
-// reordered characters), not just a display glitch: it drives nvim_input via
-// the wrong cursor, live and un-reversibly. Grammarly's own flow posts a
-// selection then a correction key after the user has paused to read a
-// suggestion, comfortably longer than this.
-const EXTERNAL_CARET_QUIET_MS = 250;
+// A collapsed-caret mismatch is trusted as an external move (Grammarly, an
+// accessibility client) immediately, *unless* it exactly reproduces the one
+// specific false positive this boundary is known to produce on its own:
+// during an ordinary fast typing burst, the DOM's own native Selection can
+// read one keystroke behind CodeMirror's already-applied position. That
+// stale read is, by construction, wherever Neovim's cursor stood *before*
+// the previous key landed, so it is recognised by comparing the mismatch
+// against `priorCursor`, not by timing it. Confirmed live (2026-09-15):
+// honouring that stale read moved Neovim's cursor backward to it, which made
+// the *next* real keystroke land there too, so the next check found the same
+// "mismatch" again. That feedback loop reproduced as a seemingly frozen
+// cursor and, worse, real corruption of the buffer (repeated and reordered
+// characters), not just a display glitch: it drives nvim_input via the wrong
+// cursor, live and un-reversibly.
+//
+// An earlier version of this fix gated *every* mismatch behind a 250ms quiet
+// window since the previous key, own or external. That also suppressed a
+// genuine Grammarly correction arriving less than 250ms after the user's own
+// last keystroke, or a second Grammarly correction posted less than 250ms
+// after the first (Grammarly applies a detected range's corrections one
+// after another, reading `AXValue` back in between, not necessarily paced by
+// a human pause) — Grammarly reads back a result that never landed and gives
+// up, which looked exactly like "Grammarly does nothing". Comparing against
+// `priorCursor` instead only ever suppresses the one stale-echo shape, so an
+// external target that is not that exact position is still honoured
+// straight away.
 
 // Classify one queued input string: "text" inserts, "delete" removes the
 // character next to the cursor, "other" is a motion, mode change, or mapping.
@@ -44,7 +56,6 @@ export class IslandInputController {
     getMode,
     isCursorHidden,
     log,
-    now = () => Date.now(),
     requestFrame,
     setTimer,
     syncSelectionToCursor,
@@ -58,7 +69,6 @@ export class IslandInputController {
     this.getMode = getMode;
     this.isCursorHidden = isCursorHidden;
     this.log = log;
-    this.now = now;
     this.requestFrame = requestFrame;
     this.setTimer = setTimer;
     this.syncSelectionToCursor = syncSelectionToCursor;
@@ -72,8 +82,10 @@ export class IslandInputController {
     // a second key in that window must not queue the same placement again
     // behind the first key: that would move Neovim back and reverse the text.
     this.pendingCursor = null;
-    // See EXTERNAL_CARET_QUIET_MS.
-    this.lastKeyAt = 0;
+    // The Neovim cursor as of the previous call to syncSelectionBeforeInput,
+    // used to recognise the one specific stale-DOM-read shape described
+    // above classifyInput.
+    this.priorCursor = null;
   }
 
   attach(view) {
@@ -211,15 +223,12 @@ export class IslandInputController {
   // Neovim has one cursor and no idea of that range, so delete it here, seat
   // the cursor at its start, and only then let the replacement key through.
   syncSelectionBeforeInput(event, keys) {
-    // Own activity, not just this key: a stale DOM read after a burst of our
-    // own typing must not look "quiet" again just because this one key
-    // happens to be composing or land in the ranged-selection branch below.
-    const now = this.now();
-    const quiet = now - this.lastKeyAt > EXTERNAL_CARET_QUIET_MS;
-    this.lastKeyAt = now;
     if (event.isComposing) return true;
     const range = this.domSelectionRange();
     if (!range) return true;
+    const cursor = this.getCursor();
+    const priorCursor = this.priorCursor;
+    this.priorCursor = cursor;
     if (range.from === range.to) {
       const target = this.cursorAt(this.view.state.doc, range.from);
       // A rendered HTML table or image swallows its source lines behind a
@@ -232,12 +241,20 @@ export class IslandInputController {
       // approach it from the side the DOM caret was already stuck on) passed
       // through untouched.
       //
-      // `quiet` guards the same class of false positive during ordinary fast
-      // typing: see EXTERNAL_CARET_QUIET_MS.
+      // `staleEcho` guards the other false positive this boundary can produce
+      // on its own: during ordinary fast typing, the DOM's native Selection
+      // reads exactly where Neovim's cursor stood one key ago, one keystroke
+      // behind CodeMirror's own already-applied position. See the comment
+      // above classifyInput.
+      const staleEcho =
+        priorCursor != null &&
+        priorCursor.row === target.row &&
+        priorCursor.col === target.col &&
+        !(cursor != null && cursor.row === target.row && cursor.col === target.col);
       if (
-        quiet &&
+        !staleEcho &&
         !this.cursorMatches(target) &&
-        !this.isCursorHidden(this.getCursor())
+        !this.isCursorHidden(cursor)
       ) {
         this.log(`external caret ${target.row}:${target.col} before ${keys}`);
         this.requestCursor(target);

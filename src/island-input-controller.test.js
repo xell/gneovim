@@ -94,7 +94,6 @@ function integrated({
   mode = "i",
   buffer = 5,
   isCursorHidden = () => false,
-  now = () => Date.now(),
 }) {
   const cursorRequest = deferred();
   const client = {
@@ -120,7 +119,6 @@ function integrated({
     getMode: () => mode,
     isCursorHidden,
     log: vi.fn(),
-    now,
     requestFrame: vi.fn(),
     setTimer: vi.fn(),
     syncSelectionToCursor,
@@ -324,48 +322,66 @@ describe("IslandInputController", () => {
     expect(client.input).toHaveBeenCalledWith("k");
   });
 
-  it("suppresses the external-caret correction during a fast typing burst, but not after a real pause", async () => {
-    // Confirmed live (2026-09-15): a stale DOM Selection read one keystroke
-    // behind CodeMirror's own already-applied position, during ordinary fast
-    // typing, kept reading as an external move and getting honoured, which
-    // forced Neovim's cursor backward on every key and corrupted real typed
-    // text into reordered garbage. See EXTERNAL_CARET_QUIET_MS.
-    const doc = Text.of(["ok", "ADHD people"]);
-    const burstView = domView({ doc, selection: 2, anchor: 7 }); // -> row 1, col 4
-    let clock = 10_000;
-    const { client, controller, cursorRequest, inputQueue, state } = integrated({
-      view: burstView,
+  it("does not chase a DOM read that is exactly one keystroke stale during ordinary typing", async () => {
+    // Confirmed live (2026-09-15): the DOM's own native Selection can read
+    // exactly where Neovim's cursor stood *before* the previous key landed,
+    // one keystroke behind CodeMirror's own already-applied position. Every
+    // key in a fast burst reproduces this same shape (today's cursor is
+    // tomorrow's stale read), so honouring it moved Neovim's cursor backward
+    // on every key and corrupted real typed text into reordered garbage.
+    // There is no Grammarly involved anywhere in this test: `getCursor()`
+    // reports the plain result of the user's own typing, just one echo
+    // ahead of the DOM's own rendering.
+    const doc = Text.of(["hello world"]);
+    const { client, controller, inputQueue, state } = integrated({
+      view: domView({ doc, selection: 2, anchor: 2 }),
       cursor: { row: 0, col: 2 },
-      now: () => clock,
     });
 
-    // A fast burst: the same stale DOM read mismatches nvim's cursor on
-    // every key, but only the first one is within a quiet window.
-    controller.syncSelectionBeforeInput({ isComposing: false }, "a");
-    clock += 50;
-    controller.syncSelectionBeforeInput({ isComposing: false }, "b");
-    clock += 50;
-    controller.syncSelectionBeforeInput({ isComposing: false }, "c");
-    await Promise.resolve(); // let the one enqueued cursorSet actually run
-    expect(client.cursorSet).toHaveBeenCalledTimes(1);
+    controller.syncSelectionBeforeInput({ isComposing: false }, "l");
+    state.cursor = { row: 0, col: 3 }; // Neovim's echo of "l" already landed
 
-    // Neovim's echo confirms the one placement the burst asked for, then a
-    // real pause follows (Grammarly's own timing, not a typing burst). Also
-    // unblocks IslandInputQueue's own serialized chain, stalled since the
-    // burst's cursorSet call, so the next one below can actually run.
+    controller.attach(domView({ doc, selection: 2, anchor: 2 })); // still stale
+    controller.syncSelectionBeforeInput({ isComposing: false }, "l");
+    state.cursor = { row: 0, col: 4 };
+
+    controller.attach(domView({ doc, selection: 3, anchor: 3 })); // still stale
+    controller.syncSelectionBeforeInput({ isComposing: false }, "o");
+    state.cursor = { row: 0, col: 5 };
+
+    await inputQueue.pending;
+    expect(client.cursorSet).not.toHaveBeenCalled();
+  });
+
+  it("honours a second, distinct Grammarly correction posted right after the first", async () => {
+    // Grammarly applies every correction in a detected range one after
+    // another, reading AXValue back in between rather than waiting for a
+    // human pause; a batch of automatic fixes can post two unrelated AX
+    // placements only milliseconds apart. An earlier fix gated every
+    // collapsed-caret mismatch behind a 250ms quiet window since the
+    // previous key, own or external, which silently dropped the second
+    // correction here: Grammarly then read back a result that never landed
+    // and gave up, which looked exactly like "Grammarly does nothing".
+    const doc = Text.of(["ok", "ADHD peple, and teh dog"]);
+    const firstView = domView({ doc, selection: 2, anchor: 7 }); // -> row 1, col 4
+    const { client, controller, cursorRequest, inputQueue, state } = integrated({
+      view: firstView,
+      cursor: { row: 0, col: 2 },
+    });
+
+    controller.syncSelectionBeforeInput({ isComposing: false }, "p");
     controller.onNvimCursor(1, 4);
     state.cursor = { row: 1, col: 4 };
-    cursorRequest.resolve();
-    client.cursorSet.mockClear();
-    clock += 5_000;
 
-    // A genuinely new external move (a different DOM position) after the
-    // pause is still honoured.
-    controller.attach(domView({ doc, selection: 2, anchor: 9 })); // -> row 1, col 6
-    controller.syncSelectionBeforeInput({ isComposing: false }, "d");
+    // A second, distinct correction arrives immediately: no pause at all.
+    controller.attach(domView({ doc, selection: 2, anchor: 16 })); // -> row 1, col 13
+    controller.syncSelectionBeforeInput({ isComposing: false }, "t");
+    cursorRequest.resolve();
     await inputQueue.pending;
-    expect(client.cursorSet).toHaveBeenCalledTimes(1);
-    expect(client.cursorSet).toHaveBeenCalledWith(12, 1, 6);
+
+    expect(client.cursorSet).toHaveBeenCalledTimes(2);
+    expect(client.cursorSet).toHaveBeenNthCalledWith(1, 12, 1, 4);
+    expect(client.cursorSet).toHaveBeenNthCalledWith(2, 12, 1, 13);
   });
 
   it("samples Grammarly's DOM selection before CodeMirror observes it", async () => {
