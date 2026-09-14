@@ -41,6 +41,7 @@ function fixture({ buffer = 8, cursor = null } = {}) {
     getBuffer: () => buffer,
     getCursor: () => cursor,
     getMode: () => "i",
+    isCursorHidden: () => false,
     log,
     requestFrame: (callback) => frames.push(callback),
     setTimer: (callback) => timers.push(callback),
@@ -87,7 +88,13 @@ function domView({ doc, selection, anchor, focus = anchor, cursor }) {
   };
 }
 
-function integrated({ view, cursor, mode = "i", buffer = 5 }) {
+function integrated({
+  view,
+  cursor,
+  mode = "i",
+  buffer = 5,
+  isCursorHidden = () => false,
+}) {
   const cursorRequest = deferred();
   const client = {
     cursorSet: vi.fn(() => cursorRequest.promise),
@@ -110,6 +117,7 @@ function integrated({ view, cursor, mode = "i", buffer = 5 }) {
     getBuffer: () => buffer,
     getCursor: () => state.cursor,
     getMode: () => mode,
+    isCursorHidden,
     log: vi.fn(),
     requestFrame: vi.fn(),
     setTimer: vi.fn(),
@@ -267,6 +275,7 @@ describe("IslandInputController", () => {
       fromNvim,
       getBuffer: () => 5,
       getCursor: () => ({ row: 0, col: 2 }),
+      isCursorHidden: () => false,
       log: vi.fn(),
       requestFrame: vi.fn(),
       setTimer: vi.fn(),
@@ -288,6 +297,29 @@ describe("IslandInputController", () => {
     cursorRequest.resolve();
     await inputQueue.pending;
     expect(client.input).toHaveBeenCalledWith(",");
+  });
+
+  it("does not chase the DOM caret back out of a hidden table or image widget", async () => {
+    // Neovim's cursor moved onto a table row, which replaces its own source
+    // lines with a non-editable widget. The browser cannot seat a native
+    // caret there, so the DOM selection stays wherever it last sat outside
+    // it (Grammarly's own domView fixture, reused here to model "no real
+    // change"). That must not be read as an external placement: honouring it
+    // would snap Neovim straight back out of the table on every keystroke.
+    const doc = Text.of(["ok", "ADHD people"]);
+    const view = domView({ doc, selection: 2, anchor: 7 });
+    const { client, controller, inputQueue } = integrated({
+      view,
+      cursor: { row: 1, col: 4 },
+      isCursorHidden: () => true,
+    });
+
+    expect(controller.syncSelectionBeforeInput({ isComposing: false }, "k")).toBe(true);
+    inputQueue.input("k");
+    await inputQueue.pending;
+
+    expect(client.cursorSet).not.toHaveBeenCalled();
+    expect(client.input).toHaveBeenCalledWith("k");
   });
 
   it("samples Grammarly's DOM selection before CodeMirror observes it", async () => {

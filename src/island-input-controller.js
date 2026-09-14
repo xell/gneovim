@@ -27,6 +27,7 @@ export class IslandInputController {
     getBuffer,
     getCursor,
     getMode,
+    isCursorHidden,
     log,
     requestFrame,
     setTimer,
@@ -39,6 +40,7 @@ export class IslandInputController {
     this.getBuffer = getBuffer;
     this.getCursor = getCursor;
     this.getMode = getMode;
+    this.isCursorHidden = isCursorHidden;
     this.log = log;
     this.requestFrame = requestFrame;
     this.setTimer = setTimer;
@@ -195,7 +197,19 @@ export class IslandInputController {
     if (!range) return true;
     if (range.from === range.to) {
       const target = this.cursorAt(this.view.state.doc, range.from);
-      if (!this.cursorMatches(target)) {
+      // A rendered HTML table or image swallows its source lines behind a
+      // non-editable replace widget. The browser cannot seat a native caret
+      // inside that widget, so when Neovim's own cursor (still authoritative)
+      // moves in there, the DOM selection just stays wherever it last sat
+      // outside it. That is not an external move to honour: honouring it
+      // snapped Neovim's cursor straight back out again on every keystroke,
+      // trapping k/h at a table or image's edge while j/l (which happen to
+      // approach it from the side the DOM caret was already stuck on) passed
+      // through untouched.
+      if (
+        !this.cursorMatches(target) &&
+        !this.isCursorHidden(this.getCursor())
+      ) {
         this.log(`external caret ${target.row}:${target.col} before ${keys}`);
         this.requestCursor(target);
       }

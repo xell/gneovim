@@ -477,6 +477,23 @@ const EDITABLE_OFF = [
   EditorView.contentAttributes.of({ tabindex: "0" }),
 ];
 
+// True when `pos` falls strictly inside a non-zero-width range of `ranges`
+// (a RangeSet of Decoration.replace entries). The browser has no native DOM
+// position for a byte hidden behind a replace widget (a rendered table, a
+// concealed image source line, closed fold body, hidden conceal marker), so
+// a position inside one is never something the live DOM selection can be
+// trusted to track.
+function rangeHidesPos(ranges, pos) {
+  let hidden = false;
+  ranges.between(pos, pos, (from, to) => {
+    if (from <= pos && pos < to) {
+      hidden = true;
+      return false;
+    }
+  });
+  return hidden;
+}
+
 // One CodeMirror instance bound to one markdown window and its buffer.
 class Island {
   constructor(winId) {
@@ -504,6 +521,7 @@ class Island {
       getBuffer: () => this.bufnr,
       getCursor: () => this._nvimCursor,
       getMode: () => this.mode,
+      isCursorHidden: (cursor) => this.isCursorHidden(cursor),
       log: jlog,
       requestFrame: (callback) => requestAnimationFrame(callback),
       setTimer: (callback, delay) => setTimeout(callback, delay),
@@ -668,6 +686,23 @@ class Island {
   queueNvimKey(keys, event) {
     if (this.inputController.syncSelectionBeforeInput(event, keys))
       this.inputQueue.input(keys);
+  }
+  // True when `cursor` sits behind a rendered table, a concealed image
+  // source line, a closed fold's hidden body, or a conceal-hidden marker:
+  // every source besides the visible caret that can hide real buffer bytes
+  // behind a non-editable replace widget the DOM selection cannot enter.
+  isCursorHidden(cursor) {
+    if (!cursor) return false;
+    const doc = this.view.state.doc;
+    const line = doc.line(Math.min(cursor.row + 1, doc.lines));
+    const pos = Math.min(line.from + byteToCol(line.text, cursor.col), line.to);
+    const state = this.view.state;
+    return (
+      rangeHidesPos(state.field(islandDecorField), pos) ||
+      rangeHidesPos(state.field(islandFoldField), pos) ||
+      rangeHidesPos(state.field(markdownTableField).deco, pos) ||
+      rangeHidesPos(state.field(markdownImageField).deco, pos)
+    );
   }
   semanticWordTarget() {
     return findSemanticWordTarget(this.view.state.doc, this._nvimCursor);
