@@ -175,6 +175,12 @@ pub enum BridgeEvent {
     /// highlights, folds, visual range later), as a JSON string.
     /// From `runtime/md_decor.lua`.
     MdDecor(MdDecorPayload),
+    /// `:GneovimResyncIsland`: a hard escape hatch for a wedged island (see
+    /// `docs/markdown-island-fold-desync.md`). Tells the client to tear down
+    /// and reattach every markdown island from a fresh buffer snapshot; the
+    /// Lua side has already forced its own fold/highlight-cache reset before
+    /// sending this. From `runtime/md_preview.lua`.
+    ResyncIsland,
     /// `:OpenInNewGneovimTab` / `_G.OpenInNewGneovimTab()`: open a new gui-tab
     /// with its own nvim. `paths` open one Neovim tabpage each; `content` (for a
     /// `[No Name]` buffer being moved) seeds the initial buffer's lines.
@@ -675,6 +681,9 @@ impl Handler for NvHandler {
                     .to_string();
                 self.shared
                     .send(BridgeEvent::MdDecor(MdDecorPayload { win, json }));
+            }
+            "gnv_resync_island" => {
+                self.shared.send(BridgeEvent::ResyncIsland);
             }
             // [{ paths = [..]?, content = [..]? }]
             "gnv_open_new_tab" => {

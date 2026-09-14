@@ -779,6 +779,21 @@ schedule = function()
   vim.defer_fn(flush, 20)
 end
 
+-- Escape hatch for `:GneovimResyncIsland` (runtime/md_preview.lua). `push`
+-- always recomputes `folds` and `heads`/`codes`/`quotes` from scratch, so the
+-- only state here worth discarding is `hl_by_win`'s fingerprint, which would
+-- otherwise reuse a highlight snapshot read before this call. Bypasses the
+-- 20ms debounce so the resulting `gnv_md_decor` push is synchronous with the
+-- fold reset `:GneovimResyncIsland` already did in the caller, instead of
+-- racing a second, independently-timed `schedule()` from whatever triggered
+-- this. See docs/markdown-island-fold-desync.md.
+_G.__gnv_resync_decor = function(win)
+  hl_by_win[win] = nil
+  if preview_on(win) then
+    pcall(push, win)
+  end
+end
+
 -- One always-registered augroup. It fires on every matching event, but the
 -- per-window `preview_on` guard makes the work skip grid windows entirely, so
 -- the cost for a non-preview window is one variable read. Toggling preview

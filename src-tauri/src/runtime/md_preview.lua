@@ -6,6 +6,8 @@
 --   :MarkdownLivePreviewOn! / ...             every markdown window in the tab
 --   :GrammarlyOn / Off / Toggle               current markdown window
 --   :GrammarlyOn! / ...                       every markdown window in the tab
+--   :GneovimResyncIsland                      every markdown island, this nvim
+--                                              (fold-desync escape hatch)
 --
 -- Each window carries `w:gnv_md_preview` (0 or 1) while it is a markdown
 -- window, unset otherwise, so it can be read from a statusline or a script.
@@ -219,3 +221,45 @@ for _, spec in ipairs({
     apply(spec[3], spec[2], o.bang, spec[4], spec[5])
   end, { bang = true, desc = 'gneovim: ' .. spec[3] .. ' (' .. spec[2] .. ')' })
 end
+
+-- Escape hatch for a wedged island: live rendering stops matching the actual
+-- buffer (glitched heading styles, hidden text that should be visible, a
+-- caret that will not move) and stays that way until now. Heaviest reported
+-- trigger is a document with many closed `foldmethod=expr` folds edited
+-- quickly (writing an outline of `## heading` lines): see
+-- docs/markdown-island-fold-desync.md for the suspected cause. Toggling
+-- `:MarkdownLivePreviewOff` / `On` already forces the client to reattach one
+-- window's island from a fresh snapshot; this goes further and is meant to
+-- need no follow up:
+--   1. re-applies 'foldlevel' in every markdown window, discarding whatever
+--      the fold engine's own state currently disagrees with foldexpr about.
+--   2. drops md_decor.lua's per-window highlight cache and re-pushes its
+--      decor payload synchronously, bypassing the normal 20ms debounce.
+--   3. tells the client to tear down and reattach *every* markdown island
+--      from a fresh nvim_buf_get_lines snapshot, the same recovery
+--      `applyBufLines` already falls back to on a caught desync.
+-- Deliberately global (not per-window, no bang): a full resync is cheap and
+-- the point is one command that always works, not a scalpel.
+vim.api.nvim_create_user_command('GneovimResyncIsland', function()
+  local n = 0
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if is_md(win) then
+      n = n + 1
+      -- zX: re-apply 'foldlevel' to every fold without forcing any open
+      -- (unlike zx, which also does zv). Purely a fold-state refresh.
+      pcall(vim.api.nvim_win_call, win, function()
+        vim.cmd('normal! zX')
+      end)
+      if _G.__gnv_resync_decor then
+        pcall(_G.__gnv_resync_decor, win)
+      end
+    end
+  end
+  pcall(vim.rpcnotify, chan, 'gnv_resync_island')
+  vim.notify(
+    n > 0
+      and ('GneovimResyncIsland: resynced ' .. n .. ' markdown window' .. (n == 1 and '' or 's'))
+      or 'GneovimResyncIsland: no markdown window',
+    vim.log.levels.INFO
+  )
+end, { desc = 'gneovim: force a full markdown island resync (fold desync escape hatch)' })
