@@ -486,9 +486,12 @@ class Island {
       fromNvim,
       getBuffer: () => this.bufnr,
       getCursor: () => this._nvimCursor,
+      getMode: () => this.mode,
       log: jlog,
       requestFrame: (callback) => requestAnimationFrame(callback),
       setTimer: (callback, delay) => setTimeout(callback, delay),
+      syncSelectionToCursor: () => this.syncSelectionToCursor(),
+      tx: (spec) => this.tx(spec),
     });
     this.el = document.createElement("div");
     this.el.className = "island";
@@ -635,8 +638,8 @@ class Island {
     this.inputQueue.input(keys);
   }
   queueNvimKey(keys, event) {
-    this.inputController.syncDomSelectionBeforeKey(event);
-    this.inputQueue.input(keys);
+    if (this.inputController.syncSelectionBeforeInput(event, keys))
+      this.inputQueue.input(keys);
   }
   semanticWordTarget() {
     return findSemanticWordTarget(this.view.state.doc, this._nvimCursor);
@@ -705,6 +708,7 @@ class Island {
       this._nvimCursor.row !== row ||
       this._nvimCursor.col !== col;
     this._nvimCursor = { row, col };
+    this.inputController.onNvimCursor(row, col);
     this.tx({
       ...(cursorChanged ? { selection: { anchor: pos } } : {}),
       effects: setNvimCursor.of({ row, col, mode }),
@@ -742,6 +746,7 @@ class Island {
     // match whatever the old buffer last scrolled to.
     this._lastViewport = null;
     this._nvimCursor = null;
+    this.inputController.reset();
     // clear decorations before the full-doc replace: if a stale set is what is
     // making dispatches throw, mapping it through this huge change would keep
     // the island wedged even across `:e` / a forced re-attach.

@@ -1,6 +1,8 @@
-// Serializes cursor placement and input requests for one island. This ordering
-// matters when a click or accessibility selection is immediately followed by a
-// key: Neovim must observe the cursor request first.
+// Serializes cursor placement, buffer edit, and input requests for one island.
+// This ordering matters when a click or accessibility selection is immediately
+// followed by a key: Neovim must observe the cursor request first, and a typed
+// replacement of an external selection must delete that selection before the
+// replacement key arrives.
 export class IslandInputQueue {
   constructor({ client, winId, log }) {
     this.client = client;
@@ -13,6 +15,13 @@ export class IslandInputQueue {
     this.enqueue(
       () => this.client.cursorSet(this.winId, row, col),
       "island cursor set failed: ",
+    );
+  }
+
+  edit(buffer, regions) {
+    this.enqueue(
+      () => this.client.edit(buffer, regions),
+      "island selection edit failed: ",
     );
   }
 

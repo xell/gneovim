@@ -1,6 +1,21 @@
+import { ChangeSet } from "@codemirror/state";
 import { diffInserted } from "./pure/editing.js";
 import { externalEditRegions } from "./pure/external-edit-regions.js";
 import { byteLen } from "./pure/text-geometry.js";
+
+// Neovim key notation for keys that insert text in Insert mode. Only such a
+// key may replace an external selection, the way typing replaces a selection
+// in an ordinary editor.
+const TEXT_KEYS = new Set(["<lt>", "<Space>", "<CR>", "<Tab>"]);
+const DELETE_KEYS = new Set(["<BS>", "<Del>"]);
+
+// Classify one queued input string: "text" inserts, "delete" removes the
+// character next to the cursor, "other" is a motion, mode change, or mapping.
+export function classifyInput(keys) {
+  if (DELETE_KEYS.has(keys)) return "delete";
+  if (TEXT_KEYS.has(keys) || !/^<[^>]*>$/.test(keys)) return "text";
+  return "other";
+}
 
 // Owns browser-originated island input: IME composition, external document
 // edits, accessibility selection changes, and pointer cursor placement.
@@ -11,25 +26,47 @@ export class IslandInputController {
     fromNvim,
     getBuffer,
     getCursor,
+    getMode,
     log,
     requestFrame,
     setTimer,
+    syncSelectionToCursor,
+    tx,
   }) {
     this.client = client;
     this.inputQueue = inputQueue;
     this.fromNvim = fromNvim;
     this.getBuffer = getBuffer;
     this.getCursor = getCursor;
+    this.getMode = getMode;
     this.log = log;
     this.requestFrame = requestFrame;
     this.setTimer = setTimer;
+    this.syncSelectionToCursor = syncSelectionToCursor;
+    this.tx = tx;
     this.view = null;
     this.composition = null;
     this.compositionSettling = false;
+    // The cursor most recently requested from Neovim and not yet confirmed by
+    // its gnv_cursor echo. Between the request and the echo the DOM selection
+    // already sits there while getCursor() still reports the old position, so
+    // a second key in that window must not queue the same placement again
+    // behind the first key: that would move Neovim back and reverse the text.
+    this.pendingCursor = null;
   }
 
   attach(view) {
     this.view = view;
+  }
+
+  onNvimCursor(row, col) {
+    const pending = this.pendingCursor;
+    if (pending && pending.row === row && pending.col === col)
+      this.pendingCursor = null;
+  }
+
+  reset() {
+    this.pendingCursor = null;
   }
 
   onCompositionStart() {
@@ -58,10 +95,12 @@ export class IslandInputController {
       event.data
     ) {
       // Some macOS input sources emit full-width punctuation as direct
-      // insertText with no composition. Route it as keyboard input because
+      // insertText with no composition, and an accessibility client may set
+      // AXSelectedText the same way. Route it as keyboard input because
       // nvim_buf_set_text cannot advance Neovim's insert cursor.
       event.preventDefault();
-      this.inputQueue.input(event.data.replace(/</g, "<lt>"));
+      const keys = event.data.replace(/</g, "<lt>");
+      if (this.syncSelectionBeforeInput(event, keys)) this.inputQueue.input(keys);
       return true;
     }
     return false;
@@ -111,6 +150,8 @@ export class IslandInputController {
     // desktop editors using AXSelectedTextRange. Deliberately decide from the
     // transaction itself, as in the verified a42cda1 fix: persistent browser
     // composition flags can be stale and must not veto an external placement.
+    // A ranged selection is left in place: it only gains a meaning when a key
+    // arrives while it is still selected (see syncSelectionBeforeInput).
     if (
       update.docChanged ||
       !update.selectionSet ||
@@ -123,12 +164,8 @@ export class IslandInputController {
       return;
     const selection = update.state.selection.main;
     if (!selection.empty) return;
-    const line = update.state.doc.lineAt(selection.head);
-    const row = line.number - 1;
-    const col = byteLen(line.text.slice(0, selection.head - line.from));
-    const cursor = this.getCursor();
-    if (cursor?.row === row && cursor.col === col) return;
-    this.inputQueue.cursor(row, col);
+    const target = this.cursorAt(update.state.doc, selection.head);
+    if (!this.cursorMatches(target)) this.requestCursor(target);
   }
 
   onMousedown(event, view) {
@@ -137,43 +174,103 @@ export class IslandInputController {
       y: event.clientY,
     });
     if (position == null) return false;
-    const line = view.state.doc.lineAt(position);
-    this.inputQueue.cursor(
-      line.number - 1,
-      byteLen(line.text.slice(0, position - line.from)),
-    );
+    this.requestCursor(this.cursorAt(view.state.doc, position));
     return false;
   }
 
-  syncDomSelectionBeforeKey(event) {
-    // AXSelectedTextRange updates WebKit's DOM selection before Grammarly posts
-    // its key, but CodeMirror's selection observer may not have dispatched yet.
-    // Sample the native selection at the causal key boundary rather than racing
-    // that observer or introducing a timeout.
-    if (event.isComposing) return;
-    const selection = this.view.contentDOM.ownerDocument.getSelection();
+  // Called with the key about to be queued. Returns whether that key should
+  // still be sent to Neovim.
+  //
+  // AXSelectedTextRange updates WebKit's DOM selection before Grammarly posts
+  // its keys, but CodeMirror's selection observer may not have dispatched yet,
+  // so sample the native selection at the causal key boundary. A collapsed
+  // selection is a cursor placement. A ranged selection is what a desktop
+  // editor sets when it means "replace this span": it selects the error and
+  // types the correction, expecting the editor to delete the selection first.
+  // Neovim has one cursor and no idea of that range, so delete it here, seat
+  // the cursor at its start, and only then let the replacement key through.
+  syncSelectionBeforeInput(event, keys) {
+    if (event.isComposing) return true;
+    const range = this.domSelectionRange();
+    if (!range) return true;
+    if (range.from === range.to) {
+      const target = this.cursorAt(this.view.state.doc, range.from);
+      if (!this.cursorMatches(target)) {
+        this.log(`external caret ${target.row}:${target.col} before ${keys}`);
+        this.requestCursor(target);
+      }
+      return true;
+    }
+    const kind = classifyInput(keys);
+    if (kind === "other" || !this.insertModeActive() || this.getBuffer() == null) {
+      // A foreign range Neovim cannot honour is dropped now, so a later text
+      // key does not replace a span the user never saw as selected.
+      this.log(`external range ${range.from}-${range.to} dropped before ${keys}`);
+      this.syncSelectionToCursor();
+      return true;
+    }
+    this.log(`external range ${range.from}-${range.to} replaced by ${keys}`);
+    this.replaceSelection(range);
+    // Backspace and Delete on a selection remove the selection itself.
+    return kind === "text";
+  }
+
+  replaceSelection({ from, to }) {
+    const doc = this.view.state.doc;
+    const regions = externalEditRegions(
+      doc,
+      ChangeSet.of([{ from, to }], doc.length),
+    );
+    // The bridge suppresses the buffer echo of its own nvim_buf_set_text, so
+    // mirror the deletion locally exactly as a native DOM edit would have.
+    this.tx({ changes: { from, to, insert: "" }, selection: { anchor: from } });
+    this.inputQueue.edit(this.getBuffer(), regions);
+    this.requestCursor(this.cursorAt(doc, from));
+  }
+
+  domSelectionRange() {
+    const content = this.view.contentDOM;
+    const selection = content.ownerDocument.getSelection();
     if (
       !selection ||
-      !selection.isCollapsed ||
+      !selection.anchorNode ||
       !selection.focusNode ||
-      !this.view.contentDOM.contains(selection.focusNode)
+      !content.contains(selection.anchorNode) ||
+      !content.contains(selection.focusNode)
     )
-      return;
-    let position;
+      return null;
+    let anchor;
+    let focus;
     try {
-      position = this.view.posAtDOM(
-        selection.focusNode,
-        selection.focusOffset,
-      );
+      anchor = this.view.posAtDOM(selection.anchorNode, selection.anchorOffset);
+      focus = this.view.posAtDOM(selection.focusNode, selection.focusOffset);
     } catch {
-      return;
+      return null;
     }
-    const line = this.view.state.doc.lineAt(position);
-    const row = line.number - 1;
-    const col = byteLen(line.text.slice(0, position - line.from));
-    const cursor = this.getCursor();
-    if (cursor?.row === row && cursor.col === col) return;
+    return { from: Math.min(anchor, focus), to: Math.max(anchor, focus) };
+  }
+
+  cursorAt(doc, position) {
+    const line = doc.lineAt(position);
+    return {
+      row: line.number - 1,
+      col: byteLen(line.text.slice(0, position - line.from)),
+    };
+  }
+
+  cursorMatches({ row, col }) {
+    return [this.getCursor(), this.pendingCursor].some(
+      (cursor) => cursor != null && cursor.row === row && cursor.col === col,
+    );
+  }
+
+  requestCursor({ row, col }) {
+    this.pendingCursor = { row, col };
     this.inputQueue.cursor(row, col);
+  }
+
+  insertModeActive() {
+    return /^[iR]/.test(this.getMode());
   }
 
   isComposing() {

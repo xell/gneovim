@@ -21,49 +21,74 @@ This is not a browser extension injected into the WKWebView. Grammarly Desktop
 is a separate macOS process, so its useful paths into the webview are macOS
 Accessibility and posted keyboard events.
 
-The live trace showed this sequence:
+WKWebView exposes the island's `.cm-content` as a single `AXTextArea`. Its
+`AXValue` is the island's DOM text and `AXSelectedTextRange` is settable.
+`AXSelectedText` also reports as settable, but setting it does nothing inside
+a contenteditable island (no DOM mutation, no `beforeinput`), so the
+correction itself can only arrive as posted keys. WKWebView reports posted
+`CGEvent` keys as `KeyboardEvent.isTrusted === true`. `isTrusted` means the
+browser created the event, not that a human physically pressed a key.
 
-1. Grammarly set the island's DOM selection to the error location, for example
-   `283:283`. The collapsed selection means "place a caret here, then type",
-   rather than a direct range replacement.
-2. No DOM `beforeinput` followed.
-3. Neovim reported its original cursor advancing one column, exactly matching
-   the first character of Grammarly's correction.
+Grammarly uses two selection shapes:
 
-The consistent explanation is that Grammarly sets `AXSelectedTextRange`, then
-posts keyboard events for its correction. WKWebView reports posted `CGEvent`
-keys as `KeyboardEvent.isTrusted === true`. `isTrusted` means the browser
-created the event, not that a human physically pressed a key.
+1. A collapsed `AXSelectedTextRange`, for example `283:283`, followed by the
+   inserted text. This is "place a caret here, then type".
+2. A ranged `AXSelectedTextRange` over the erroneous span, followed by the
+   replacement text. This is "select this, then type over it", the same thing
+   a human does in any GUI editor, and it is what the light blue highlight
+   over a detected range is. When it fixes several errors in one detected
+   range it does this once per error, left to right, reading `AXValue` back
+   in between and stopping if the text did not change as expected.
 
 Before this work, the global `keydown` handler called `preventDefault()` and
 forwarded every key to `nvim_input`. That cancelled WebKit's native insertion
-and sent Grammarly's character to Neovim, which only knows its own cursor
-position. Hence the correction landed at the typing cursor.
+and sent Grammarly's characters to Neovim, which only knows its own cursor
+position. Hence the correction landed at the typing cursor. The first fix
+(`a42cda1`) handled shape 1 only; shape 2 was ignored because every check
+required a collapsed selection, which produced the second reported failure:
+the correction typed at the typing cursor and the erroneous span left intact.
 
 ## Compatibility bridge
 
-The island now treats a collapsed CodeMirror selection transaction as an
-external cursor placement only when all of these are true:
+`IslandInputController.syncSelectionBeforeInput(event, keys)` runs right
+before an island key is queued. It reads WebKit's DOM selection (not
+CodeMirror's state, which may lag the Accessibility change) and maps both
+ends through `posAtDOM`:
 
-* it changed no document text
-* it was not annotated `fromNvim`
-* it was not `select.pointer`, because `onMousedown` already handles an
-  ordinary mouse placement
-* it differs from the last known Neovim cursor
+* Collapsed and different from the last known or pending Neovim cursor: queue
+  `nvim_cursor_set`, then the key.
+* Ranged, in Insert or Replace mode, and the key inserts text (a printable
+  character, `<Space>`, `<CR>`, `<Tab>`): delete the range in CodeMirror with
+  the `fromNvim` annotation, queue `nvim_edit` for the same region, queue
+  `nvim_cursor_set` at the range start, then the key. The local deletion is
+  needed because the bridge suppresses the buffer echo of its own
+  `nvim_buf_set_text`.
+* Ranged and the key is `<BS>` or `<Del>`: same deletion, key consumed.
+* Ranged and anything else, or not in Insert or Replace mode: restore
+  CodeMirror's selection to Neovim's cursor and forward the key unchanged.
 
-`onExternalSelection` converts that CodeMirror position to Neovim's
-row plus UTF-8 byte column and queues `nvim_cursor_set`. All island
-`nvim_input` calls share the same promise queue. Thus a Grammarly key cannot
-overtake the cursor placement request: Neovim moves to Grammarly's requested
-position first, then receives the posted correction keys normally.
+`IslandInputController.onSelectionUpdate` still forwards a collapsed external
+selection transaction as soon as CodeMirror observes it, using the same rule as
+`a42cda1`: no document change, not annotated `fromNvim`, not `select.pointer`,
+different from the Neovim cursor. A ranged transaction is left alone; it only
+gains a meaning when a key arrives while it is still selected.
 
-If Grammarly later restores its Accessibility selection to the original typing
-location, the same selection bridge moves Neovim back. This preserves the
-expected workflow without making CodeMirror locally authoritative for buffer
-contents.
+All cursor, edit, and input requests of one island share `IslandInputQueue`,
+so a posted key cannot overtake the deletion or the cursor placement.
 
-The queue is also used for an island mouse placement and an IME commit, which
-removes an otherwise possible cursor versus next-input ordering race.
+### Pending cursor
+
+Between `nvim_cursor_set` and its `gnv_cursor` echo, the DOM selection already
+sits at the new position while `_nvimCursor` still reports the old one. A
+second posted key in that window would otherwise queue the same placement
+again, behind the first key, moving Neovim back and reversing the typed
+characters. The controller therefore remembers `pendingCursor`, the position it
+last requested, and treats a DOM selection at that position as already placed
+until Neovim echoes it. This closes the residual race the first version of
+this note described without any timeout.
+
+Each external placement or replacement writes one `[webview] external ...`
+line to the app log. Check that line before modelling any future report.
 
 ## What not to infer
 
@@ -78,30 +103,28 @@ removes an otherwise possible cursor versus next-input ordering race.
   Enter, IME, undo, and mapping semantics can diverge from Neovim.
 * Do not restore CodeMirror's native selection immediately after every external
   selection change. Grammarly needs that selection long enough to start its
-  posted key sequence.
+  posted key sequence. A ranged selection in particular must survive until the
+  first correction key arrives, because that key is what gives it a meaning.
+* Do not treat a ranged Accessibility selection as a Visual or Select mode
+  request. Grammarly also sets it merely to highlight a detected range, and
+  Select mode would expose typed correction characters to `vmap` mappings.
 
-## Residual intermittent failure
+## Reproducing without Grammarly
 
-The bridge works in normal use but is not yet a guarantee. An occasional
-correction still reaches the old Neovim cursor. The remaining race is likely
-between Accessibility setting the DOM selection, CodeMirror's
-`selectionchange` observer dispatching the selection transaction, and
-Grammarly posting its first key. The JavaScript queue orders operations only
-after the selection transaction has reached `onExternalSelection`; it cannot
-order a key that arrives before that notification.
+`scripts/ax-driver.swift` drives the two channels Grammarly has, against the
+running dev build, from a terminal with Accessibility permission:
 
-Do not paper over this with a timeout. If this is revisited, collect one
-causal timeline with:
+```sh
+swiftc -O scripts/ax-driver.swift -o /tmp/ax-driver
+/tmp/ax-driver activate        # bring the dev app forward
+/tmp/ax-driver probe           # role, AXValue, AXSelectedTextRange
+/tmp/ax-driver select 8 5      # ranged selection, UTF 16 offsets into AXValue
+/tmp/ax-driver type 'people' 3 # posted keys, 3 ms apart (0 ms is dropped)
+```
 
-1. capture-phase `selectionchange` and `beforeinput` events
-2. CodeMirror selection transactions and their `userEvent`
-3. every `nvim_cursor_set` and `nvim_input` request with a monotonic id
-4. the existing native key monitor's `CGEvent` source process id, compared to
-   Grammarly's process id
-
-That will establish whether the first posted key precedes the AX notification,
-or whether another path is involved. A native macOS-level ordering solution may
-then be warranted, but only with this evidence.
+Put the island in Insert mode first, and keep the typing cursor on a different
+line from the target. The buffer, the `AXValue`, and the caret after the
+correction should all agree.
 
 ## Coordinate rule
 
@@ -116,7 +139,7 @@ contains accented characters, CJK, or emoji.
 When changing this bridge, manually check:
 
 1. A Grammarly insertion, deletion, and replacement before and after the
-   typing cursor.
+   typing cursor, including two corrections in one detected range.
 2. A correction that returns the cursor to its original position.
 3. Normal click-to-place-cursor followed immediately by typing.
 4. Normal island typing, Backspace, Enter, and undo.

@@ -2,13 +2,53 @@
 
 ## Status
 
-**Unresolved.**
+**Resolved on 2026-09-14.** The cause was not a refactor regression in the cursor bridge. Grammarly Desktop selects the error span as a *ranged* Accessibility selection and then types the correction over it, and every island path only honoured a *collapsed* external selection. The sections after "Resolution" are kept as the record of the three earlier attempts and why they could not work.
 
-Grammarly Desktop can identify an error at the correct location in a Markdown live preview island, but applying the correction inserts the generated text at Neovim's existing typing cursor instead of Grammarly's target.
+## Resolution
 
-This is the same visible failure that motivated commit `a42cda1be6d99e31fc3015e8ed4117ffa9cad4e6` (`Island: synchronize Grammarly corrections`). That old change was verified through repeated manual testing at the time. The architecture refactor retained its apparent pieces, but the real Grammarly workflow has regressed.
+### What was observed live
 
-Three attempted repairs after the refactor produced **no observable improvement at all**. Do not repeat them without first collecting new runtime evidence.
+The stand in in `scripts/ax-driver.swift` drives the same two channels Grammarly Desktop has: `AXSelectedTextRange` on the focused Accessibility element, and posted keyboard events. Against the dev build with the island in Insert mode it showed:
+
+1. WKWebView exposes the island's `.cm-content` as one `AXTextArea`. Its `AXValue` is the island's DOM text, and both `AXSelectedTextRange` and `AXSelectedText` report as settable.
+2. Setting `AXSelectedTextRange` to a nonempty range selects it in the DOM, which is the light blue highlight over Grammarly's detected range. CodeMirror observes it as an ordinary ranged selection transaction.
+3. Setting `AXSelectedText` returns success but changes nothing: no DOM mutation, no `beforeinput`, no CodeMirror transaction. So the only channel that can carry the correction into the island is posted keys.
+4. Before the fix, a posted key with a ranged selection reached the global `keydown` handler, which forwarded it to `nvim_input` at Neovim's own cursor. `onSelectionUpdate` returned on `!selection.empty`, and `syncDomSelectionBeforeKey` returned on `!selection.isCollapsed`. That is exactly the reported failure: the correction typed at the typing cursor, the detected range fully intact, no stray deletions anywhere.
+
+The one by one batch failure follows from that. Grammarly reads `AXValue` back after each correction, and when the first correction did not land where its own model says it should, it stops.
+
+### The fix
+
+`IslandInputController.syncSelectionBeforeInput(event, keys)` runs at the same causal boundary as before, immediately before a key is queued, and now reads the whole DOM selection:
+
+* A collapsed selection is a cursor placement, as in `a42cda1`.
+* A ranged selection plus a text key (a printable character, `<Space>`, `<CR>`, `<Tab>`) is a replacement. The controller deletes the range in CodeMirror with the `fromNvim` annotation, queues `nvim_edit` for the same region, queues `nvim_cursor_set` at the range start, and only then lets the key through. All three go through `IslandInputQueue`, so Neovim sees delete, cursor, key in that order.
+* A ranged selection plus `<BS>` or `<Del>` deletes the range and consumes the key.
+* A ranged selection plus any other key, or outside Insert and Replace mode, is dropped by restoring CodeMirror's selection to Neovim's cursor, so a later key cannot replace a span the user never selected.
+
+The deletion is mirrored into CodeMirror locally because the bridge suppresses the buffer echo of its own `nvim_buf_set_text` (see `EditSync` in `bridge.rs`), exactly as for a native DOM edit.
+
+The controller also keeps `pendingCursor`, the last cursor it requested that Neovim has not yet echoed through `gnv_cursor`. Between the request and the echo, the DOM selection already sits at the new position while `_nvimCursor` still reports the old one, so a second posted key in that window used to queue the same placement again behind the first key, which would move Neovim back and reverse the typed characters. The pending position now counts as already placed. That was the "theoretical risk" noted below; it becomes real as soon as typing over a range is allowed, and the ordering test covers it.
+
+### Verified live
+
+With the dev build, Insert mode, and the driver posting keys 3 ms apart:
+
+* `ADHD peple` selected through AX, then `people` typed: the buffer became `ADHD people` and the caret ended right after the correction, which is what Grammarly reads before moving to the next error.
+* A second correction (`teh` to `the`) with its range computed from the corrected text landed correctly, the one by one workflow.
+* A collapsed AX placement followed by `,` still inserted at the placement (the original `a42cda1` case).
+* The same with a multibyte prefix (`日本語 `) and with the typing cursor after the target on the same line.
+* Ordinary typing, Backspace, Return, Escape, and undo were unchanged and produced no external selection log lines.
+
+Each external placement or replacement writes one `[webview] external ...` line to the app log, so a future report can be checked against the log before any modelling.
+
+### Follow up noticed on the way
+
+`:e!` on the island's buffer reloaded Neovim's buffer but the island kept the old text (`AXValue` still showed the old line). That is a display reconciliation issue unrelated to Grammarly and was not changed here.
+
+## Original report and the three attempted repairs
+
+Everything below is the state of the investigation before the ranged selection was observed. It stays because it records what the unit tests can and cannot prove about this boundary.
 
 ## User-visible reproduction
 
