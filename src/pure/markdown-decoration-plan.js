@@ -18,6 +18,27 @@ export function headingMarkerRanges(doc, headings, guardRow, inFold) {
   return ranges;
 }
 
+// A heading's trailing `|anything|` suffix, matched non-greedily against the
+// end of the line only (vim: /|[^|]\{-}|$/). Purely a font cue, so unlike
+// headingMarkerRanges this never hides the guard row: the pipes stay in
+// place, only their face changes.
+const HEADING_SUFFIX_PATTERN = /\|[^|]*\|$/;
+
+export function headingSuffixRanges(doc, headings, inFold) {
+  const ranges = [];
+  for (const [row] of headings || []) {
+    if (row < 0 || row >= doc.lines) continue;
+    const line = doc.line(row + 1);
+    const match = HEADING_SUFFIX_PATTERN.exec(line.text);
+    if (!match) continue;
+    const from = line.from + match.index;
+    const to = from + match[0].length;
+    if (inFold(from, to)) continue;
+    ranges.push({ from, to });
+  }
+  return ranges;
+}
+
 export function quoteMarkerRanges(doc, quotes, guardRow, inFold) {
   const ranges = [];
   for (const [startRow, endRow] of quotes || []) {

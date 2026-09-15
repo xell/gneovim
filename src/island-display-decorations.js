@@ -4,6 +4,7 @@ import { visualRanges } from "./pure/visual-ranges.js";
 import { foldRanges, overlapsRanges } from "./pure/fold-ranges.js";
 import {
   headingMarkerRanges,
+  headingSuffixRanges,
   nonOverlappingSpans,
   quoteMarkerRanges,
   structuralLineStarts,
@@ -308,6 +309,15 @@ export class IslandDisplayDecorations {
     const ranges = [];
     for (const span of nonOverlappingSpans(spans)) {
       ranges.push(span.deco.range(span.from, span.to));
+    }
+    for (const { from, to } of headingSuffixRanges(
+      doc,
+      payload?.heads,
+      inFold,
+    )) {
+      ranges.push(
+        Decoration.mark({ class: "cm-heading-suffix" }).range(from, to),
+      );
     }
     for (const [row, startCol, endCol] of payload?.hl?.codespans ?? []) {
       const range = byteRange(doc, row, startCol, endCol);

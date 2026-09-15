@@ -2,6 +2,7 @@ import { Text } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 import {
   headingMarkerRanges,
+  headingSuffixRanges,
   nonOverlappingSpans,
   quoteMarkerRanges,
   structuralLineStarts,
@@ -24,6 +25,34 @@ describe("Markdown decoration planning", () => {
       ),
     ).toEqual([{ row: 0, from: 0, to: 2, level: 6 }]);
     expect(headingMarkerRanges(doc, [[0, 0, 1]], 0, visible)).toEqual([]);
+  });
+
+  it("plans heading trailing |suffix| runs non-greedily and excludes folds", () => {
+    const suffixDoc = Text.of([
+      "# a heading |@|",
+      "## b |200/100/50%|",
+      "no suffix here",
+      "# |x|y|",
+    ]);
+    expect(
+      headingSuffixRanges(
+        suffixDoc,
+        [
+          [0, 0, 1],
+          [1, 1, 2],
+          [2, 2, 1],
+          [3, 3, 1],
+        ],
+        visible,
+      ),
+    ).toEqual([
+      { from: 12, to: 15 },
+      { from: 21, to: 34 },
+      { from: 54, to: 57 },
+    ]);
+    expect(
+      headingSuffixRanges(suffixDoc, [[0, 0, 1]], (from) => from === 12),
+    ).toEqual([]);
   });
 
   it("plans nested blockquote source markers", () => {
