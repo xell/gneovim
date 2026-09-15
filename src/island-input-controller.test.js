@@ -322,6 +322,30 @@ describe("IslandInputController", () => {
     expect(client.input).toHaveBeenCalledWith("k");
   });
 
+  it("does not drag Neovim's cursor onto a hidden position it was never at", async () => {
+    // Confirmed live 2026-09-16, a real ~175-line document full of headings:
+    // the previous fix only stopped a *second* drag to the same bogus spot.
+    // Here Neovim's own cursor (row 10, plain body text) is not hidden, but
+    // the DOM's own reported target (row 20, a heading's column 0 -- a
+    // HeadingIconWidget replace boundary) is. Unlike the table/image case
+    // above, isCursorHidden(cursor) alone says nothing is wrong; only
+    // checking the target itself catches it.
+    const doc = Text.of(["body text here", "## A Heading"]);
+    const view = domView({ doc, selection: 2, anchor: 15 }); // -> row 1, col 0
+    const { client, controller, inputQueue } = integrated({
+      view,
+      cursor: { row: 10, col: 3 },
+      isCursorHidden: (pos) => pos.row === 1 && pos.col === 0,
+    });
+
+    expect(controller.syncSelectionBeforeInput({ isComposing: false }, "j")).toBe(true);
+    inputQueue.input("j");
+    await inputQueue.pending;
+
+    expect(client.cursorSet).not.toHaveBeenCalled();
+    expect(client.input).toHaveBeenCalledWith("j");
+  });
+
   it("does not chase a DOM read that is exactly one keystroke stale during ordinary typing", async () => {
     // Confirmed live (2026-09-15): the DOM's own native Selection can read
     // exactly where Neovim's cursor stood *before* the previous key landed,

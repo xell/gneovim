@@ -278,7 +278,27 @@ export class IslandInputController {
         this.lastExternalTarget != null &&
         this.lastExternalTarget.row === target.row &&
         this.lastExternalTarget.col === target.col;
-      if (!staleEcho && !frozen && !matches && !this.isCursorHidden(cursor)) {
+      // Confirmed live 2026-09-16, a heading-dense real document: the
+      // frozen-caret guard above only stops the *second and later* drag to
+      // the same bogus spot. It let the *first* one through, because
+      // isCursorHidden was only ever asked about `cursor` (Neovim's real
+      // position before the drag), never about `target` (where the drag is
+      // about to send it). A document full of headings is full of
+      // HeadingIconWidget replace boundaries at column 0, and the DOM's own
+      // Selection landed exactly on one of those under ordinary editing --
+      // most likely orphaned by CodeMirror recreating widget DOM nodes on a
+      // decoration rebuild, not any real external move. No genuine external
+      // client (Grammarly, a click) can ever successfully place a selection
+      // *inside* a non-editable replace widget in the first place, so a
+      // target that maps to one is never worth honouring, independent of
+      // whether Neovim's cursor happens to already be there too.
+      if (
+        !staleEcho &&
+        !frozen &&
+        !matches &&
+        !this.isCursorHidden(cursor) &&
+        !this.isCursorHidden(target)
+      ) {
         this.log(`external caret ${target.row}:${target.col} before ${keys}`);
         this.lastExternalTarget = target;
         this.requestCursor(target);

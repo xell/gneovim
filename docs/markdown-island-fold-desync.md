@@ -227,3 +227,47 @@ caller — see `docs/external-file-changes-and-the-island.md` for the case
 this command's own "even reloading doesn't help" symptom turned out to
 share a cause with: `:edit!` fires none of the events the island's content
 sync depends on either.
+
+## The frozen-caret guard had a gap: it only checked one endpoint
+
+Reported live again 2026-09-16 on a real 175-line document with many
+headings: `ada8b86`'s fix (stop *repeating* a drag to the same frozen DOM
+spot) reduced the damage but did not stop it — the app log showed a
+`frozen external caret ROW:0 ignored before KEY` sequence, and then a
+*fresh* `external caret ROW:0 before KEY` a little later, at a different
+row each time (169, then 172, then 174 across one session — all near the
+bottom of the document, always column 0).
+
+Reproduced the mechanism with a plain vitest fixture (no browser, no live
+app needed — this is pure decoration logic): a document with many `##`
+headings, decorations built the same way `IslandDisplayDecorations.apply()`
+does, confirms `isCursorHidden` correctly flags a heading's own column 0 as
+hidden (`HeadingIconWidget`'s replace decoration covers exactly that byte).
+So the widget-hiding logic itself was never wrong. The gap was in
+`syncSelectionBeforeInput`'s guard: `!this.isCursorHidden(cursor)` only ever
+asked whether Neovim's cursor *before* the drag was hidden. It never asked
+about `target`, the position the drag was about to send Neovim *to*. When
+the DOM's own Selection read landed exactly on some heading's column 0 (not
+because Neovim moved there — because a document packed with headings is
+packed with `HeadingIconWidget` replace boundaries, and rebuilding the
+decoration set on every edit recreates those widgets' DOM nodes, which can
+orphan WebKit's current Selection onto the nearest one), the pre-drag
+cursor legitimately wasn't hidden, so the check passed and Neovim's real
+cursor got dragged onto a heading it was never navigating to. Only *then*
+did the frozen-caret guard start blocking the repeats.
+
+Fix: also check `isCursorHidden(target)`. No genuine external client
+(Grammarly, a click) can ever successfully place a selection *inside* a
+non-editable replace widget in the first place, so a target that maps to
+one is never worth honouring regardless of where Neovim's cursor already
+was. Covered by a new test in `island-input-controller.test.js`
+reproducing the exact log shape (cursor on ordinary text, DOM target on a
+heading's column 0). `npm test`: 117/117.
+
+This still does not explain *why* WebKit's Selection lands on a heading
+boundary in the first place — the DOM-node-recreation-on-rebuild theory
+above is plausible and fits the evidence (col almost always 0, row
+drifting near wherever editing is happening in a heading-dense document)
+but is not proven with a live trace. The fix above makes it harmless
+either way: whatever causes the DOM misread, it can no longer drag
+Neovim's real cursor to a place it never asked to go.
