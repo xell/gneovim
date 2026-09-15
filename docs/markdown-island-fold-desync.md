@@ -104,6 +104,32 @@ of caching quirks under bulk fold-level changes on some Neovim versions).
 The two are not mutually exclusive and the fix below is deliberately blunt
 enough to paper over either.
 
+**Live attempt, 2026-09-15, inconclusive.** Drove the real dev app (real
+embedded Neovim, real WKWebView, `System Events` keystrokes, not the headless
+harness above) against a duplicate of the reporter's own note: 70 `##`
+headings, `foldmethod=expr` + treesitter foldexpr from their real config,
+`zM`/`zR` interleaved with typing at three levels of aggression (whole
+heading+body blocks; single characters; a mid-document insert that shifts
+every later closed fold's row number, specifically to attack the "stale row
+number" mechanism above). None of it reproduced the reported symptom: no
+`invalid md_decor payload` / `island decor build failed` / `island desync`
+/ `fold remap failed` ever logged, and every heading rendered with the
+correct icon and size at every checkpoint. The aggressive runs did corrupt
+buffer text (words merged, fragments duplicated) — but a `:w` after each run
+showed the corruption on disk byte-for-byte identical to what the island
+rendered, which rules out an island-only decoration bug for those runs: it
+was this test's own blind keystroke automation racing Neovim's search
+command and insert-mode transitions, not a client/server disagreement.
+Net result: the theory above is unconfirmed. Either the window is narrower
+than these synthetic bursts modeled, it needs conditions this session
+couldn't reproduce (a much larger document, a longer live session, real
+human pause/burst timing, Grammarly or another accessibility client also
+polling the same island), or there is a real contributing cause not yet
+identified. If it recurs, the next step is turning the `tick` `push()`
+already computes into a logged value on both the Lua push and the client's
+last-applied buf-lines edit, so a live capture can show whether the two
+ever actually diverge.
+
 The real fix, not yet implemented, is giving channel 2 a version stamp (send
 `tick` in the `md_decor` payload; have the client's buffer-echo path record
 its own last-applied tick; drop or requeue a `md_decor` payload whose tick is
