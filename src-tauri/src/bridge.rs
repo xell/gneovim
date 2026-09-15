@@ -133,6 +133,13 @@ pub struct GrammarlyPayload {
 }
 
 #[derive(Clone, Serialize)]
+pub struct OptimalWidthPayload {
+    pub win: i64,
+    /// 1 capped and centred, 0 fills the window, -1 no longer a markdown window.
+    pub state: i64,
+}
+
+#[derive(Clone, Serialize)]
 pub struct WinGutterPayload {
     pub win: i64,
     pub number: bool,
@@ -167,6 +174,10 @@ pub enum BridgeEvent {
     /// A markdown window's Grammarly opt-out flag changed. `state`: 1 allowed,
     /// 0 opted out, -1 no longer a markdown window. From `runtime/md_preview.lua`.
     Grammarly(GrammarlyPayload),
+    /// A markdown window's optimal-width flag changed. `state`: 1 capped and
+    /// centred, 0 fills the window, -1 no longer a markdown window. From
+    /// `runtime/md_preview.lua`.
+    OptimalWidth(OptimalWidthPayload),
     /// A markdown window's gutter options, so its island can mirror Neovim's
     /// number column. `signcolumn` / `foldcolumn` ride along for a later pass.
     /// From `runtime/md_preview.lua`.
@@ -642,6 +653,12 @@ impl Handler for NvHandler {
                 let state = args.get(1).and_then(Value::as_i64).unwrap_or(-1);
                 self.shared
                     .send(BridgeEvent::Grammarly(GrammarlyPayload { win, state }));
+            }
+            "gnv_md_optimal_width" => {
+                let win = args.first().and_then(Value::as_i64).unwrap_or(0);
+                let state = args.get(1).and_then(Value::as_i64).unwrap_or(-1);
+                self.shared
+                    .send(BridgeEvent::OptimalWidth(OptimalWidthPayload { win, state }));
             }
             "gnv_win_gutter" => {
                 let win = args.first().and_then(Value::as_i64).unwrap_or(0);
@@ -1137,6 +1154,8 @@ pub async fn connect(
         // config runs.
         let md_default: i64 = crate::config::get().markdown.live_preview_default.into();
         let grammarly_default: i64 = crate::config::get().markdown.grammarly_default.into();
+        let optimal_width_default: i64 =
+            crate::config::get().markdown.optimal_width_default.into();
         if let Err(e) = nvim
             .exec_lua(
                 include_str!("runtime/md_preview.lua"),
@@ -1145,6 +1164,7 @@ pub async fn connect(
                     md_default.into(),
                     env!("CARGO_PKG_VERSION").into(),
                     grammarly_default.into(),
+                    optimal_width_default.into(),
                 ],
             )
             .await
@@ -1551,6 +1571,30 @@ impl Bridge {
             .nvim
             .eval(
                 "map(getwininfo(), {_,w -> [w.winid,                  getwinvar(w.winid, 'gnv_grammarly', -1)]})",
+            )
+            .await
+            .map_err(err)?;
+        Ok(v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| {
+                let r = row.as_array()?;
+                Some((
+                    r.first().and_then(Value::as_i64)?,
+                    r.get(1).and_then(Value::as_i64).unwrap_or(-1),
+                ))
+            })
+            .collect())
+    }
+
+    /// `[(winid, state), ...]` for every window with a `w:gnv_md_optimal_width`
+    /// flag, replayed on first attach for the same reason as `win_gutters`.
+    pub async fn win_optimal_width(&self) -> Result<Vec<(i64, i64)>, String> {
+        let v = self
+            .nvim
+            .eval(
+                "map(getwininfo(), {_,w -> [w.winid, \
+                 getwinvar(w.winid, 'gnv_md_optimal_width', -1)]})",
             )
             .await
             .map_err(err)?;

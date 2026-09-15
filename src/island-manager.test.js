@@ -9,6 +9,7 @@ function island(winId) {
     destroy: vi.fn(),
     applyReset: vi.fn(),
     setGutter: vi.fn(),
+    setOptimalWidth: vi.fn(),
   };
 }
 
@@ -54,6 +55,7 @@ describe("IslandManager", () => {
     expect(mounted.bufnr).toBe(7);
     expect(mounted.applyReset).toHaveBeenCalledOnce();
     expect(mounted.setGutter).toHaveBeenCalledWith({ win: 1000, number: true });
+    expect(mounted.setOptimalWidth).toHaveBeenCalledWith(true);
     expect(manager.gridIds).toEqual(new Set([2]));
 
     session.setPreview(1000, 0);

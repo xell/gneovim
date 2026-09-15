@@ -72,6 +72,13 @@ live_preview_default = true
 # Grammarly Desktop reads and corrects it, by default. Overridable per window
 # at runtime with :GrammarlyOn / Off / Toggle. Default true.
 grammarly_default = true
+# Max width, in CSS pixels, of a markdown island's text column while optimal-
+# width mode is on. Default 730.
+optimal_width = 730
+# Whether a markdown island starts in optimal-width mode (capped to
+# optimal_width and centred) rather than filling the window. Overridable per
+# window at runtime with :MarkdownOptimalWidthOn / Off / Toggle. Default true.
+optimal_width_default = true
 ```
 
 ## Markdown live preview
@@ -114,6 +121,24 @@ no floating button. Editing, IME, and rendering are untouched; VoiceOver and
 dictation only ever see an allowed island, which is the intended trade. The
 state lives in `w:gnv_grammarly` (`1` on, `0` off) and `[markdown]
 grammarly_default` sets the initial value.
+
+## Optimal width for the live-preview island
+
+Exclusively for the CodeMirror live-preview island: while optimal-width mode
+is on, the island's text column is capped to `[markdown] optimal_width` CSS
+pixels (default 730) and centred, so a wide window does not force a long
+reading line. Below that width the island already fills the window, so the
+mode has no visible effect. `[markdown] optimal_width_default` sets whether a
+window starts in this mode, and three commands override it per window:
+
+    :MarkdownOptimalWidthOn      capped and centred for the current window
+    :MarkdownOptimalWidthOff     current window fills the window, as before
+    :MarkdownOptimalWidthToggle
+    :MarkdownOptimalWidth...!    with a bang: every markdown window in the tabpage
+
+The state lives in `w:gnv_md_optimal_width` (`1` capped, `0` full width).
+Purely a display preference: it does not touch `textwidth`, `wrap`, or buffer
+content, and grid (non-island) windows are unaffected.
 
 ## Closing and quitting
 

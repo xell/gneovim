@@ -800,6 +800,7 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec) {
                     BridgeEvent::GuiOpt(p) => emit_app.emit(&ev("guiopt"), p),
                     BridgeEvent::MdPreview(p) => emit_app.emit(&ev("md_preview"), p),
                     BridgeEvent::Grammarly(p) => emit_app.emit(&ev("grammarly"), p),
+                    BridgeEvent::OptimalWidth(p) => emit_app.emit(&ev("optimal_width"), p),
                     BridgeEvent::WinGutter(p) => emit_app.emit(&ev("win_gutter"), p),
                     BridgeEvent::MdDecor(p) => emit_app.emit(&ev("md_decor"), p),
                     BridgeEvent::ResyncIsland(win) => emit_app.emit(&ev("resync_island"), win),
@@ -1146,6 +1147,17 @@ async fn nvim_wingrammarly(
 }
 
 #[tauri::command]
+async fn nvim_winoptimalwidth(
+    app: AppHandle,
+    window: tauri::Window,
+) -> Result<Vec<(i64, i64)>, String> {
+    bridge_for(&app, window.label())
+        .await?
+        .win_optimal_width()
+        .await
+}
+
+#[tauri::command]
 async fn nvim_wingutters(
     app: AppHandle,
     window: tauri::Window,
@@ -1355,6 +1367,7 @@ pub fn run() {
             nvim_guiopts,
             nvim_wingutters,
             nvim_wingrammarly,
+            nvim_winoptimalwidth,
             set_accessibility_hidden,
             nvim_md_decor,
             nvim_paste_clip,

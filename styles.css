@@ -164,6 +164,15 @@ body {
   /* explicit so island text never depends on inherited body color */
   color: var(--fg);
 }
+/* Optimal-width mode: cap the text column and centre it in whatever space
+   the scroller has left after its gutter, rather than filling the window.
+   A narrower window than --optimal-width is unaffected: max-width simply
+   never binds, and the flex content (CM6's own flex-grow) fills it as
+   before. */
+.island.island-optimal-width .cm-content {
+  max-width: var(--optimal-width, 730px);
+  margin: 0 auto;
+}
 /* number column, mirrored from Neovim's `number` / `relativenumber`. Monospace
    and muted like `LineNr`, flush with the island background. */
 .island .cm-gutters {

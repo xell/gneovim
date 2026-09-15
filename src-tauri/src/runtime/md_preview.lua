@@ -6,15 +6,19 @@
 --   :MarkdownLivePreviewOn! / ...             every markdown window in the tab
 --   :GrammarlyOn / Off / Toggle               current markdown window
 --   :GrammarlyOn! / ...                       every markdown window in the tab
+--   :MarkdownOptimalWidthOn / Off / Toggle    current markdown window
+--   :MarkdownOptimalWidthOn! / ...            every markdown window in the tab
 --   :GneovimResyncIsland                      every markdown island, this nvim
 --                                              (fold-desync escape hatch)
 --
 -- Each window carries `w:gnv_md_preview` (0 or 1) while it is a markdown
 -- window, unset otherwise, so it can be read from a statusline or a script.
 -- `w:gnv_grammarly` (0 or 1) follows the same lifecycle: when 0, the window's
--- island advertises itself to Grammarly as opted out.
+-- island advertises itself to Grammarly as opted out. `w:gnv_md_optimal_width`
+-- (0 or 1) likewise: when 1, the island's text column is capped and centred
+-- instead of filling the window.
 
-local chan, default, version, grammarly_default = ...
+local chan, default, version, grammarly_default, optimal_width_default = ...
 
 vim.g.gneovim = true
 vim.g.gneovim_version = version
@@ -109,6 +113,23 @@ local function set_grammarly(win, on)
   notify_grammarly(win, v)
 end
 
+-- Optimal-width mode, per window: purely a display preference for the
+-- island's CSS, same lifecycle as gnv_grammarly.
+local function get_optimal_width(win)
+  local ok, v = pcall(vim.api.nvim_win_get_var, win, 'gnv_md_optimal_width')
+  return ok and v or nil
+end
+
+local function notify_optimal_width(win, val)
+  pcall(vim.rpcnotify, chan, 'gnv_md_optimal_width', win, val)
+end
+
+local function set_optimal_width(win, on)
+  local v = on and 1 or 0
+  pcall(vim.api.nvim_win_set_var, win, 'gnv_md_optimal_width', v)
+  notify_optimal_width(win, v)
+end
+
 -- Mirror a markdown window's gutter options into the GUI so its CM island can
 -- draw the same number column Neovim would. signcolumn / foldcolumn ride along
 -- for a later pass. Same pcall rationale as notify().
@@ -136,6 +157,9 @@ local function reconcile(win)
     if get_grammarly(win) == nil then
       set_grammarly(win, grammarly_default == 1)
     end
+    if get_optimal_width(win) == nil then
+      set_optimal_width(win, optimal_width_default == 1)
+    end
   else
     if get_flag(win) ~= nil then
       set_flag(win, nil)
@@ -144,6 +168,10 @@ local function reconcile(win)
     if get_grammarly(win) ~= nil then
       pcall(vim.api.nvim_win_del_var, win, 'gnv_grammarly')
       notify_grammarly(win, -1)
+    end
+    if get_optimal_width(win) ~= nil then
+      pcall(vim.api.nvim_win_del_var, win, 'gnv_md_optimal_width')
+      notify_optimal_width(win, -1)
     end
   end
 end
@@ -216,6 +244,21 @@ for _, spec in ipairs({
   { 'GrammarlyOn', 'on', 'Grammarly', get_grammarly, set_grammarly },
   { 'GrammarlyOff', 'off', 'Grammarly', get_grammarly, set_grammarly },
   { 'GrammarlyToggle', 'toggle', 'Grammarly', get_grammarly, set_grammarly },
+  { 'MarkdownOptimalWidthOn', 'on', 'MarkdownOptimalWidth', get_optimal_width, set_optimal_width },
+  {
+    'MarkdownOptimalWidthOff',
+    'off',
+    'MarkdownOptimalWidth',
+    get_optimal_width,
+    set_optimal_width,
+  },
+  {
+    'MarkdownOptimalWidthToggle',
+    'toggle',
+    'MarkdownOptimalWidth',
+    get_optimal_width,
+    set_optimal_width,
+  },
 }) do
   vim.api.nvim_create_user_command(spec[1], function(o)
     apply(spec[3], spec[2], o.bang, spec[4], spec[5])

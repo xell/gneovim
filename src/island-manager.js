@@ -55,6 +55,7 @@ export class IslandManager {
         this.attach(island);
         const gutter = this.session.gutterForWindow(win);
         if (gutter) island.setGutter(gutter);
+        island.setOptimalWidth(this.session.optimalWidthForWindow(win));
       } else if (force || (wantedBuffer != null && current.bufnr !== wantedBuffer)) {
         const oldBuffer = current.bufnr;
         current.bufnr = null;

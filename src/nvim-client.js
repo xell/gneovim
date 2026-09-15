@@ -88,6 +88,10 @@ export class NvimClient {
     return this.invoke("nvim_wingrammarly");
   }
 
+  windowOptimalWidth() {
+    return this.invoke("nvim_winoptimalwidth");
+  }
+
   setAccessibilityHidden(hidden) {
     return this.invoke("set_accessibility_hidden", { hidden });
   }

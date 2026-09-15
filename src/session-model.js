@@ -10,6 +10,7 @@ export class SessionModel {
     this.previewWindows = new Map();
     this.windowGutters = new Map();
     this.grammarlyWindows = new Map();
+    this.optimalWidthWindows = new Map();
     this.cursorGrid = 1;
     this.lastCursor = null;
     this.modeName = "n";
@@ -41,6 +42,14 @@ export class SessionModel {
   // Whether Grammarly may act on the window's island. Unknown means allowed.
   grammarlyForWindow(win) {
     return this.grammarlyWindows.get(win) ?? true;
+  }
+
+  // Whether the window's island is in optimal-width mode (capped and
+  // centred). Unknown means on: `runtime/md_preview.lua` materializes the
+  // authoritative flag for every markdown window before the client's replay
+  // pull can land, per the config default.
+  optimalWidthForWindow(win) {
+    return this.optimalWidthWindows.get(win) ?? true;
   }
 
   // Whether the webview's content should be published to macOS Accessibility:
@@ -92,6 +101,11 @@ export class SessionModel {
     else this.grammarlyWindows.set(win, state === 1 || state === true);
   }
 
+  setOptimalWidth(win, state) {
+    if (state === -1) this.optimalWidthWindows.delete(win);
+    else this.optimalWidthWindows.set(win, state === 1 || state === true);
+  }
+
   moveGridCursor(grid) {
     const previous = this.cursorGrid;
     this.cursorGrid = grid;
@@ -137,6 +151,7 @@ export class SessionModel {
     if (goneWindow != null && ![...this.gridWindows.values()].includes(goneWindow)) {
       this.previewWindows.delete(goneWindow);
       this.grammarlyWindows.delete(goneWindow);
+      this.optimalWidthWindows.delete(goneWindow);
     }
     return goneWindow;
   }

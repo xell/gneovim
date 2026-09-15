@@ -31,6 +31,16 @@ pub struct Markdown {
     /// overridable at runtime with `:GrammarlyOn` / `Off` / `Toggle`.
     /// Default true.
     pub grammarly_default: bool,
+    /// Max width, in CSS pixels, of a markdown live-preview island's text
+    /// column while optimal-width mode is on (see `optimal_width_default`).
+    /// Below this width the content just fills the window; above it, the
+    /// content is capped to this width and centred. Default 730.
+    pub optimal_width: u32,
+    /// Whether a markdown live-preview island starts in optimal-width mode
+    /// (capped to `optimal_width` and centred) rather than filling the
+    /// window. Per-window overridable at runtime with
+    /// `:MarkdownOptimalWidthOn` / `Off` / `Toggle`. Default true.
+    pub optimal_width_default: bool,
 }
 
 impl Default for Markdown {
@@ -38,6 +48,8 @@ impl Default for Markdown {
         Self {
             live_preview_default: true,
             grammarly_default: true,
+            optimal_width: 730,
+            optimal_width_default: true,
         }
     }
 }

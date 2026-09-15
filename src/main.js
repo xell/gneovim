@@ -647,6 +647,12 @@ class Island {
     this.view.requestMeasure();
     this.keepCursorInView();
   }
+  // Cap the island's text column to --optimal-width and centre it, rather
+  // than filling the window. From `w:gnv_md_optimal_width`
+  // (runtime/md_preview.lua) / [markdown] optimal_width_default.
+  setOptimalWidth(on) {
+    this.el.classList.toggle("island-optimal-width", on);
+  }
   tx(spec) {
     this.view.dispatch({ ...spec, annotations: fromNvim.of(true) });
   }
@@ -997,6 +1003,10 @@ addEventListener("error", (e) => {
     blockImeInNormalMode = cfg?.input?.block_ime_in_normal_mode ?? true;
     forwardCmdKeys = cfg?.input?.forward_cmd_keys ?? false;
     livePreviewDefault = cfg?.markdown?.live_preview_default ?? true;
+    document.documentElement.style.setProperty(
+      "--optimal-width",
+      `${cfg?.markdown?.optimal_width ?? 730}px`,
+    );
     if (matchMedia?.("(pointer: coarse)")?.matches) blockImeInNormalMode = false;
     jlog(
       `config: option_is_meta=${optionIsMeta} block_ime=${blockImeInNormalMode} ` +
@@ -1074,6 +1084,11 @@ addEventListener("error", (e) => {
     nvim.on("grammarly", (e) => {
       session.setGrammarly(e.payload.win, e.payload.state);
       syncGrammarlyAccessibility();
+    }),
+    nvim.on("optimal_width", (e) => {
+      const { win, state } = e.payload;
+      session.setOptimalWidth(win, state);
+      islands.get(win)?.setOptimalWidth(session.optimalWidthForWindow(win));
     }),
     nvim.on("md_decor", (e) => {
       let d;
@@ -1167,6 +1182,16 @@ addEventListener("error", (e) => {
     syncGrammarlyAccessibility();
   } catch (e) {
     jlog("wingrammarly failed: " + e);
+  }
+
+  // Optimal-width flags (md_preview.lua) likewise; pull them.
+  try {
+    for (const [win, state] of await nvim.windowOptimalWidth()) {
+      session.setOptimalWidth(win, state);
+      islands.get(win)?.setOptimalWidth(session.optimalWidthForWindow(win));
+    }
+  } catch (e) {
+    jlog("winoptimalwidth failed: " + e);
   }
 
   // display-bridge payloads also fire before we listen; nudge a re-push.
