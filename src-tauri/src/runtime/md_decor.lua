@@ -15,11 +15,12 @@
 --   visual  : the visual / select range.
 --   folds   : closed folds (foldclosed / foldtextresult).
 --   hl      : { runs, defs } - union of every treesitter capture, hl_group
---             extmark, active 'hlsearch' result, and :match / matchadd() /
---             matchaddpos() overlay (getmatches()) over the viewport, plus the
---             resolved attrs for each group. The last is how plugins like
---             vim-easymotion and quick-scope colour a window without extmarks
---             or :syntax.
+--             extmark, active 'hlsearch' result, a live '/' or '?' incsearch
+--             preview, a live ':s'/':g' (substitute/global) 'inccommand'
+--             preview, and :match / matchadd() / matchaddpos() overlay
+--             (getmatches()) over the viewport, plus the resolved attrs for
+--             each group. The last is how plugins like vim-easymotion and
+--             quick-scope colour a window without extmarks or :syntax.
 --
 -- Args: (channel).
 
@@ -451,7 +452,132 @@ local function current_incsearch(win)
   return { pattern = pattern, row = cursor[1] - 1, end_col = cursor[2] }
 end
 
-local function collect_highlights(win, buf, first, last, marks, search_pattern, incsearch)
+-- Delimiter characters :h :s rules out ("It should not be a letter or
+-- number, and preferably not '\', '"' or '|'"), same rule :h :global gives
+-- for its own pattern delimiter.
+local BAD_PATTERN_DELIM = { ['\\'] = true, ['"'] = true, ['|'] = true }
+-- nvim_parse_cmd resolves :smagic / :snomagic to their own distinct `cmd`
+-- name, not 'substitute', though they take the same /pattern/string/ args.
+local SUBSTITUTE_CMD = { substitute = true, smagic = true, snomagic = true }
+-- :g! and :v both invert the match, but nvim_parse_cmd only gives :v its own
+-- distinct `cmd` name ('vglobal'); :g! surfaces as cmd='global', bang=true.
+-- Preview doesn't care which: both still highlight literal pattern matches,
+-- the inversion only affects which lines the command itself later acts on.
+local GLOBAL_CMD = { global = true, vglobal = true }
+
+-- Shared by current_substitute and current_global below: parse the live `:`
+-- command line via nvim_parse_cmd, check its command name against
+-- `cmd_names`, and extract the pattern from its own delimited argument text
+-- the same way cmdline_search_pattern already does for `/` and `?`. Returns
+-- {pattern, start_row, end_row} (0-based, inclusive), or nil if the command
+-- line isn't shaped like one of `cmd_names` yet. `default_range()` supplies
+-- {start_row, end_row} when no explicit range was typed -- :substitute
+-- defaults to the current line, :global to the whole buffer, and that
+-- distinction is the only thing that differs between the two commands.
+--
+-- Delegates range and command-name resolution to nvim_parse_cmd rather than
+-- hand-rolling Ex range syntax (marks, '<,'>, /pat/,/pat/, +n/-n offsets,
+-- multiple ranges separated by `,`/`;`, ...): a still-incomplete range
+-- (mid-typing "'<,'" before the second mark exists) makes it throw, which is
+-- read the same as "no preview for this keystroke", exactly like an
+-- unmatched delimiter in cmdline_search_pattern above. In real usage this
+-- happens rarely: the common case, `'<,'>` from a visual-mode `:`, is
+-- inserted whole, not typed character by character.
+local function cmdline_pattern_command(cmd_names, default_range)
+  if vim.fn.getcmdtype() ~= ':' then
+    return nil
+  end
+  local ok, parsed = pcall(vim.api.nvim_parse_cmd, vim.fn.getcmdline(), {})
+  if not ok or not cmd_names[parsed.cmd] then
+    return nil
+  end
+  local rest = parsed.args[1]
+  if not rest or rest == '' then
+    return nil
+  end
+  local delimiter = rest:sub(1, 1)
+  if delimiter:match('%w') or delimiter:match('%s') or BAD_PATTERN_DELIM[delimiter] then
+    return nil
+  end
+  local pattern = cmdline_search_pattern(rest:sub(2), delimiter)
+  if pattern == '' then
+    -- An empty pattern (":s//repl/", ":g//d", a bare ":s") repeats the last
+    -- search pattern for both commands alike.
+    pattern = vim.fn.getreg('/')
+  end
+  if pattern == '' then
+    return nil
+  end
+  local start_row, end_row
+  if parsed.range then
+    start_row = parsed.range[1] - 1
+    end_row = (parsed.range[2] or parsed.range[1]) - 1
+  else
+    start_row, end_row = default_range()
+  end
+  return { pattern = pattern, start_row = start_row, end_row = end_row }
+end
+
+-- Live preview for a `:s` (substitute) command line being typed. See
+-- cmdline_pattern_command for the shape and the shared parsing logic.
+local function current_substitute(win)
+  if vim.o.inccommand == '' or vim.api.nvim_get_current_win() ~= win then
+    return nil
+  end
+  return cmdline_pattern_command(SUBSTITUTE_CMD, function()
+    -- No range given: :s only ever touches the current line.
+    local row = vim.api.nvim_win_get_cursor(win)[1] - 1
+    return row, row
+  end)
+end
+
+-- Live preview for a `:g`/`:global`/`:v`/`:vglobal` command line being
+-- typed. See cmdline_pattern_command for the shape and the shared parsing
+-- logic.
+local function current_global(win, buf)
+  if vim.o.inccommand == '' or vim.api.nvim_get_current_win() ~= win then
+    return nil
+  end
+  return cmdline_pattern_command(GLOBAL_CMD, function()
+    -- No range given: :global, unlike :s, defaults to the whole buffer.
+    return 0, math.max(vim.api.nvim_buf_line_count(buf) - 1, 0)
+  end)
+end
+
+-- Emit Search/IncSearch runs for every match of `preview.pattern` within
+-- `preview`'s own line range intersected with the padded viewport --
+-- deliberately not the whole viewport, since a range-scoped :s or :g must
+-- not highlight matches on lines it will never actually touch. The first
+-- match additionally gets IncSearch, mirroring incsearch's own singled-out
+-- current match. Shared by the :s and :g live-preview passes in
+-- collect_highlights below, since both are otherwise identical: a
+-- {pattern, start_row, end_row} previewed the same way regardless of which
+-- command produced it.
+local function add_preview_matches(add, buf, first, last, preview)
+  if not preview then
+    return
+  end
+  local from_line = math.max(preview.start_row, first) + 1
+  local to_line = math.min(preview.end_row, last) + 1
+  if from_line > to_line then
+    return
+  end
+  local ok, hits =
+    pcall(vim.fn.matchbufline, buf, preview.pattern, from_line, to_line, vim.empty_dict())
+  if not ok then
+    return
+  end
+  for i, hit in ipairs(hits) do
+    local row = hit.lnum - 1
+    local end_col = hit.byteidx + #hit.text
+    add(row, hit.byteidx, end_col, 'Search', PRIO_SEARCH)
+    if i == 1 then
+      add(row, hit.byteidx, end_col, 'IncSearch', PRIO_INCSEARCH)
+    end
+  end
+end
+
+local function collect_highlights(win, buf, first, last, marks, search_pattern, incsearch, substitute, global)
   local runs, seen, codespans, virt = {}, {}, {}, {}
   local function note(group, prio)
     if group then
@@ -556,6 +682,17 @@ local function collect_highlights(win, buf, first, last, marks, search_pattern, 
       end
     end
   end
+
+  -- Live :s / :g preview (see current_substitute / current_global above):
+  -- every match within the command's own line range gets the same Search
+  -- face used for ordinary search highlighting, regardless of 'hlsearch' --
+  -- unlike that option, this previews what the command will actually touch,
+  -- not a general "last search" highlight. Deliberately a separate match
+  -- pass from the block above: each command's range is its own, not the
+  -- full viewport, so neither can share that pcall/matchbufline call
+  -- without highlighting matches the command will never touch.
+  add_preview_matches(add, buf, first, last, substitute)
+  add_preview_matches(add, buf, first, last, global)
 
   -- :match / matchadd() / matchaddpos() overlays (easymotion, quick-scope,
   -- and any plugin that recolors this way instead of extmarks or :syntax).
@@ -684,6 +821,8 @@ local function push(win)
   -- and passed down, rather than queried twice.
   local tick = vim.api.nvim_buf_get_changedtick(buf)
   local incsearch = current_incsearch(win)
+  local substitute = current_substitute(win)
+  local global = current_global(win, buf)
   local search_pattern
   if vim.v.hlsearch == 1 then
     local pattern = incsearch and incsearch.pattern or vim.fn.getreg('/')
@@ -735,6 +874,12 @@ local function push(win)
     and c.incsearch_pattern == (incsearch and incsearch.pattern or nil)
     and c.incsearch_row == (incsearch and incsearch.row or nil)
     and c.incsearch_end_col == (incsearch and incsearch.end_col or nil)
+    and c.substitute_pattern == (substitute and substitute.pattern or nil)
+    and c.substitute_start_row == (substitute and substitute.start_row or nil)
+    and c.substitute_end_row == (substitute and substitute.end_row or nil)
+    and c.global_pattern == (global and global.pattern or nil)
+    and c.global_start_row == (global and global.start_row or nil)
+    and c.global_end_row == (global and global.end_row or nil)
     and c.mcount == mcount
     and c.msum == msum
     and c.ecount == ecount
@@ -742,7 +887,7 @@ local function push(win)
   then
     hl = c.value
   else
-    hl = collect_highlights(win, buf, first, last, marks, search_pattern, incsearch)
+    hl = collect_highlights(win, buf, first, last, marks, search_pattern, incsearch, substitute, global)
     hl_by_win[win] = {
       tick = tick,
       first = first,
@@ -751,6 +896,12 @@ local function push(win)
       incsearch_pattern = incsearch and incsearch.pattern or nil,
       incsearch_row = incsearch and incsearch.row or nil,
       incsearch_end_col = incsearch and incsearch.end_col or nil,
+      substitute_pattern = substitute and substitute.pattern or nil,
+      substitute_start_row = substitute and substitute.start_row or nil,
+      substitute_end_row = substitute and substitute.end_row or nil,
+      global_pattern = global and global.pattern or nil,
+      global_start_row = global and global.start_row or nil,
+      global_end_row = global and global.end_row or nil,
       mcount = mcount,
       msum = msum,
       ecount = ecount,
@@ -854,9 +1005,14 @@ vim.api.nvim_create_autocmd({
   'CursorHold',
   'CursorHoldI',
 }, { group = grp, callback = schedule })
+-- ':' fires this for every command line, not just :s / :g -- current_substitute
+-- and current_global are themselves the filter (nvim_parse_cmd's cmd not in
+-- SUBSTITUTE_CMD / GLOBAL_CMD bails immediately), and any other keystroke
+-- leaves every field push() fingerprints unchanged, so it is just a cache
+-- hit, not a real recompute.
 vim.api.nvim_create_autocmd({ 'CmdlineChanged', 'CmdlineLeave' }, {
   group = grp,
-  pattern = { '/', '?' },
+  pattern = { '/', '?', ':' },
   callback = schedule,
 })
 -- ModeChanged also fires for insert-completion's pum-visible sub-modes ('i'
@@ -887,6 +1043,7 @@ vim.api.nvim_create_autocmd('OptionSet', {
     'foldenable',
     'hlsearch',
     'incsearch',
+    'inccommand',
   },
   callback = schedule,
 })
