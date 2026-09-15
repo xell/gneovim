@@ -212,6 +212,76 @@ body {
   padding-left: 0.8em;
   color: color-mix(in srgb, var(--fg) 75%, transparent);
 }
+/* Depth-aware list hanging indent (Bear-style): a level-N item's own marker
+   lands on the level-(N-1) item's text column, and every physical line of
+   an item -- including a hard-wrapped paragraph's later lines, which carry
+   no marker of their own -- lines up under that item's first character, one
+   left-aligned text column per item. --list-indent-step is the per-level
+   step; raising it widens both the nesting stagger and the gap after each
+   bullet, since both are just this one number. --list-indent-base is a
+   flat offset added on top, so even a depth-0 item doesn't sit flush
+   against the island's own left edge.
+
+   cm-list-depth-N (every row of a list item, marker or continuation) sets
+   padding-left, the text column's left edge, and is a position: relative
+   anchor for its own bullet if it has one. An unordered bullet
+   (.cm-list-bullet) is a widget positioned *out of the text flow* at that
+   row's marker column (base + depth * step) -- not sized or nudged to fit,
+   so nothing about its own rendered width can misalign the text after it.
+   An ordered marker keeps its literal digits inline instead (a fixed glyph
+   can't stand in for "12."), so cm-list-marker-line pulls *that* row's own
+   text-indent back out by one step so the digits hang the same way; a
+   continuation row gets neither text-indent nor a bullet, so it just sits
+   flush in the column like the rest of the paragraph. listMarkerRanges
+   (island-display-decorations.js) hides each marker row's own literal
+   indentation so it doesn't double up with this. */
+.island [class*="cm-list-depth-"] {
+  position: relative;
+  padding-left: calc(
+    var(--list-indent-base, 2em) + (var(--list-depth) + 1) * var(--list-indent-step, 1.3em)
+  );
+}
+.island .cm-list-marker-line {
+  text-indent: calc(-1 * var(--list-indent-step, 1.3em));
+}
+.island .cm-list-depth-0 {
+  --list-depth: 0;
+}
+.island .cm-list-depth-1 {
+  --list-depth: 1;
+}
+.island .cm-list-depth-2 {
+  --list-depth: 2;
+}
+.island .cm-list-depth-3 {
+  --list-depth: 3;
+}
+.island .cm-list-depth-4 {
+  --list-depth: 4;
+}
+.island .cm-list-depth-5 {
+  --list-depth: 5;
+}
+.island .cm-list-depth-6 {
+  --list-depth: 6;
+}
+.island .cm-list-depth-7 {
+  --list-depth: 7;
+}
+/* Unordered bullet glyph, replacing the literal dash, asterisk, or plus
+   marker (ordered markers keep their literal digits, see listMarkerRanges
+   above). Cycles
+   solid dot / hollow ring / diamond every 3 levels, same idea as the
+   heading marker icons. Positioned out of flow at the row's marker column
+   (inherits --list-depth from the cm-list-depth-N line), so the real text
+   after it is untouched by whatever width this glyph happens to render at. */
+.island .cm-list-bullet {
+  position: absolute;
+  left: calc(
+    var(--list-indent-base, 2em) + var(--list-depth) * var(--list-indent-step, 1.3em)
+  );
+  color: var(--accent, color-mix(in srgb, var(--fg) 55%, transparent));
+}
 /* inline `code`: the highlight mark gives colour, this gives the face no
    Neovim highlight attribute carries. */
 .island .cm-inline-code {

@@ -257,13 +257,54 @@ local HEAD_MARKER_LEVEL = {
   atx_h6_marker = 6,
 }
 
+-- Per-row list nesting depth over the padded viewport, as one {row, depth}
+-- pair (0-based row, 0-based depth) for every row that belongs to a list
+-- item -- not just its marker line. A hard-wrapped item's later physical
+-- lines (no marker, just continuation prose) need the same depth as their
+-- marker line so the client can hang-indent the whole paragraph, not just
+-- its first row.
+--
+-- This resolves each row's own point rather than trusting a list_item's or
+-- paragraph's reported end row, because this grammar's ranges generously
+-- bleed one row into whatever follows (a `block_continuation` child marks
+-- how far an indent would extend *if* the block continued, even when the
+-- next row is actually a new sibling item) -- last_row(er, ec), used below
+-- for heads/codes/quotes, cannot be trusted for list content the way it can
+-- for those simpler, single-shot block kinds.
+local function collect_list_depths(buf, root, first, last)
+  local lists = {}
+  pcall(function()
+    local lines = vim.api.nvim_buf_get_lines(buf, first, last + 1, false)
+    for i, text in ipairs(lines) do
+      local row = first + i - 1
+      local col = math.max(#text:match('^%s*'), 0)
+      if col >= #text then
+        col = math.max(#text - 1, 0)
+      end
+      local node = root:descendant_for_range(row, col, row, col)
+      local depth = -1
+      while node do
+        if node:type() == 'list_item' then
+          depth = depth + 1
+        end
+        node = node:parent()
+      end
+      if depth >= 0 then
+        lists[#lists + 1] = { row, depth }
+      end
+    end
+  end)
+  return lists
+end
+
 -- Markdown block structure over the padded viewport: headings (with level),
--- fenced / indented code blocks, and block quotes, each as {startRow, endRow}
--- (0-based, inclusive), headings with a third level element. Read straight off
--- the base markdown tree by node *type*, not a highlights query: these are
--- structural, not colour, and want the whole block's line range.
+-- fenced / indented code blocks, block quotes, each as {startRow, endRow}
+-- (0-based, inclusive; headings with a third level element), and lists (see
+-- collect_list_depths). Read straight off the base markdown tree by node
+-- *type*, not a highlights query: these are structural, not colour, and want
+-- the whole block's line range.
 local function collect_structure(buf, first, last)
-  local heads, codes, quotes = {}, {}, {}
+  local heads, codes, quotes, lists = {}, {}, {}, {}
   pcall(function()
     local parser = vim.treesitter.get_parser(buf, 'markdown')
     if not parser then
@@ -310,8 +351,9 @@ local function collect_structure(buf, first, last)
       end
     end
     walk(root)
+    lists = collect_list_depths(buf, root, first, last)
   end)
-  return heads, codes, quotes
+  return heads, codes, quotes, lists
 end
 
 -- Closed folds overlapping the padded viewport, as { {startRow, endRow, text},
@@ -717,7 +759,7 @@ local function push(win)
     }
   end
 
-  local heads, codes, quotes = collect_structure(buf, first, last)
+  local heads, codes, quotes, lists = collect_structure(buf, first, last)
   local payload = {
     first = first,
     last = last,
@@ -728,6 +770,7 @@ local function push(win)
     heads = heads,
     codes = codes,
     quotes = quotes,
+    lists = lists,
     -- Temporary Neovim-owned incsearch cursor, kept separate from the real
     -- editing cursor. The client follows it visually without changing CM's
     -- selection or the island's authoritative cursor decoration.

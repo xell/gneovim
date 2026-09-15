@@ -100,6 +100,43 @@ describe("IslandDisplayDecorations", () => {
     expect(forceRepaint).toHaveBeenCalledOnce();
   });
 
+  it("applies list depth line classes and bullet/ordinal marker decorations", () => {
+    const { controller, decorationState, view } = fixture(
+      "- item one\n  - nested a\n1. ordered one",
+    );
+    controller.set({
+      guard_row: -1,
+      heads: [],
+      quotes: [],
+      // Row 2 is an ordered item flush against the left margin (no leading
+      // whitespace to hide) -- this used to build a zero-width replace
+      // decoration that CodeMirror rejects outright; asserting this doesn't
+      // throw is the point of the case.
+      lists: [
+        [0, 0],
+        [1, 1],
+        [2, 0],
+      ],
+      hl: { runs: [], codespans: [], virt: [] },
+    });
+
+    const decor = view.state.field(decorationState.islandDecorField);
+    expect(decor.size).toBeGreaterThan(0);
+
+    const classes = [];
+    decor.between(0, view.state.doc.length, (from, to, deco) => {
+      const cls = deco.spec?.attributes?.class;
+      if (cls) classes.push(cls);
+    });
+    expect(classes).toEqual(
+      expect.arrayContaining([
+        "cm-list-depth-0",
+        "cm-list-depth-1",
+        "cm-list-marker-line",
+      ]),
+    );
+  });
+
   it("coordinates EasyMotion, table highlights, and incremental search", () => {
     const {
       controller,

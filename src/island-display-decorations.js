@@ -5,10 +5,19 @@ import { foldRanges, overlapsRanges } from "./pure/fold-ranges.js";
 import {
   headingMarkerRanges,
   headingSuffixRanges,
+  listMarkerRanges,
+  listMarkerRows,
   nonOverlappingSpans,
   quoteMarkerRanges,
   structuralLineStarts,
 } from "./pure/markdown-decoration-plan.js";
+
+// Depth-cycled glyphs for unordered bullets, repeating every 3 levels
+// (Bear-style: solid dot, hollow ring, diamond).
+const LIST_BULLET_GLYPHS = ["●", "○", "◆"];
+// CSS only carries a handful of `cm-list-depth-N` rules (see styles.css);
+// deeper nesting just reuses the deepest one and keeps cycling glyphs.
+const MAX_LIST_DEPTH_CLASS = 7;
 
 class ConcealWidget extends WidgetType {
   constructor(document, text) {
@@ -57,6 +66,25 @@ class HeadingIconWidget extends WidgetType {
     glyph.className =
       `cm-heading-icon-glyph cm-heading-icon-${this.level}`;
     span.append(glyph);
+    return span;
+  }
+}
+
+class ListBulletWidget extends WidgetType {
+  constructor(document, depth) {
+    super();
+    this.document = document;
+    this.depth = depth;
+  }
+
+  eq(other) {
+    return other.depth === this.depth;
+  }
+
+  toDOM() {
+    const span = this.document.createElement("span");
+    span.className = "cm-list-bullet";
+    span.textContent = LIST_BULLET_GLYPHS[this.depth % LIST_BULLET_GLYPHS.length];
     return span;
   }
 }
@@ -276,6 +304,22 @@ export class IslandDisplayDecorations {
     )) {
       spans.push({ from, to, deco: concealHide });
     }
+    for (const { from, to, depth, ordered } of listMarkerRanges(
+      doc,
+      payload?.lists,
+      guardRow,
+      inFold,
+    )) {
+      spans.push({
+        from,
+        to,
+        deco: ordered
+          ? concealHide
+          : Decoration.replace({
+              widget: new ListBulletWidget(this.document, depth),
+            }),
+      });
+    }
 
     for (const [row, col, hide, segments] of payload?.hl?.virt ?? []) {
       const range = byteRange(doc, row, col, col + hide);
@@ -375,6 +419,25 @@ export class IslandDisplayDecorations {
     }
     for (const [startRow, endRow] of payload?.quotes ?? []) {
       addLines(startRow, endRow, "cm-blockquote");
+    }
+    // Every row belonging to a list item gets the depth's padding-left, so a
+    // hard-wrapped item's continuation lines (no marker of their own) still
+    // form a left-aligned text column under the marker row's own text.
+    for (const [row, depth] of payload?.lists ?? []) {
+      addLines(
+        row,
+        row,
+        `cm-list-depth-${Math.min(Math.max(depth, 0), MAX_LIST_DEPTH_CLASS)}`,
+      );
+    }
+    // Only an *ordered* marker row also needs the text-indent pull-back: its
+    // digits are real text sharing the line's normal flow, so they have to
+    // be yanked back out of the text column by hand. An unordered bullet is
+    // a widget positioned out of flow entirely (see .cm-list-bullet in
+    // styles.css), so it never needs this, and adding it anyway would pull
+    // the real text after the bullet left too.
+    for (const { row, ordered } of listMarkerRows(doc, payload?.lists)) {
+      if (ordered) addLines(row, row, "cm-list-marker-line");
     }
 
     const foldSet = Decoration.set(

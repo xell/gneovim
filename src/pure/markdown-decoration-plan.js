@@ -39,6 +39,55 @@ export function headingSuffixRanges(doc, headings, inFold) {
   return ranges;
 }
 
+// A list item's leading run: the raw indentation whitespace, plus -- for
+// unordered bullets only -- the marker character and its trailing gap.
+// Ordered markers ("1.", "12)") keep their literal digits on screen, since
+// a fixed-width glyph can't stand in for a number; only the indentation
+// whitespace ahead of them is hidden. The depth-driven hanging indent
+// itself is a plain per-row line class (see apply()), not part of this
+// span.
+const LIST_MARKER_PATTERN = /^([ \t]*)((?:[-+*])|(?:\d{1,9}[.)]))([ \t]+|$)/;
+
+export function listMarkerRanges(doc, lists, guardRow, inFold) {
+  const ranges = [];
+  for (const [row, depth] of lists || []) {
+    if (row < 0 || row >= doc.lines || row === guardRow) continue;
+    const line = doc.line(row + 1);
+    const match = LIST_MARKER_PATTERN.exec(line.text);
+    if (!match) continue;
+    const ordered = /\d/.test(match[2]);
+    const from = line.from;
+    const to = from + (ordered ? match[1].length : match[0].length);
+    // An ordered item flush against the left margin has no leading
+    // whitespace to hide and keeps its digits, so there is nothing to
+    // conceal; a zero-width span here would be a no-op replace decoration.
+    if (to === from) continue;
+    if (inFold(from, to)) continue;
+    ranges.push({ row, from, to, depth: Math.max(depth, 0), ordered });
+  }
+  return ranges;
+}
+
+// Which of a list's per-row depth entries (see collect_list_depths in
+// md_decor.lua, which covers a hard-wrapped item's continuation lines too,
+// not just its marker line) are the item's own marker row, and whether that
+// marker is ordered. Deliberately ignores guardRow/folds: it only decides
+// which rows need the ordered-marker text-indent pull-back (see apply()'s
+// cm-list-marker-line -- unordered bullets don't need it, they're
+// positioned out of the text flow instead), which should stay stable while
+// editing, same as a heading's font-size does. The actual concealment of
+// the marker text is the guard/fold-aware listMarkerRanges above.
+export function listMarkerRows(doc, lists) {
+  const rows = [];
+  for (const [row, depth] of lists || []) {
+    if (row < 0 || row >= doc.lines) continue;
+    const match = LIST_MARKER_PATTERN.exec(doc.line(row + 1).text);
+    if (!match) continue;
+    rows.push({ row, depth: Math.max(depth, 0), ordered: /\d/.test(match[2]) });
+  }
+  return rows;
+}
+
 export function quoteMarkerRanges(doc, quotes, guardRow, inFold) {
   const ranges = [];
   for (const [startRow, endRow] of quotes || []) {
