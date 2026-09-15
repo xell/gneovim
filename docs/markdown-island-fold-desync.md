@@ -271,3 +271,62 @@ drifting near wherever editing is happening in a heading-dense document)
 but is not proven with a live trace. The fix above makes it harmless
 either way: whatever causes the DOM misread, it can no longer drag
 Neovim's real cursor to a place it never asked to go.
+
+## Trying to catch the DOM-node-recreation theory in the act, 2026-09-16
+
+Leo offered his real note (`Mindflight7 Contract.md`, 195 lines / 18
+headings) and volunteered to help build a reproduction environment. Per
+`feedback-verify-dont-screenshot-hunt` in memory, built a scripted
+headless-browser harness rather than driving the live GUI: Playwright's
+**WebKit** engine specifically (not Chromium — the real app is a
+WKWebView, and this is suspected to be an engine-specific Selection
+quirk, so the closest available engine is the one worth testing in), the
+real `IslandDisplayDecorations` / `island-decoration-state.js` code
+(unmocked, mounted with the real `.island` CSS class and a realistic
+fixed size so `.cm-editor{height:100%}` resolves to something real,
+which an earlier unstyled attempt did not), and real `gnv_md_decor`
+payloads captured from a real embedded Neovim editing the real note (via
+the `neovim` npm package driving `md_decor.lua`/`md_preview.lua`
+injected exactly as `bridge::connect` does, walking the document and
+typing into it the way a real session would).
+
+Three theories, each tested against **real** captured payloads (viewport-
+limited heads/conceal/highlight churn included, not synthetic ones) in
+real WebKit:
+
+1. Pure decoration-set rebuild (62 consecutive real `gnv_md_decor`
+   payloads replayed with the document held static) — no drift.
+2. Rebuild interleaved with real one-character edits to the CodeMirror
+   document (real typing, not just redecoration) — no drift.
+3. Rebuild + real typing + `nvimCursorField`'s own cursor widget
+   redrawn every step, toggling insert/normal (bar/block widget) exactly
+   as `Island.applyCursor` does on every real keystroke, independent of
+   `md_decor.lua` entirely — still no drift.
+
+All three ran clean for every step after an initial settling window (see
+below), through a real 195-line, 18-heading, heavily-concealed (370
+conceal spans, 237 highlight runs in the fuller payloads) document. This
+doesn't prove the theory is wrong everywhere, only that these three
+specific mechanisms, under these conditions, do not reproduce it — the
+harness cannot exercise the real Tauri IPC round trip's actual
+asynchronous timing (a real keydown → real `nvim_input` → a real,
+independently-arriving redraw echo over a real channel, racing an
+independently-debounced `gnv_md_decor` push over a *different* channel),
+which every synchronous in-process replay collapses to zero latency. That
+gap — not this session's three mechanisms — is the most likely place the
+real trigger still lives.
+
+**One real, separate finding**, incidental to this harness building: a
+freshly mounted `EditorView`'s *first* dispatched `selection` does not
+immediately reach the real WebKit `Selection` — `document.getSelection()`
+read back right after `focus()` + `dispatch({selection})` still reported
+the anchor on the document's first line, several update cycles behind,
+regardless of an explicit double-`requestAnimationFrame` wait. It only
+caught up once a handful of further updates had gone through. Not
+confirmed as related to the bug above, but worth remembering: an island
+recreated fresh (`:GneovimResyncIsland`, or any reattach) may have a
+short window right after remount where its real caret position lags what
+`nvim_cursor_set` / `syncSelectionToCursor` just told it, which is exactly
+the shape of glitch this whole investigation is chasing. If the bug
+recurs immediately after a resync rather than well into a session, this
+is the first place to look.
