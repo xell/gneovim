@@ -22,6 +22,10 @@ Control whether a markdown island's web content is exposed to Grammarly Desktop'
 
 Switch a markdown island between a centred, width-capped text column and filling the window. The same current-window / bang-affects-every-markdown-window-in-the-tabpage shape as the other two command families applies. The cap is `[markdown] optimal_width` CSS pixels (default 730); below that width the island already fills the window, so toggling this has no visible effect. Purely a display preference: it only changes the width CodeMirror wraps and lays out against, not `textwidth`, `wrap`, or buffer content, and it has no effect on grid (non-island) windows.
 
+### `:MarkdownFontSerif`, `:MarkdownFontSansSerif`, `:MarkdownFontMono`
+
+Each takes exactly one argument, a CSS font-family value (an installed font name, or any CSS-compatible notation such as `serif` or `system-ui`), and temporarily overrides the live-preview island's body, heading, or monospace font for the current window only. Eligible only when the current window's `filetype` is `markdown` and `w:gnv_md_preview` is `1`; otherwise the command reports a warning and does nothing, and there is no bang form. The override is session-only: it is never written back to `config.toml`, is not restored if the window is closed and reopened, and does not survive the buffer being replaced in that window. An unrecognised font name is harmless: it is prepended to gneovim's own default stack for that role, so CSS simply skips it and falls through, the same as any font-family list degrades.
+
 ### `:GneovimResyncIsland`
 
 Forces a full resync of every markdown island in the current Neovim instance: reapplies `foldlevel` in each markdown window, drops the per window highlight cache and repushes it synchronously, and tells the client to reattach every island from a fresh buffer snapshot. Intended as a blunt escape hatch for a display desync (see `markdown-island-fold-desync.md`), not a scalpel; it takes no window argument and no bang.
@@ -107,6 +111,9 @@ Every key is optional; see `configuration.md` for the file's location, reload po
 - `grammarly_default` (bool, `true`) — a markdown island is exposed to Grammarly Desktop by default; see `:GrammarlyOn` / `Off` / `Toggle`.
 - `optimal_width` (number, `730`) — max width, in CSS pixels, of a markdown island's text column while optimal-width mode is on.
 - `optimal_width_default` (bool, `true`) — a markdown island starts in optimal-width mode (capped and centred) rather than filling the window; see `:MarkdownOptimalWidthOn` / `Off` / `Toggle`.
+- `font_serif` (string, unset) — font stack prepended in front of the built-in body-text stack (`Georgia, "Iowan Old Style", Palatino, serif`); see `:MarkdownFontSerif`.
+- `font_sans_serif` (string, unset) — font stack prepended in front of a built-in system sans-serif stack, applied to headings; unset leaves headings in the body serif font, as today. See `:MarkdownFontSansSerif`.
+- `font_mono` (string, unset) — font stack prepended in front of the built-in monospace stack (which itself tracks Neovim's own `guifont`); see `:MarkdownFontMono`.
 
 ## Client identification
 

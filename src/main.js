@@ -71,6 +71,39 @@ const TOP_INSET = 32;
 let gridLinespace = 0; // from :set linespace, added to the natural line box
 const GRID_FONT_FALLBACK = 'ui-monospace, "SF Mono", Menlo, monospace';
 const GUI_FONT_DEFAULT = 14;
+
+// Markdown island font roles: [markdown] font_serif / font_sans_serif /
+// font_mono in config.toml, and their session-only per-window overrides
+// (:MarkdownFontSerif / SansSerif / Mono). Each is a CSS custom property,
+// set at the root from config and optionally re-set scoped to one island's
+// element to override just that window; a value is always prepended in
+// front of the built-in stack for its role, so an unknown font name is
+// harmless -- CSS just skips it and falls through, the same as any
+// font-family list. font_mono's own built-in stack already tracks Neovim's
+// guifont (--grid-font-family); font_sans_serif has no built-in stack, since
+// gneovim does not otherwise give headings their own font -- unset leaves
+// them inheriting the body serif font.
+const MD_FONT_PROPERTY = {
+  serif: "--font-serif",
+  sans_serif: "--font-sans-serif",
+  mono: "--font-mono",
+};
+const MD_FONT_FALLBACK = {
+  serif: 'Georgia, "Iowan Old Style", Palatino, serif',
+  sans_serif: "",
+  mono: `var(--grid-font-family, ${GRID_FONT_FALLBACK})`,
+};
+function applyMdFont(styleTarget, role, value) {
+  const prop = MD_FONT_PROPERTY[role];
+  const fallback = MD_FONT_FALLBACK[role];
+  if (!prop) return;
+  if (!value) {
+    if (fallback) styleTarget.setProperty(prop, fallback);
+    else styleTarget.removeProperty(prop);
+    return;
+  }
+  styleTarget.setProperty(prop, fallback ? `${value}, ${fallback}` : value);
+}
 const GRID_SIZE_FALLBACK = `${GUI_FONT_DEFAULT}px`;
 const FONT_ZOOM_STEP = 1;
 let guiFontBaseSize = GUI_FONT_DEFAULT;
@@ -653,6 +686,13 @@ class Island {
   setOptimalWidth(on) {
     this.el.classList.toggle("island-optimal-width", on);
   }
+  // Session-only per-window font override from :MarkdownFontSerif /
+  // SansSerif / Mono. Scoped to this island's own element, so it overrides
+  // the root [markdown] font_* config only here; nothing to undo when the
+  // window closes or the island is replaced, since it dies with this.el.
+  setFontOverride(role, value) {
+    applyMdFont(this.el.style, role, value);
+  }
   tx(spec) {
     this.view.dispatch({ ...spec, annotations: fromNvim.of(true) });
   }
@@ -1007,6 +1047,10 @@ addEventListener("error", (e) => {
       "--optimal-width",
       `${cfg?.markdown?.optimal_width ?? 730}px`,
     );
+    const root = document.documentElement.style;
+    applyMdFont(root, "serif", cfg?.markdown?.font_serif);
+    applyMdFont(root, "sans_serif", cfg?.markdown?.font_sans_serif);
+    applyMdFont(root, "mono", cfg?.markdown?.font_mono);
     if (matchMedia?.("(pointer: coarse)")?.matches) blockImeInNormalMode = false;
     jlog(
       `config: option_is_meta=${optionIsMeta} block_ime=${blockImeInNormalMode} ` +
@@ -1089,6 +1133,10 @@ addEventListener("error", (e) => {
       const { win, state } = e.payload;
       session.setOptimalWidth(win, state);
       islands.get(win)?.setOptimalWidth(session.optimalWidthForWindow(win));
+    }),
+    nvim.on("md_font", (e) => {
+      const { win, role, value } = e.payload;
+      islands.get(win)?.setFontOverride(role, value);
     }),
     nvim.on("md_decor", (e) => {
       let d;

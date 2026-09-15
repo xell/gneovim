@@ -8,6 +8,10 @@
 --   :GrammarlyOn! / ...                       every markdown window in the tab
 --   :MarkdownOptimalWidthOn / Off / Toggle    current markdown window
 --   :MarkdownOptimalWidthOn! / ...            every markdown window in the tab
+--   :MarkdownFontSerif <font>                 current window's island, this
+--   :MarkdownFontSansSerif <font>             window's lifetime only (not
+--   :MarkdownFontMono <font>                  persisted); markdown live-
+--                                              preview window only
 --   :GneovimResyncIsland                      every markdown island, this nvim
 --                                              (fold-desync escape hatch)
 --
@@ -16,7 +20,8 @@
 -- `w:gnv_grammarly` (0 or 1) follows the same lifecycle: when 0, the window's
 -- island advertises itself to Grammarly as opted out. `w:gnv_md_optimal_width`
 -- (0 or 1) likewise: when 1, the island's text column is capped and centred
--- instead of filling the window.
+-- instead of filling the window. The three :MarkdownFont* commands carry no
+-- window variable of their own; see md_font_command below.
 
 local chan, default, version, grammarly_default, optimal_width_default = ...
 
@@ -264,6 +269,30 @@ for _, spec in ipairs({
     apply(spec[3], spec[2], o.bang, spec[4], spec[5])
   end, { bang = true, desc = 'gneovim: ' .. spec[3] .. ' (' .. spec[2] .. ')' })
 end
+
+-- Session-only per-window font override for a markdown island: unlike
+-- gnv_md_preview / gnv_grammarly / gnv_md_optimal_width, this carries no
+-- window variable and no reconcile() entry. It is a single fire-and-forget
+-- notification the GUI applies directly to that window's island element;
+-- closing or replacing the window drops it for free along with the DOM node,
+-- with nothing here to clean up.
+local function md_font_command(name, role)
+  vim.api.nvim_create_user_command(name, function(o)
+    local win = vim.api.nvim_get_current_win()
+    if not (is_md(win) and get_flag(win) == 1) then
+      vim.notify(
+        name .. ': current window is not a markdown live-preview island',
+        vim.log.levels.WARN
+      )
+      return
+    end
+    pcall(vim.rpcnotify, chan, 'gnv_md_font', win, role, o.args)
+  end, { nargs = 1, desc = 'gneovim: set the ' .. role .. ' font for this window (session only)' })
+end
+
+md_font_command('MarkdownFontSerif', 'serif')
+md_font_command('MarkdownFontSansSerif', 'sans_serif')
+md_font_command('MarkdownFontMono', 'mono')
 
 -- Escape hatch for a wedged island: live rendering stops matching the actual
 -- buffer (glitched heading styles, hidden text that should be visible, a

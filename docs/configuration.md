@@ -79,6 +79,23 @@ optimal_width = 730
 # optimal_width and centred) rather than filling the window. Overridable per
 # window at runtime with :MarkdownOptimalWidthOn / Off / Toggle. Default true.
 optimal_width_default = true
+# Font stack for a markdown island's body text, prepended in front of the
+# built-in stack (Georgia, "Iowan Old Style", Palatino, serif). An actual font
+# name or any CSS-compatible font-family notation ("serif", "system-ui", ...)
+# both work. Unset by default. Temporarily overridable per window (session
+# only) with :MarkdownFontSerif <font>.
+font_serif = "Sarasa Term SC Nerd"
+# Font stack for a markdown island's headings, prepended in front of a
+# built-in sans-serif system stack. Unset by default: headings inherit the
+# body serif font, since gneovim gives them no font of their own otherwise.
+# Temporarily overridable per window (session only) with
+# :MarkdownFontSansSerif <font>.
+font_sans_serif = "system-ui"
+# Font stack for a markdown island's code spans, code blocks, and gutter,
+# prepended in front of the built-in stack (which itself already tracks
+# Neovim's own guifont). Unset by default. Temporarily overridable per window
+# (session only) with :MarkdownFontMono <font>.
+font_mono = "Sarasa Term SC Nerd"
 ```
 
 ## Markdown live preview
@@ -139,6 +156,39 @@ window starts in this mode, and three commands override it per window:
 The state lives in `w:gnv_md_optimal_width` (`1` capped, `0` full width).
 Purely a display preference: it does not touch `textwidth`, `wrap`, or buffer
 content, and grid (non-island) windows are unaffected.
+
+## Fonts in the live-preview island
+
+`[markdown] font_serif`, `font_sans_serif`, and `font_mono` set the island's
+body text, heading, and monospace (code, gutter) fonts respectively. A value
+can be an actual font name (`"Sarasa Term SC Nerd"`) or any CSS-compatible
+font-family notation (`"serif"`, `"system-ui"`). Each is unset by default:
+
+- `font_serif` unset keeps gneovim's own serif stack (`Georgia, "Iowan Old
+  Style", Palatino, serif`).
+- `font_sans_serif` unset leaves headings inheriting the body serif font;
+  gneovim does not otherwise give headings a font of their own.
+- `font_mono` unset keeps the built-in monospace stack, which itself already
+  tracks Neovim's own `guifont` when one is set.
+
+A configured value is prepended in front of the built-in stack for its role,
+never replacing it, so a misspelled or uninstalled font name is harmless: CSS
+simply skips it and falls through to the built-in stack, the same way any
+font-family list degrades.
+
+Three commands, each requiring one font-value argument, override a font for
+the current window only, for that window's lifetime -- never written back to
+`config.toml`, and forgotten once the window closes or the buffer in it
+changes:
+
+    :MarkdownFontSerif <font>
+    :MarkdownFontSansSerif <font>
+    :MarkdownFontMono <font>
+
+Each works only when the current window's `filetype` is `markdown` and
+`w:gnv_md_preview` is `1` (an active live-preview island); otherwise it warns
+and does nothing. There is no bang form and no per-window state to read back,
+unlike the live-preview, Grammarly, and optimal-width flags above.
 
 ## Closing and quitting
 

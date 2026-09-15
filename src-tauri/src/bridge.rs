@@ -140,6 +140,16 @@ pub struct OptimalWidthPayload {
 }
 
 #[derive(Clone, Serialize)]
+pub struct MdFontPayload {
+    pub win: i64,
+    /// "serif", "sans_serif", or "mono".
+    pub role: String,
+    /// The font stack the user passed to `:MarkdownFont*`, applied verbatim
+    /// (prepended in front of the built-in stack for that role).
+    pub value: String,
+}
+
+#[derive(Clone, Serialize)]
 pub struct WinGutterPayload {
     pub win: i64,
     pub number: bool,
@@ -178,6 +188,10 @@ pub enum BridgeEvent {
     /// centred, 0 fills the window, -1 no longer a markdown window. From
     /// `runtime/md_preview.lua`.
     OptimalWidth(OptimalWidthPayload),
+    /// A one-shot per-window font override from `:MarkdownFontSerif` /
+    /// `SansSerif` / `Mono`, session-only (not persisted). From
+    /// `runtime/md_preview.lua`.
+    MdFont(MdFontPayload),
     /// A markdown window's gutter options, so its island can mirror Neovim's
     /// number column. `signcolumn` / `foldcolumn` ride along for a later pass.
     /// From `runtime/md_preview.lua`.
@@ -659,6 +673,13 @@ impl Handler for NvHandler {
                 let state = args.get(1).and_then(Value::as_i64).unwrap_or(-1);
                 self.shared
                     .send(BridgeEvent::OptimalWidth(OptimalWidthPayload { win, state }));
+            }
+            "gnv_md_font" => {
+                let win = args.first().and_then(Value::as_i64).unwrap_or(0);
+                let role = args.get(1).and_then(Value::as_str).unwrap_or("").to_string();
+                let value = args.get(2).and_then(Value::as_str).unwrap_or("").to_string();
+                self.shared
+                    .send(BridgeEvent::MdFont(MdFontPayload { win, role, value }));
             }
             "gnv_win_gutter" => {
                 let win = args.first().and_then(Value::as_i64).unwrap_or(0);

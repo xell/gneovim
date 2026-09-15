@@ -801,6 +801,7 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec) {
                     BridgeEvent::MdPreview(p) => emit_app.emit(&ev("md_preview"), p),
                     BridgeEvent::Grammarly(p) => emit_app.emit(&ev("grammarly"), p),
                     BridgeEvent::OptimalWidth(p) => emit_app.emit(&ev("optimal_width"), p),
+                    BridgeEvent::MdFont(p) => emit_app.emit(&ev("md_font"), p),
                     BridgeEvent::WinGutter(p) => emit_app.emit(&ev("win_gutter"), p),
                     BridgeEvent::MdDecor(p) => emit_app.emit(&ev("md_decor"), p),
                     BridgeEvent::ResyncIsland(win) => emit_app.emit(&ev("resync_island"), win),

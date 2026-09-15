@@ -41,6 +41,31 @@ pub struct Markdown {
     /// window. Per-window overridable at runtime with
     /// `:MarkdownOptimalWidthOn` / `Off` / `Toggle`. Default true.
     pub optimal_width_default: bool,
+    /// Font stack for a markdown live-preview island's body text, prepended
+    /// in front of the built-in serif stack (`Georgia, "Iowan Old Style",
+    /// Palatino, serif`). An unknown or misspelled font name is harmless:
+    /// CSS just skips it and falls through to the built-in stack, the same
+    /// way any font-family list degrades. Unset (the default) leaves the
+    /// built-in stack unchanged. Temporarily overridable per window, for
+    /// that window's lifetime only (not persisted), with `:MarkdownFontSerif
+    /// <font>`.
+    pub font_serif: Option<String>,
+    /// Font stack for a markdown live-preview island's headings, prepended
+    /// in front of a built-in sans-serif system stack. Unset (the default)
+    /// leaves headings rendering in the body serif font, exactly as today:
+    /// gneovim does not otherwise give headings their own font. Temporarily
+    /// overridable per window, for that window's lifetime only (not
+    /// persisted), with `:MarkdownFontSansSerif <font>`.
+    pub font_sans_serif: Option<String>,
+    /// Font stack for a markdown live-preview island's code spans, code
+    /// blocks, gutter, and other monospaced elements, prepended in front of
+    /// the built-in stack, which itself already tracks Neovim's own
+    /// `guifont` (falling further back to `ui-monospace, "SF Mono", Menlo,
+    /// monospace`). Unset (the default) leaves that guifont-tracking
+    /// behavior unchanged. Temporarily overridable per window, for that
+    /// window's lifetime only (not persisted), with `:MarkdownFontMono
+    /// <font>`.
+    pub font_mono: Option<String>,
 }
 
 impl Default for Markdown {
@@ -50,6 +75,9 @@ impl Default for Markdown {
             grammarly_default: true,
             optimal_width: 730,
             optimal_width_default: true,
+            font_serif: None,
+            font_sans_serif: None,
+            font_mono: None,
         }
     }
 }

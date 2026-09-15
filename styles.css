@@ -121,7 +121,7 @@ body {
 /* CodeMirror's base theme sets font-family:monospace on .cm-scroller itself,
    which beats inheritance from .cm-editor; override the scroller directly. */
 .island .cm-scroller {
-  font-family: Georgia, "Iowan Old Style", Palatino, serif;
+  font-family: var(--font-serif, Georgia, "Iowan Old Style", Palatino, serif);
   font-size: var(--island-font-size, 16px);
   line-height: 1.6;
   overflow: auto;
@@ -181,7 +181,7 @@ body {
   color: color-mix(in srgb, var(--fg) 45%, transparent);
 }
 .island .cm-lineNumbers .cm-gutterElement {
-  font-family: var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace);
+  font-family: var(--font-mono, var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace));
   font-size: 0.85em;
   min-width: calc(var(--gutter-numw, 4) * 1ch);
   padding: 0 0.6ch 0 0.7ch;
@@ -213,6 +213,10 @@ body {
 .island .cm-h5,
 .island .cm-h6 {
   font-weight: 700;
+  /* unset (the default) inherits the body serif font: gneovim gives headings
+     no font of their own unless [markdown] font_sans_serif or
+     :MarkdownFontSansSerif sets one. */
+  font-family: var(--font-sans-serif, inherit);
 }
 .island .cm-h1 {
   font-size: 1.8em;
@@ -234,7 +238,7 @@ body {
   color: color-mix(in srgb, var(--fg) 75%, transparent);
 }
 .island .cm-code-block {
-  font-family: var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace);
+  font-family: var(--font-mono, var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace));
   font-size: 0.9em;
   background: color-mix(in srgb, var(--fg) 6%, transparent);
 }
@@ -316,13 +320,13 @@ body {
 /* inline `code`: the highlight mark gives colour, this gives the face no
    Neovim highlight attribute carries. */
 .island .cm-inline-code {
-  font-family: var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace);
+  font-family: var(--font-mono, var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace));
   font-size: 0.9em;
 }
 /* Heading trailing |suffix|: font only, size and weight stay the heading's
    own so this reads as a typeface change, not a different element. */
 .island .cm-heading-suffix {
-  font-family: var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace);
+  font-family: var(--font-mono, var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace));
 }
 
 /* H1-H3 marker icon, replacing the concealed "#.. " run. Source SVGs are solid
