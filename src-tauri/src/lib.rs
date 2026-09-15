@@ -726,7 +726,11 @@ fn spawn_window(app: &AppHandle, as_tab: bool, open: OpenSpec) -> Option<String>
         .inner_size(1100.0, 750.0)
         .min_inner_size(480.0, 360.0);
     #[cfg(target_os = "macos")]
-    let builder = builder.tabbing_identifier("gneovim").visible(!as_tab);
+    let builder = builder
+        .tabbing_identifier("gneovim")
+        .visible(!as_tab)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true);
 
     let win = match builder.build() {
         Ok(w) => w,

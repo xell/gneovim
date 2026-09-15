@@ -8,6 +8,8 @@
   --fg: #000000;
   --bg: #ffffff;
   --sp: #d40000;
+  /* Overlay title bar's traffic-light row; must match TOP_INSET in main.js. */
+  --top-inset: 32px;
 }
 
 html,
@@ -20,9 +22,29 @@ body {
   color: var(--fg);
 }
 
+/* An overlay title bar (see tauri.conf.json) removes the OS title bar's own
+   background so the grid can paint edge to edge, but that also removes the
+   OS's own window-drag area. This invisible strip stands in for it, sized
+   to clear the traffic lights without covering much of row 1. */
+#drag-region {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 90px;
+  height: var(--top-inset);
+  z-index: 1000;
+  cursor: grab;
+}
+#drag-region:active {
+  cursor: grabbing;
+}
+
 #viewport {
   position: absolute;
-  inset: 0;
+  top: var(--top-inset);
+  right: 0;
+  bottom: 0;
+  left: 0;
   /* Not `hidden`: every child (grids, islands) is `position: absolute` and
      all real scrolling happens inside an island's own .cm-scroller, so this
      box should never scroll at all. `overflow: hidden` still leaves it a

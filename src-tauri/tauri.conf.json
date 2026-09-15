@@ -20,7 +20,9 @@
         "minHeight": 360,
         "resizable": true,
         "fullscreen": false,
-        "tabbingIdentifier": "gneovim"
+        "tabbingIdentifier": "gneovim",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {
