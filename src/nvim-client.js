@@ -115,4 +115,8 @@ export class NvimClient {
   newTab() {
     return this.invoke("new_tab");
   }
+
+  tabbarVisible() {
+    return this.invoke("tabbar_visible");
+  }
 }

@@ -64,10 +64,30 @@ jlog("main.js loaded");
 let cellW = 8.4;
 let cellH = 17;
 let originX = 4; // left margin in px; the grid is letterboxed, see screenMetrics
-// Fixed top margin clearing the overlay title bar's traffic-light row. Must
-// match --top-inset in styles.css (no CSS var read-back: this value also
-// drives row-count and mouse-row math below, not just the DOM position).
-const TOP_INSET = 32;
+// Top margin clearing the overlay title bar's traffic-light row. Must match
+// --top-inset in styles.css (no CSS var read-back: this value also drives
+// row-count and mouse-row math below, not just the DOM position).
+const BASE_TOP_INSET = 32;
+// macOS's native tab-bar strip (~30px) plus a little padding, added on top
+// of BASE_TOP_INSET whenever 2+ windows are grouped as tabs; must match
+// --tabbar-inset's non-zero value applied by setTabbarVisible() below.
+const TABBAR_INSET = 36;
+let tabbarVisible = false;
+function topInset() {
+  return BASE_TOP_INSET + (tabbarVisible ? TABBAR_INSET : 0);
+}
+// Sets state + the CSS var; returns true if it actually changed, so callers
+// that need to reflow (a live push after boot) know whether to bother.
+function applyTabbarVisible(visible) {
+  visible = !!visible;
+  if (visible === tabbarVisible) return false;
+  tabbarVisible = visible;
+  document.documentElement.style.setProperty(
+    "--tabbar-inset",
+    visible ? `${TABBAR_INSET}px` : "0px",
+  );
+  return true;
+}
 let gridLinespace = 0; // from :set linespace, added to the natural line box
 const GRID_FONT_FALLBACK = 'ui-monospace, "SF Mono", Menlo, monospace';
 const GUI_FONT_DEFAULT = 14;
@@ -991,7 +1011,7 @@ function screenMetrics() {
   const el = document.documentElement;
   return calculateScreenMetrics(
     el.clientWidth,
-    el.clientHeight - TOP_INSET,
+    el.clientHeight - topInset(),
     cellW,
     cellH,
     MIN_PAD_X,
@@ -1170,9 +1190,27 @@ addEventListener("error", (e) => {
       nvim.refreshMarkdownDecorations().catch(() => {});
     }),
     nvim.on("gone", (e) => showGone(e.payload)),
+    // Rust pushes this on every tab-group membership change (gnv://<label>/tabbar);
+    // see the tabbarVisible() pull below for this window's state as of boot.
+    nvim.on("tabbar", (e) => {
+      if (applyTabbarVisible(e.payload)) {
+        jlog(`tabbar: visible=${e.payload} (pushed)`);
+        pushSize();
+      }
+    }),
   ]);
 
   jlog(`listeners ready; cellW=${cellW.toFixed(2)} cellH=${cellH.toFixed(2)}`);
+
+  // A just-grouped tab's `tabbar` push can land before this window's own
+  // listener above was registered; ask AppKit directly instead of trusting
+  // it was heard.
+  try {
+    const visible = await nvim.tabbarVisible();
+    if (applyTabbarVisible(visible)) jlog(`tabbar: visible=${visible} (pulled at boot)`);
+  } catch (e) {
+    jlog("tabbar_visible failed: " + e);
+  }
 
   // Now that grid/winft listeners are live, attach the Neovim UI. The first
   // redraw (every window's grid_line) is emitted only after this point, so
@@ -1436,7 +1474,7 @@ const MOUSE_BTN = ["left", "middle", "right"];
 const overIsland = (e) => e.target?.closest?.(".island, #ime");
 function mouseCell(e) {
   return {
-    row: Math.max(0, Math.floor((e.clientY - TOP_INSET) / cellH)),
+    row: Math.max(0, Math.floor((e.clientY - topInset()) / cellH)),
     col: Math.max(0, Math.floor((e.clientX - originX) / cellW)),
   };
 }

@@ -10,6 +10,9 @@
   --sp: #d40000;
   /* Overlay title bar's traffic-light row; must match TOP_INSET in main.js. */
   --top-inset: 32px;
+  /* macOS's native tab bar, shown once 2+ windows are grouped as tabs; 0
+     until main.js's setTabbarVisible() (gnv://<label>/tabbar) sets it. */
+  --tabbar-inset: 0px;
 }
 
 html,
@@ -41,7 +44,7 @@ body {
 
 #viewport {
   position: absolute;
-  top: var(--top-inset);
+  top: calc(var(--top-inset) + var(--tabbar-inset));
   right: 0;
   bottom: 0;
   left: 0;

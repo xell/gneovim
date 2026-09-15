@@ -64,6 +64,30 @@ fn add_as_tab(parent: &tauri::WebviewWindow, child: &tauri::WebviewWindow) {
     }
 }
 
+/// Broadcast every gui-window's native tab-bar visibility as `gnv://<label>/tabbar`.
+/// The overlay title bar's fixed inset only clears the traffic lights; once 2+
+/// windows are grouped as tabs, AppKit also draws a ~30px tab-bar strip below
+/// it that the webview content must clear too, so each window needs to know
+/// when that strip appears or disappears. Must run on the main thread; call
+/// after any change to tab-group membership (a tab is added, or a tabbed
+/// window closes).
+#[cfg(target_os = "macos")]
+fn sync_tab_bars(app: &AppHandle) {
+    use objc2_app_kit::NSWindow;
+
+    for (label, w) in app.webview_windows() {
+        let Ok(ptr) = w.ns_window() else { continue };
+        if ptr.is_null() {
+            continue;
+        }
+        // tabbedWindows() is documented to return nil when the tab bar isn't
+        // showing, including a lone window with no other tabs at all.
+        let visible = unsafe { &*(ptr as *const NSWindow) }.tabbedWindows().is_some();
+        log::info!("tabbar: {label} visible={visible}");
+        let _ = app.emit(&format!("gnv://{label}/tabbar"), visible);
+    }
+}
+
 /// Give Globe-Control shortcuts first refusal before a focused WKWebView can
 /// turn them into DOM key events.
 ///
@@ -746,6 +770,7 @@ fn spawn_window(app: &AppHandle, as_tab: bool, open: OpenSpec) -> Option<String>
     #[cfg(target_os = "macos")]
     {
         let w = win.clone();
+        let tab_app = app.clone();
         let _ = win.run_on_main_thread(move || {
             if as_tab {
                 match &parent {
@@ -753,6 +778,7 @@ fn spawn_window(app: &AppHandle, as_tab: bool, open: OpenSpec) -> Option<String>
                         log::info!("new tab: grouping with {}", p.label());
                         add_as_tab(p, &w);
                         let _ = w.show();
+                        sync_tab_bars(&tab_app);
                     }
                     None => {
                         log::warn!("new tab: no parent window, opening standalone");
@@ -1174,6 +1200,42 @@ async fn nvim_md_decor(app: AppHandle, window: tauri::Window) -> Result<(), Stri
         .await
 }
 
+/// Pulled once at boot: the `sync_tab_bars` push can fire before a freshly
+/// created tab's own webview has registered its `tabbar` listener, so it asks
+/// AppKit directly instead of waiting on a maybe-already-missed event.
+#[tauri::command]
+async fn tabbar_visible(app: AppHandle, window: tauri::Window) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSWindow;
+
+        let Some(webview) = app.get_webview_window(window.label()) else {
+            return false;
+        };
+        let Ok(ptr) = webview.ns_window() else {
+            return false;
+        };
+        if ptr.is_null() {
+            return false;
+        }
+        let ptr = ptr as usize;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let queued = webview.run_on_main_thread(move || {
+            let ns_window = unsafe { &*(ptr as *const NSWindow) };
+            let _ = tx.send(ns_window.tabbedWindows().is_some());
+        });
+        if queued.is_err() {
+            return false;
+        }
+        return rx.await.unwrap_or(false);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, window);
+        false
+    }
+}
+
 #[tauri::command]
 async fn new_window(app: AppHandle) -> Result<(), String> {
     spawn_window(&app, false, OpenSpec::default());
@@ -1374,7 +1436,8 @@ pub fn run() {
             nvim_paste_clip,
             nvim_clip_yank,
             new_window,
-            new_tab
+            new_tab,
+            tabbar_visible
         ])
         .menu(|handle| build_menu(handle))
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -1424,6 +1487,10 @@ pub fn run() {
                     state.failed.lock().unwrap().remove(window.label());
                     log::info!("window {} closed", window.label());
                 }
+                // Closing one tab can drop its former group back to a single
+                // window, hiding the tab bar for whichever window is left.
+                #[cfg(target_os = "macos")]
+                sync_tab_bars(window.app_handle());
             }
             WindowEvent::Focused(true) => {
                 if let Some(state) = window.try_state::<AppState>() {
