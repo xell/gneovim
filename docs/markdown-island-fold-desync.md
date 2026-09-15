@@ -136,6 +136,71 @@ its own last-applied tick; drop or requeue a `md_decor` payload whose tick is
 older than what the island has already applied) so a stale payload is
 detected and discarded instead of silently mis-painted.
 
+## The actual mechanism caught live, 2026-09-15 (second recurrence)
+
+The above is still an untested theory for how a *display* glitch starts. But
+when the bug recurred for real on Leo's live note (not a synthetic repro) and
+made editing itself impossible ("what I type or delete cannot be displayed
+correctly", surviving `:GneovimResyncIsland` and even closing and reopening
+the buffer), the app log (`~/Library/Logs/com.xell.gneovim/gneovim.log`)
+caught the actual proximate mechanism directly, and it is a different bug
+from the one theorized above — one that turns *any* transient rendering
+glitch into a permanent, self-reinforcing one:
+
+```
+external caret 7:6 before j
+external caret 7:6 before j
+external caret 7:6 before j
+...
+```
+
+The same `{row, col}` repeated across many unrelated subsequent keys.
+`IslandInputController.syncSelectionBeforeInput` (`src/island-input-controller.js`)
+samples WebKit's real native `Selection` before every keystroke and, if it
+disagrees with Neovim's authoritative cursor, treats the disagreement as a
+genuine external move (Grammarly, a click) and drags Neovim's cursor back to
+wherever the DOM reports — that is by design, it is how a Grammarly
+correction reaches Neovim at all. The design assumption is that a real
+external client sets a *new* target each time it acts. It does not hold once
+the native caret gets stuck: if WebKit's Selection freezes at one spot (most
+likely because CodeMirror tried to place it inside a decoration's replaced
+range and the browser cannot seat a real caret there — the same class of
+problem `isCursorHidden` exists for, just not a case it currently catches),
+every subsequent keystroke reads that same frozen spot, is honoured as if it
+were a fresh external correction, and drags Neovim's real cursor backward to
+it before applying the key. The two prior same-day fixes to this exact
+function (`bea7c4b`, `8bfc859`) both describe this identical failure shape —
+"froze the visible cursor... corruption of the buffer" — but only handle a
+mismatch that is stale by exactly one keystroke (`priorCursor`); a caret that
+never recovers at all, across arbitrarily many keys, was not covered.
+
+This also explains why the existing mitigations only ever helped briefly:
+`:GneovimResyncIsland` and a buffer reload refresh the *display* and
+reattach the island, but neither resets this input-side state, and whatever
+first froze the DOM caret can refreeze it within the next few keystrokes —
+which the log confirms: a `resync_island` line is followed within ten
+seconds by the same `external caret` loop starting again at a new frozen
+spot.
+
+**Fix (commit after 323a17e):** `IslandInputController` now also tracks
+`lastExternalTarget`, the last collapsed-caret target *this boundary itself*
+asked Neovim to adopt. If the DOM still reports that same target after
+Neovim's cursor has since moved away from it for a real reason (proof the
+correction was superseded by genuine input, not merely still in flight), the
+mismatch is no longer honoured — the key is just let through at Neovim's own
+cursor, and `syncSelectionToCursor()` is called to give WebKit an explicit,
+fresh reason to re-seat its caret at the real position. This stops the
+active-corruption feedback loop unconditionally, regardless of what froze
+the caret in the first place. Covered in
+`src/island-input-controller.test.js` ("stops chasing a native caret that
+never recovers across many real keys"). It does **not** explain or fix why
+the caret freezes to begin with — that is still the open question above (the
+untick'd `md_decor` race, a stray decoration `isCursorHidden` does not check,
+or something else). If it recurs, `frozen external caret ROW:COL ignored
+before KEY` in the log now marks exactly when a freeze started, which is far
+more useful for finally chasing the root cause than the corruption it used
+to cause.
+
 ## The escape hatch: `:GneovimResyncIsland`
 
 Until the tick-based fix lands, `:GneovimResyncIsland`

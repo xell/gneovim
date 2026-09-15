@@ -86,6 +86,12 @@ export class IslandInputController {
     // used to recognise the one specific stale-DOM-read shape described
     // above classifyInput.
     this.priorCursor = null;
+    // The last collapsed-caret target this boundary itself asked Neovim to
+    // adopt, kept until the DOM reports something else. See the "frozen"
+    // check in syncSelectionBeforeInput: unlike priorCursor (one call's
+    // worth of staleness), this catches a native Selection that never
+    // recovers at all, however many real keys land in between.
+    this.lastExternalTarget = null;
   }
 
   attach(view) {
@@ -100,6 +106,7 @@ export class IslandInputController {
 
   reset() {
     this.pendingCursor = null;
+    this.lastExternalTarget = null;
   }
 
   onCompositionStart() {
@@ -251,13 +258,35 @@ export class IslandInputController {
         priorCursor.row === target.row &&
         priorCursor.col === target.col &&
         !(cursor != null && cursor.row === target.row && cursor.col === target.col);
-      if (
-        !staleEcho &&
-        !this.cursorMatches(target) &&
-        !this.isCursorHidden(cursor)
-      ) {
+      const matches = this.cursorMatches(target);
+      if (matches) this.lastExternalTarget = null;
+      // A frozen native caret: this boundary already asked Neovim to adopt
+      // `target` once, a real key has since moved Neovim's cursor away from
+      // it for a genuine reason, yet the DOM still reports the exact same
+      // spot. staleEcho only recognises one call's worth of lag; this
+      // recognises the caret never recovering at all. A real external client
+      // (Grammarly, a click) sets a *new* target each time it acts, it does
+      // not repeat the identical spot after Neovim has visibly moved on, so
+      // repetition here means WebKit's Selection is stuck (most likely a
+      // decoration now sitting there that isCursorHidden does not know to
+      // check), not a second genuine correction. Confirmed live 2026-09-15:
+      // chasing it forced every following keystroke to land at the wrong
+      // place instead of where the cursor actually was, the same failure
+      // shape bea7c4b and 8bfc859 fixed a narrower (one-step-stale) case of.
+      const frozen =
+        !matches &&
+        this.lastExternalTarget != null &&
+        this.lastExternalTarget.row === target.row &&
+        this.lastExternalTarget.col === target.col;
+      if (!staleEcho && !frozen && !matches && !this.isCursorHidden(cursor)) {
         this.log(`external caret ${target.row}:${target.col} before ${keys}`);
+        this.lastExternalTarget = target;
         this.requestCursor(target);
+      } else if (frozen) {
+        this.log(`frozen external caret ${target.row}:${target.col} ignored before ${keys}`);
+        // Give WebKit a fresh, explicit reason to re-seat its caret at the
+        // position Neovim actually has, rather than leaving it stuck.
+        this.syncSelectionToCursor();
       }
       return true;
     }

@@ -353,6 +353,54 @@ describe("IslandInputController", () => {
     expect(client.cursorSet).not.toHaveBeenCalled();
   });
 
+  it("stops chasing a native caret that never recovers across many real keys", async () => {
+    // Confirmed live 2026-09-15: unlike the one-keystroke-stale echo above,
+    // WebKit's Selection can get stuck at one spot and never catch up again,
+    // however many real keys land. staleEcho only recognises the one-call
+    // shape (target === priorCursor), so it re-triggered on every following
+    // key, dragging Neovim's real cursor backward to the frozen spot each
+    // time and making it look like navigation and edits were landing at the
+    // wrong place -- because they were.
+    const doc = Text.of(["one", "two", "three", "four", "five"]);
+    const frozenView = domView({ doc, selection: 2, anchor: 2 }); // row 0, col 2
+    const { client, controller, cursorRequest, inputQueue, state, syncSelectionToCursor } =
+      integrated({ view: frozenView, cursor: { row: 3, col: 1 } });
+
+    // First check: a genuine mismatch, honoured once as usual.
+    controller.syncSelectionBeforeInput({ isComposing: false }, "j");
+    await Promise.resolve();
+    expect(client.cursorSet).toHaveBeenCalledTimes(1);
+    expect(client.cursorSet).toHaveBeenCalledWith(12, 0, 2);
+    cursorRequest.resolve();
+    await inputQueue.pending;
+
+    // Neovim echoes the forced placement (clearing pendingCursor, as a real
+    // intermediate redraw would), then moves for real reasons on every
+    // subsequent key; the DOM never budges from row 0 col 2 (a fresh
+    // domView with the same fixed anchor models WebKit's Selection staying
+    // put across renders).
+    controller.onNvimCursor(0, 2);
+    for (const [row, key] of [[1, "j"], [2, "j"], [3, "k"], [4, "j"]]) {
+      state.cursor = { row, col: 2 };
+      controller.attach(domView({ doc, selection: 2, anchor: 2 }));
+      controller.syncSelectionBeforeInput({ isComposing: false }, key);
+    }
+
+    // Not re-dragged back to the frozen spot on any of those, and given a
+    // real chance to re-seat instead.
+    expect(client.cursorSet).toHaveBeenCalledTimes(1);
+    expect(syncSelectionToCursor).toHaveBeenCalled();
+
+    // Once the DOM finally reports somewhere new, a genuine mismatch there
+    // is honoured normally again.
+    state.cursor = { row: 4, col: 2 };
+    controller.attach(domView({ doc, selection: 5, anchor: 5 })); // row 1, col 1
+    controller.syncSelectionBeforeInput({ isComposing: false }, "l");
+    await Promise.resolve();
+    expect(client.cursorSet).toHaveBeenCalledTimes(2);
+    expect(client.cursorSet).toHaveBeenNthCalledWith(2, 12, 1, 1);
+  });
+
   it("honours a second, distinct Grammarly correction posted right after the first", async () => {
     // Grammarly applies every correction in a detected range one after
     // another, reading AXValue back in between rather than waiting for a
