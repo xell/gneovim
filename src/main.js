@@ -1077,14 +1077,23 @@ addEventListener("error", (e) => {
       const isl = islands.get(e.payload.win);
       if (isl) isl.setDecor(d);
     }),
-    // `:GneovimResyncIsland`, the fold-desync escape hatch (see
-    // docs/markdown-island-fold-desync.md and runtime/md_preview.lua). The
-    // Lua side has already reset its own fold and highlight-cache state
-    // before sending this; force(true) is the same full detach/reattach
-    // path applyBufLines already falls back to on a caught desync.
-    nvim.on("resync_island", () => {
-      jlog("resync_island: forcing a full island resync");
-      islandManager.reconcile(true);
+    // A stale island: either `:GneovimResyncIsland`'s fold-desync escape
+    // hatch (win 0, every island) or an automatic reload nvim_buf_attach
+    // cannot see -- `:checktime` / autoread / `:edit!` (a specific win, just
+    // that island). See docs/markdown-island-fold-desync.md and
+    // runtime/md_preview.lua / runtime/md_decor.lua. Either way the Lua side
+    // has already reset its own fold and highlight-cache state before
+    // sending this; the detach/reattach here is the same fresh-snapshot path
+    // applyBufLines already falls back to on a caught desync.
+    nvim.on("resync_island", (e) => {
+      const win = e.payload;
+      if (win) {
+        jlog(`resync_island: refreshing window ${win}`);
+        islandManager.resyncWindow(win);
+      } else {
+        jlog("resync_island: forcing a full island resync");
+        islandManager.reconcile(true);
+      }
       nvim.refreshMarkdownDecorations().catch(() => {});
     }),
     nvim.on("gone", (e) => showGone(e.payload)),

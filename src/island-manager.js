@@ -71,6 +71,25 @@ export class IslandManager {
     this.layout();
   }
 
+  // Reattach one window's island from a fresh buffer snapshot, the same
+  // detach-then-attach sequence reconcile(true) already does per window, but
+  // without touching any other island. For a reload nvim_buf_attach cannot
+  // see (`:checktime` / autoread / `:edit!`; see
+  // docs/markdown-island-fold-desync.md) and has no reason to disturb a
+  // window the user might be actively typing in elsewhere.
+  resyncWindow(win) {
+    const island = this.islands.get(win);
+    if (!island) return;
+    const oldBuffer = island.bufnr;
+    island.bufnr = null;
+    if (oldBuffer != null) {
+      this.nvim
+        .detachIsland(oldBuffer)
+        .catch((error) => this.reportError("island_detach failed: " + error));
+    }
+    this.attach(island);
+  }
+
   async attach(island) {
     try {
       const snapshot = await this.nvim.attachIsland(island.winId);

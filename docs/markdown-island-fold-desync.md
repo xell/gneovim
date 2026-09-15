@@ -221,4 +221,9 @@ live preview off/on has not held:
    `nvim.refreshMarkdownDecorations()`.
 
 It is global and takes no bang: a full resync is meant to be the one command
-that always works, not a per-window scalpel.
+that always works, not a per-window scalpel. `BridgeEvent::ResyncIsland` /
+`gnv_resync_island` also now carry a window id for a second, automatic
+caller — see `docs/external-file-changes-and-the-island.md` for the case
+this command's own "even reloading doesn't help" symptom turned out to
+share a cause with: `:edit!` fires none of the events the island's content
+sync depends on either.

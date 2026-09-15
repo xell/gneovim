@@ -64,6 +64,36 @@ describe("IslandManager", () => {
     expect(manager.get(1000)).toBeUndefined();
   });
 
+  it("resyncs one window's island without touching any other", async () => {
+    // The scoped path an autoread/:checktime/:edit! reload uses (see
+    // docs/markdown-island-fold-desync.md): unlike reconcile(true), this
+    // must not disturb a window the user might be actively typing in.
+    const { nvim, manager } = fixture();
+    const target = island(1000);
+    target.bufnr = 7;
+    const other = island(2000);
+    other.bufnr = 9;
+    manager.islands.set(1000, target);
+    manager.islands.set(2000, other);
+
+    manager.resyncWindow(1000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(nvim.detachIsland).toHaveBeenCalledExactlyOnceWith(7);
+    expect(nvim.attachIsland).toHaveBeenCalledExactlyOnceWith(1000);
+    expect(target.applyReset).toHaveBeenCalledOnce();
+    expect(other.applyReset).not.toHaveBeenCalled();
+    expect(other.destroy).not.toHaveBeenCalled();
+  });
+
+  it("ignores a resync request for a window with no island", () => {
+    const { nvim, manager } = fixture();
+    expect(() => manager.resyncWindow(1000)).not.toThrow();
+    expect(nvim.detachIsland).not.toHaveBeenCalled();
+    expect(nvim.attachIsland).not.toHaveBeenCalled();
+  });
+
   it("balances an attach completed after its island was abandoned", async () => {
     const { nvim, manager } = fixture();
     const abandoned = island(1000);

@@ -1056,6 +1056,30 @@ vim.api.nvim_create_autocmd('ColorScheme', {
   end,
 })
 
+-- A reload nvim_buf_attach cannot see: `:checktime` (autoread) and `:edit!`
+-- both silently replace a buffer's lines without an on_lines event and
+-- without firing TextChanged / CursorHold, confirmed with a headless
+-- `nvim -l` probe (2026-09-15) -- only BufReadPost / FileChangedShellPost
+-- fire. schedule() alone is not enough here: it recomputes folds/heads/
+-- highlights, but the island's CodeMirror document itself would stay on the
+-- pre-reload text forever, since nothing else ever tells the client its
+-- content is now wrong. For every markdown window currently showing the
+-- reloaded buffer, also ask the client for a fresh full snapshot (scoped to
+-- just that window; see IslandManager.resyncWindow in src/island-manager.js
+-- and BridgeEvent::ResyncIsland in bridge.rs). See
+-- docs/markdown-island-fold-desync.md.
+vim.api.nvim_create_autocmd({ 'FileChangedShellPost', 'BufReadPost' }, {
+  group = grp,
+  callback = function(args)
+    for _, win in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_get_buf(win) == args.buf and preview_on(win) then
+        pcall(vim.rpcnotify, chan, 'gnv_resync_island', win)
+      end
+    end
+    schedule()
+  end,
+})
+
 -- General trigger for display-only changes with no buffer edit and no autocmd
 -- of their own, made while Neovim is blocked on a synchronous input wait
 -- (hop.nvim's hint letters: pure virt_text extmarks, no setline()). Verified
