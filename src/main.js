@@ -64,6 +64,10 @@ jlog("main.js loaded");
 let cellW = 8.4;
 let cellH = 17;
 let originX = 4; // left margin in px; the grid is letterboxed, see screenMetrics
+// Fixed top margin clearing the overlay title bar's traffic-light row. Must
+// match --top-inset in styles.css (no CSS var read-back: this value also
+// drives row-count and mouse-row math below, not just the DOM position).
+const TOP_INSET = 32;
 let gridLinespace = 0; // from :set linespace, added to the natural line box
 const GRID_FONT_FALLBACK = 'ui-monospace, "SF Mono", Menlo, monospace';
 const GUI_FONT_DEFAULT = 14;
@@ -939,7 +943,13 @@ const MIN_PAD_X = 4; // minimum left/right breathing room, px
 // originX is the left margin; every grid is placed at scol*cellW + originX.
 function screenMetrics() {
   const el = document.documentElement;
-  return calculateScreenMetrics(el.clientWidth, el.clientHeight, cellW, cellH, MIN_PAD_X);
+  return calculateScreenMetrics(
+    el.clientWidth,
+    el.clientHeight - TOP_INSET,
+    cellW,
+    cellH,
+    MIN_PAD_X,
+  );
 }
 function applyScreen(m) {
   originX = m.padX;
@@ -1353,7 +1363,7 @@ const MOUSE_BTN = ["left", "middle", "right"];
 const overIsland = (e) => e.target?.closest?.(".island, #ime");
 function mouseCell(e) {
   return {
-    row: Math.max(0, Math.floor(e.clientY / cellH)),
+    row: Math.max(0, Math.floor((e.clientY - TOP_INSET) / cellH)),
     col: Math.max(0, Math.floor((e.clientX - originX) / cellW)),
   };
 }

@@ -64,23 +64,6 @@ fn add_as_tab(parent: &tauri::WebviewWindow, child: &tauri::WebviewWindow) {
     }
 }
 
-/// Set the NSWindow corner radius to match macOS 26's new design language (~26 pt).
-/// Uses the long-standing private `_setCornerRadius:` selector, which remains
-/// valid on macOS 26; the OS takes care of fullscreen and tab-bar junctions.
-#[cfg(target_os = "macos")]
-fn apply_corner_radius(win: &tauri::WebviewWindow) {
-    use objc2::msg_send;
-    use objc2::runtime::AnyObject;
-
-    let ns_win = match win.ns_window() {
-        Ok(p) if !p.is_null() => p as *mut AnyObject,
-        _ => return,
-    };
-    unsafe {
-        let _: () = msg_send![ns_win, _setCornerRadius: 26.0_f64];
-    }
-}
-
 /// Give Globe-Control shortcuts first refusal before a focused WKWebView can
 /// turn them into DOM key events.
 ///
@@ -437,65 +420,6 @@ mod lookup_hotkey {
 }
 
 
-/// x of the close-button frame origin, in points. AppKit's default is ~7; we
-/// shift the whole cluster right a touch so it clears the 26 pt corner
-/// (close-button centre then sits ~22 pt from the edge).
-#[cfg(target_os = "macos")]
-const TRAFFIC_LIGHT_X: f64 = 15.0;
-
-/// Shift the traffic-light buttons rightward so they sit inside the macOS 26
-/// corner radius. The inter-button gap chosen by AppKit is preserved.
-/// Must be called on the main thread. Re-called on every `Resized` event and
-/// after tab grouping so AppKit's own layout pass cannot override our positions.
-#[cfg(target_os = "macos")]
-fn apply_traffic_light_inset(win: &tauri::WebviewWindow) {
-    use objc2_app_kit::{NSView, NSWindow, NSWindowButton};
-
-    let ptr = match win.ns_window() {
-        Ok(p) if !p.is_null() => p,
-        _ => return,
-    };
-    // Safety: Tauri hands us a valid, live NSWindow pointer.
-    let ns_win: &NSWindow = unsafe { &*(ptr as *const NSWindow) };
-
-    let Some(close) = ns_win.standardWindowButton(NSWindowButton::CloseButton) else {
-        return;
-    };
-    let Some(mini) = ns_win.standardWindowButton(NSWindowButton::MiniaturizeButton) else {
-        return;
-    };
-    let zoom = ns_win.standardWindowButton(NSWindowButton::ZoomButton);
-
-    // Keep the gap AppKit chose between buttons (typically ~20 pt).
-    let close_rect = NSView::frame(&close);
-    let mini_rect = NSView::frame(&mini);
-    let gap = mini_rect.origin.x - close_rect.origin.x;
-
-    let mut buttons = vec![close, mini];
-    if let Some(z) = zoom {
-        buttons.push(z);
-    }
-
-    for (i, btn) in buttons.into_iter().enumerate() {
-        let mut rect = NSView::frame(&btn);
-        rect.origin.x = TRAFFIC_LIGHT_X + i as f64 * gap;
-        NSView::setFrameOrigin(&btn, rect.origin);
-    }
-}
-
-/// Re-assert the traffic-light inset on the next runloop tick, after AppKit has
-/// laid out a change it does asynchronously (tab bar appearing/disappearing).
-#[cfg(target_os = "macos")]
-fn apply_traffic_light_inset_deferred(win: tauri::WebviewWindow) {
-    async_runtime::spawn(async move {
-        for delay in [16u64, 120] {
-            tokio::time::sleep(Duration::from_millis(delay)).await;
-            let w = win.clone();
-            let _ = win.run_on_main_thread(move || apply_traffic_light_inset(&w));
-        }
-    });
-}
-
 // ---------------------------------------------------------------------------
 // Unsaved-changes guard for Cmd+W / Cmd+Q
 // ---------------------------------------------------------------------------
@@ -802,7 +726,11 @@ fn spawn_window(app: &AppHandle, as_tab: bool, open: OpenSpec) -> Option<String>
         .inner_size(1100.0, 750.0)
         .min_inner_size(480.0, 360.0);
     #[cfg(target_os = "macos")]
-    let builder = builder.tabbing_identifier("gneovim").visible(!as_tab);
+    let builder = builder
+        .tabbing_identifier("gneovim")
+        .visible(!as_tab)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true);
 
     let win = match builder.build() {
         Ok(w) => w,
@@ -812,30 +740,19 @@ fn spawn_window(app: &AppHandle, as_tab: bool, open: OpenSpec) -> Option<String>
         }
     };
 
-    // The private NSWindow cosmetics (corner radius, traffic-light inset) and
-    // the macOS tab grouping must run on the main thread. `spawn_window` is also
-    // reached from worker threads (file-association `open_paths`, the
-    // `OpenNewTab` bridge event); on macOS 26 `_setCornerRadius:` routes through
-    // WindowManagement.framework, which traps ("Must only be used from the main
-    // thread") when called off-main.
+    // The macOS tab grouping must run on the main thread; `spawn_window` is
+    // also reached from worker threads (file-association `open_paths`, the
+    // `OpenNewTab` bridge event).
     #[cfg(target_os = "macos")]
     {
         let w = win.clone();
         let _ = win.run_on_main_thread(move || {
-            apply_corner_radius(&w);
-            apply_traffic_light_inset(&w);
-
             if as_tab {
                 match &parent {
                     Some(p) => {
                         log::info!("new tab: grouping with {}", p.label());
                         add_as_tab(p, &w);
                         let _ = w.show();
-                        // The tab bar now appears on both windows; AppKit
-                        // re-lays out the traffic lights asynchronously, so
-                        // re-assert the inset.
-                        apply_traffic_light_inset_deferred(w.clone());
-                        apply_traffic_light_inset_deferred(p.clone());
                     }
                     None => {
                         log::warn!("new tab: no parent window, opening standalone");
@@ -1493,12 +1410,6 @@ pub fn run() {
                     state.failed.lock().unwrap().remove(window.label());
                     log::info!("window {} closed", window.label());
                 }
-                // Closing a tab can collapse a group's tab bar; AppKit then
-                // re-lays out the other windows' traffic lights.
-                #[cfg(target_os = "macos")]
-                for w in window.app_handle().webview_windows().into_values() {
-                    apply_traffic_light_inset_deferred(w);
-                }
             }
             WindowEvent::Focused(true) => {
                 if let Some(state) = window.try_state::<AppState>() {
@@ -1511,11 +1422,6 @@ pub fn run() {
                 let _ = window
                     .app_handle()
                     .emit(&format!("gnv://{}/focus", window.label()), ());
-                #[cfg(target_os = "macos")]
-                if let Some(win) = window.app_handle().get_webview_window(window.label()) {
-                    apply_traffic_light_inset(&win);
-                    apply_traffic_light_inset_deferred(win);
-                }
             }
             #[cfg(target_os = "macos")]
             WindowEvent::Focused(false) => {
@@ -1523,12 +1429,6 @@ pub fn run() {
                 // process-global shortcut. Release it when Gneovim loses
                 // focus so macOS and other applications keep their binding.
                 lookup_hotkey::set_active(false);
-            }
-            #[cfg(target_os = "macos")]
-            WindowEvent::Resized(_) => {
-                if let Some(win) = window.app_handle().get_webview_window(window.label()) {
-                    apply_traffic_light_inset(&win);
-                }
             }
             _ => {}
         })
@@ -1539,10 +1439,6 @@ pub fn run() {
                 install_native_shortcut_monitor();
                 webview_accessibility::install();
                 lookup_hotkey::install(app.handle().clone());
-                if let Some(win) = app.get_webview_window("main") {
-                    apply_corner_radius(&win);
-                    apply_traffic_light_inset(&win);
-                }
             }
             Ok(())
         })
