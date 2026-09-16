@@ -538,6 +538,8 @@ type Bufs = Arc<Mutex<HashMap<i64, BufState>>>;
 #[derive(Clone)]
 struct NvHandler {
     shared: Shared,
+    /// Shared with `Bridge` so `nvim_buf_detach_event` can drop the entry.
+    bufs: Bufs,
 }
 
 #[async_trait]
@@ -611,6 +613,23 @@ impl Handler for NvHandler {
                 }
                 drop(sync);
                 self.shared.send(BridgeEvent::Lines(payload));
+            }
+            // [buf]: Neovim dropped this channel's attach. Sent on every unload
+            // or reload of the buffer (`:bdelete`, plain `:e` on an unmodified
+            // buffer, `:e!`, autoread's `:checktime`), confirmed with a headless
+            // probe 2026-09-16, after which no more lines events ever arrive for
+            // it. Forget the entry (and any edit-echo bookkeeping) so the next
+            // `island_attach` for this bufnr, which `:bdelete` + reopen reuses,
+            // performs a real attach instead of just bumping a stale refcount.
+            // Every island showing the buffer re-syncs on its own: BufReadPost
+            // for a reload, `gnv_winft` for a buffer switch.
+            "nvim_buf_detach_event" => {
+                let buf = args.first().and_then(ext_id).unwrap_or(-1);
+                log::info!("nvim detached buffer {buf}; dropping island attach state");
+                self.bufs.lock().await.remove(&buf);
+                let mut sync = lock_recover(&self.shared.edit_sync, "edit sync");
+                sync.pending.remove(&buf);
+                sync.suppress.remove(&buf);
             }
             "gnv_cursor" => {
                 let win = args.first().and_then(Value::as_i64).unwrap_or(0);
@@ -1041,6 +1060,7 @@ pub async fn connect(
 
     let handler = NvHandler {
         shared: shared.clone(),
+        bufs: bufs.clone(),
     };
 
     let (nvim, io, mut child) = create::new_child_cmd(&mut cmd, handler)
@@ -1412,8 +1432,8 @@ impl Bridge {
     }
 
     /// Attach `win`'s buffer for buffer-sync and return a fresh snapshot. If the
-    /// buffer is already attached (another island shows it) this just bumps the
-    /// refcount. `win` is a raw window id.
+    /// buffer is already attached (another island shows it) this bumps the
+    /// refcount and re-issues the attach anyway. `win` is a raw window id.
     pub async fn island_attach(&self, win: i64) -> Result<ResetPayload, String> {
         let buf_val = self
             .nvim
@@ -1426,6 +1446,13 @@ impl Bridge {
         {
             let mut bufs = self.bufs.lock().await;
             if let Some(st) = bufs.get_mut(&id) {
+                // Attach again even though the refcount says we already are:
+                // the refcount only tracks islands, not whether Neovim still
+                // honours the attach (see `nvim_buf_detach_event` above), and
+                // a repeat attach from the same channel is idempotent on
+                // Neovim's side (one lines event per edit, confirmed headless
+                // 2026-09-16). One cheap RPC buys a self-healing resync.
+                st.buf.attach(false, vec![]).await.map_err(err)?;
                 st.refs += 1;
             } else {
                 let buf = Buffer::new(Value::from(id), self.nvim.clone());

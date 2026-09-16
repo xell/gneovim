@@ -565,6 +565,10 @@ class Island {
   constructor(winId) {
     this.winId = winId;
     this.bufnr = null;
+    // IslandManager's in-flight attach bookkeeping (see island-manager.js).
+    this.attaching = null;
+    this.reconcileAfterAttach = false;
+    this.resyncAfterAttach = false;
     this.mode = "n";
     this.fontZoom = 0;
     this.editableComp = new Compartment();

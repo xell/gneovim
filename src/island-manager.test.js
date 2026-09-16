@@ -96,6 +96,73 @@ describe("IslandManager", () => {
     expect(nvim.attachIsland).not.toHaveBeenCalled();
   });
 
+  it("does not stack a second attach while the first is in flight", async () => {
+    // One `:e` fires FileType, BufWinEnter and WinEnter, so reconcile runs
+    // three times before the first snapshot returns. Every extra attach was a
+    // bridge-side ref no island ever released, which is what let a dead
+    // attach outlive `:bdelete` (docs/markdown-island-fold-desync.md).
+    const { session, nvim, manager } = fixture();
+    session.placeGrid(2, {}, 1000);
+    session.setWindowInfo(1000, 7, "markdown");
+    manager.reconcile();
+    session.setWindowInfo(1000, 7, "markdown");
+    manager.reconcile();
+    session.setWindowInfo(1000, 7, "markdown");
+    manager.reconcile();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(nvim.attachIsland).toHaveBeenCalledExactlyOnceWith(1000);
+    expect(manager.get(1000).bufnr).toBe(7);
+    expect(manager.get(1000).attaching).toBeNull();
+
+    session.placeGrid(2, {}, 1001);
+    manager.reconcile();
+    await Promise.resolve();
+    expect(nvim.detachIsland).toHaveBeenCalledExactlyOnceWith(7);
+  });
+
+  it("re-checks the wanted buffer once an in-flight attach settles", async () => {
+    // The window switched buffers while the first attach was pending: the
+    // deferred reconcile must swap the island to the new buffer, balanced.
+    const { session, nvim, manager } = fixture();
+    let buf = 7;
+    nvim.attachIsland.mockImplementation(async () => ({
+      buf,
+      lines: ["text"],
+      row: 0,
+      col: 0,
+      mode: "n",
+      scrolloff: 0,
+      name: "/tmp/a.md",
+    }));
+    session.placeGrid(2, {}, 1000);
+    session.setWindowInfo(1000, 7, "markdown");
+    manager.reconcile();
+    buf = 8;
+    session.setWindowInfo(1000, 8, "markdown");
+    manager.reconcile();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(nvim.attachIsland).toHaveBeenCalledTimes(2);
+    expect(nvim.detachIsland).toHaveBeenCalledExactlyOnceWith(7);
+    expect(manager.get(1000).bufnr).toBe(8);
+  });
+
+  it("defers a resync requested while an attach is in flight", async () => {
+    const { session, nvim, manager } = fixture();
+    session.placeGrid(2, {}, 1000);
+    session.setWindowInfo(1000, 7, "markdown");
+    manager.reconcile();
+    manager.resyncWindow(1000);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // first attach, then the deferred resync's detach + fresh attach
+    expect(nvim.attachIsland).toHaveBeenCalledTimes(2);
+    expect(nvim.detachIsland).toHaveBeenCalledExactlyOnceWith(7);
+    expect(manager.get(1000).applyReset).toHaveBeenCalledTimes(2);
+    expect(manager.get(1000).bufnr).toBe(7);
+  });
+
   it("balances an attach completed after its island was abandoned", async () => {
     const { nvim, manager } = fixture();
     const abandoned = island(1000);

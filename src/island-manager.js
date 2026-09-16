@@ -56,6 +56,16 @@ export class IslandManager {
         const gutter = this.session.gutterForWindow(win);
         if (gutter) island.setGutter(gutter);
         island.setOptimalWidth(this.session.optimalWidthForWindow(win));
+      } else if (current.attaching) {
+        // An attach is already in flight, so `bufnr` is still null and the
+        // check below would start a second one with no detach to balance it.
+        // One `:e` fires FileType, BufWinEnter and WinEnter, each landing
+        // here before the first snapshot returns: measured 3 attaches for 1
+        // detach, leaving the bridge holding a ref no island ever releases,
+        // which is what made a dead attach outlive `:bdelete` (see
+        // docs/markdown-island-fold-desync.md). Re-run this check once the
+        // in-flight attach settles instead.
+        current.reconcileAfterAttach = true;
       } else if (force || (wantedBuffer != null && current.bufnr !== wantedBuffer)) {
         const oldBuffer = current.bufnr;
         current.bufnr = null;
@@ -81,6 +91,12 @@ export class IslandManager {
   resyncWindow(win) {
     const island = this.islands.get(win);
     if (!island) return;
+    if (island.attaching) {
+      // The in-flight snapshot may predate the reload; take a fresh one
+      // after it settles rather than stacking a second attach on it.
+      island.resyncAfterAttach = true;
+      return;
+    }
     const oldBuffer = island.bufnr;
     island.bufnr = null;
     if (oldBuffer != null) {
@@ -91,23 +107,39 @@ export class IslandManager {
     this.attach(island);
   }
 
-  async attach(island) {
-    try {
-      const snapshot = await this.nvim.attachIsland(island.winId);
-      if (this.islands.get(island.winId) !== island) {
-        try {
-          await this.nvim.detachIsland(snapshot.buf);
-        } catch (error) {
-          this.reportError("abandoned island_detach failed: " + error);
+  attach(island) {
+    const run = (async () => {
+      try {
+        const snapshot = await this.nvim.attachIsland(island.winId);
+        if (this.islands.get(island.winId) !== island) {
+          try {
+            await this.nvim.detachIsland(snapshot.buf);
+          } catch (error) {
+            this.reportError("abandoned island_detach failed: " + error);
+          }
+          return;
         }
-        return;
+        island.bufnr = snapshot.buf;
+        island.applyReset(snapshot);
+        this.layout();
+        this.nvim.refreshMarkdownDecorations().catch(() => {});
+      } catch (error) {
+        this.reportError("island_attach failed: " + error);
+      } finally {
+        if (island.attaching === run) island.attaching = null;
       }
-      island.bufnr = snapshot.buf;
-      island.applyReset(snapshot);
-      this.layout();
-      this.nvim.refreshMarkdownDecorations().catch(() => {});
-    } catch (error) {
-      this.reportError("island_attach failed: " + error);
-    }
+      // Work that arrived while this attach was in flight (see reconcile and
+      // resyncWindow). A resync wins: it implies the snapshot just applied
+      // may already be stale.
+      if (this.islands.get(island.winId) !== island) return;
+      const resync = island.resyncAfterAttach;
+      const reconcile = island.reconcileAfterAttach;
+      island.resyncAfterAttach = false;
+      island.reconcileAfterAttach = false;
+      if (resync) this.resyncWindow(island.winId);
+      else if (reconcile) this.reconcile();
+    })();
+    island.attaching = run;
+    return run;
   }
 }

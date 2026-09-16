@@ -330,3 +330,78 @@ short window right after remount where its real caret position lags what
 the shape of glitch this whole investigation is chasing. If the bug
 recurs immediately after a resync rather than well into a session, this
 is the first place to look.
+
+## The dead attach: why `:bdelete` kept the break and `:bwipeout` cleared it, 2026-09-16
+
+Leo's new observations: the break follows heading add/remove work
+(fold structure churn) within minutes, `:GneovimResyncIsland` gives one
+fresh snapshot and then the island goes stale again within seconds, and
+strangely `:bdelete` + reopen keeps the broken state while `:bwipeout` +
+reopen fixes it. Folds turned out to be only the trigger of whatever Leo
+does around them, not the mechanism. The mechanism is a buffer attach
+that Neovim silently dropped and the bridge kept believing in.
+
+Three facts, each verified with a headless probe (a child `nvim --embed`
+driven over raw msgpack from `nvim -l`, using `vim.mpack` and `vim.uv`)
+or the vitest fixture, not by reading alone:
+
+1. `bridge.rs` refcounts attaches per bufnr (`bufs: HashMap<bufnr,
+   {attach, refs}>`). `island_attach` only called the real
+   `nvim_buf_attach` when no entry existed; otherwise it bumped `refs`.
+2. Neovim sends `nvim_buf_detach_event` on every unload or reload of a
+   buffer: `:bdelete`, a plain `:e` of an unmodified buffer, `:e!`, and
+   autoread's `:checktime` after an external write. After it, edits
+   produce no more `nvim_buf_lines_event`s. The bridge never handled
+   that event, so the map entry survived. `nvim_buf_detach` on an already
+   detached buffer returns `true`, so the bridge's own detach path could
+   not notice either.
+3. `IslandManager` leaked refs. A fresh island has `bufnr = null` until
+   its async attach resolves; every `gnv_winft` landing in between (one
+   `:e` fires FileType, BufWinEnter and WinEnter) ran `reconcile()`,
+   which saw `null !== wantedBuffer` and started another attach with no
+   detach to balance it. The fixture measured 3 attaches for 1 detach
+   when the window later closed, so `refs` never reached zero and the
+   entry never left the map.
+
+Together: `:bdelete` makes Neovim drop the attach; reopening reuses the
+same bufnr (confirmed); `island_attach` finds the stale entry, does
+`refs += 1` and no real attach; the island never receives another line.
+`:GneovimResyncIsland` does detach (refs 2 to 1) then attach (1 to 2),
+so it never talks to Neovim either, which is exactly the "one fresh
+snapshot, then stale" behaviour. `:bwipeout` frees the bufnr and the
+new number gets a genuine attach.
+
+The mid-session break is the same dead attach with a different entry
+point. The live log shows `resync_island: refreshing window 1000` (only
+ever sent by the BufReadPost / FileChangedShellPost autocmd, i.e. the
+attached buffer was reread) at 09:41:22 and 09:42:02, then Leo's manual
+full resync at 09:43:32, and zero `island desync` throws in the whole
+log: `applyBufLines` never saw a wrong event, events simply stopped. A
+reload of the attached buffer detaches it; the existing BufReadPost
+resync then went through the refcount path and, with leaked refs, did
+not reattach.
+
+### The fix
+
+Stability over bookkeeping, three small pieces:
+
+1. `bridge.rs` handles `nvim_buf_detach_event`: drops the `bufs` entry
+   and that buffer's edit-echo `pending` / `suppress` state, and logs
+   `nvim detached buffer N`, so the next occurrence leaves a trace.
+2. `island_attach` re-issues `buf.attach()` even when an entry already
+   exists. A repeat attach from the same channel is idempotent on
+   Neovim's side (still exactly one lines event per edit, probed), so
+   one cheap RPC makes every resync a genuine reattach whatever the
+   refcount believes.
+3. `IslandManager` no longer starts a second attach while one is in
+   flight for the same island; `reconcile` and `resyncWindow` requests
+   that arrive meanwhile are deferred until the in-flight attach settles
+   (a resync wins over a reconcile, since the snapshot just applied may
+   predate the reload). Tests cover the leak, the deferred buffer switch,
+   and the deferred resync.
+
+Not yet live-verified by Leo at the time of writing. What to watch for
+in `~/Library/Logs/com.xell.gneovim/gneovim.log`: `nvim detached buffer
+N` followed by `resync_island: refreshing window W` should now leave the
+island fully live. If a stale island ever recurs with no `detached`
+line before it, the attach is alive and the cause is somewhere else.
