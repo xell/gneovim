@@ -344,6 +344,24 @@ body {
   );
   color: var(--accent, color-mix(in srgb, var(--fg) 55%, transparent));
 }
+/* A Normal-mode cursor sitting on the (now-hidden) marker characters has
+   nowhere else to render, same problem as the heading icon and same fix
+   (see cm-heading-icon-cursor below): a reversed-video block behind the
+   glyph, glyph re-tinted to the background so it reads as punched out of
+   the block. --cursor-bg/--cursor-fg are the colorscheme's own 'Cursor'
+   highlight, set in island-display-decorations.js from cursor_hl. */
+.island .cm-list-bullet.cm-list-bullet-cursor {
+  color: var(--cursor-fg, var(--bg));
+}
+.island .cm-list-bullet-cursor::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: -0.15em -0.2em;
+  transform: scale(0.7);
+  background-color: var(--cursor-bg, var(--fg));
+  border-radius: 1px;
+}
 /* inline `code`: the highlight mark gives colour, this gives the face no
    Neovim highlight attribute carries. */
 .island .cm-inline-code {

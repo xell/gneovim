@@ -67,15 +67,20 @@ function hiddenText(document, text) {
 }
 
 class ListBulletWidget extends WidgetType {
-  constructor(document, depth, text) {
+  constructor(document, depth, text, cursorHere) {
     super();
     this.document = document;
     this.depth = depth;
     this.text = text;
+    this.cursorHere = cursorHere;
   }
 
   eq(other) {
-    return other.depth === this.depth && other.text === this.text;
+    return (
+      other.depth === this.depth &&
+      other.text === this.text &&
+      other.cursorHere === this.cursorHere
+    );
   }
 
   // .cm-list-bullet is deliberately position: absolute (out of text flow,
@@ -86,9 +91,16 @@ class ListBulletWidget extends WidgetType {
   // still drifted. The shadow sibling here stays in normal flow so an
   // accessibility client's position math has something to count, while the
   // visual bullet keeps its existing out-of-flow placement untouched.
+  //
+  // A Normal-mode cursor sitting on the marker's own hidden characters has
+  // nowhere else to render -- same problem the heading icon had (see
+  // cm-heading-icon-cursor), same fix: cm-list-bullet-cursor draws a
+  // reversed-video block behind the glyph instead.
   toDOM() {
     const bullet = this.document.createElement("span");
-    bullet.className = "cm-list-bullet";
+    bullet.className = this.cursorHere
+      ? "cm-list-bullet cm-list-bullet-cursor"
+      : "cm-list-bullet";
     bullet.setAttribute("contenteditable", "false");
     bullet.textContent = LIST_BULLET_GLYPHS[this.depth % LIST_BULLET_GLYPHS.length];
     const wrapper = this.document.createElement("span");
@@ -361,12 +373,18 @@ export class IslandDisplayDecorations {
         }),
       });
     }
-    for (const { from, to, depth, ordered } of listMarkerRanges(
+    for (const { row, from, to, depth, ordered } of listMarkerRanges(
       doc,
       payload?.lists,
       guardRow,
       inFold,
     )) {
+      // listMarkerRanges anchors `from` at the line's own start (indentation
+      // is part of the hidden run), so the cursor's byte column compares
+      // directly against the run's own length -- no separate line lookup
+      // needed.
+      const cursorHere =
+        !ordered && cursor?.row === row && cursor.col < to - from;
       spans.push({
         from,
         to,
@@ -379,6 +397,7 @@ export class IslandDisplayDecorations {
                 this.document,
                 depth,
                 doc.sliceString(from, to),
+                cursorHere,
               ),
             }),
       });

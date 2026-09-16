@@ -295,6 +295,71 @@ describe("IslandDisplayDecorations", () => {
     }
   });
 
+  // Same underlying problem as the heading icon, same fix: an unordered
+  // bullet's marker is a widget standing in for real (now-hidden) text, so a
+  // Normal-mode cursor landing there has nothing to render on top of unless
+  // the widget itself carries a reversed-video cursor block.
+  it("shows a reversed-video cursor block on an unordered bullet when the marker stays concealed under the cursor", () => {
+    const bulletWidget = (view, decorationState) => {
+      let found = null;
+      view.state
+        .field(decorationState.islandDecorField)
+        .between(0, view.state.doc.length, (from, to, deco) => {
+          if (deco.spec?.widget?.constructor?.name === "ListBulletWidget") {
+            found = deco.spec.widget;
+          }
+        });
+      return found;
+    };
+
+    // Cursor sitting right on the bullet's hidden marker characters, with a
+    // guard_row that does not exempt this row (e.g. a 'concealcursor'
+    // setting that keeps conceal on even the cursor's own line, a common
+    // prose-writing preference) -- the dash stays hidden behind the bullet
+    // widget, which needs the cursor block.
+    {
+      const { controller, decorationState, view } = fixture(
+        "- item one\nbody",
+        { getCursor: () => ({ row: 0, col: 0 }), getMode: () => "n" },
+      );
+      controller.set({
+        guard_row: -1,
+        lists: [[0, 0]],
+        hl: { runs: [], codespans: [], virt: [] },
+      });
+      expect(bulletWidget(view, decorationState).cursorHere).toBe(true);
+    }
+
+    // Cursor elsewhere on the same line's text: no cursor block.
+    {
+      const { controller, decorationState, view } = fixture(
+        "- item one\nbody",
+        { getCursor: () => ({ row: 0, col: 5 }), getMode: () => "n" },
+      );
+      controller.set({
+        guard_row: -1,
+        lists: [[0, 0]],
+        hl: { runs: [], codespans: [], virt: [] },
+      });
+      expect(bulletWidget(view, decorationState).cursorHere).toBe(false);
+    }
+
+    // The row's own guard_row unconceals the raw "- " text instead: no
+    // widget at all, so nothing left to add a cursor block to.
+    {
+      const { controller, decorationState, view } = fixture(
+        "- item one\nbody",
+        { getCursor: () => ({ row: 0, col: 0 }), getMode: () => "n" },
+      );
+      controller.set({
+        guard_row: 0,
+        lists: [[0, 0]],
+        hl: { runs: [], codespans: [], virt: [] },
+      });
+      expect(bulletWidget(view, decorationState)).toBeNull();
+    }
+  });
+
   it("coordinates EasyMotion, table highlights, and incremental search", () => {
     const {
       controller,
