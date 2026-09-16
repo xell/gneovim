@@ -473,8 +473,8 @@ body {
 
 /* nvim block cursor inside the island: reverse video */
 .nvim-cursor-block {
-  background: var(--fg);
-  color: var(--bg);
+  background: var(--cursor-bg, var(--fg));
+  color: var(--cursor-fg, var(--bg));
   border-radius: 1px;
 }
 .nvim-cursor-eol {
@@ -511,7 +511,7 @@ body {
   display: inline-block;
   width: 0;
   height: 1.2em;
-  border-left: 2px solid var(--fg);
+  border-left: 2px solid var(--cursor-bg, var(--fg));
   vertical-align: middle;
   margin: 0 -1px;
   pointer-events: none;
