@@ -267,6 +267,9 @@ body {
    EasyMotion / hop keep working on real text -- see hrs in
    island-display-decorations.js), the rule itself is a ::after drawn below
    it in the same line box, never a replacement. */
+.island .cm-hr-line {
+  color: var(--nontext-fg, var(--fg));
+}
 .island .cm-hr-line::after {
   content: "";
   display: block;
