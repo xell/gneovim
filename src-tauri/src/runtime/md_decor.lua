@@ -305,7 +305,7 @@ end
 -- *type*, not a highlights query: these are structural, not colour, and want
 -- the whole block's line range.
 local function collect_structure(buf, first, last)
-  local heads, codes, quotes, lists = {}, {}, {}, {}
+  local heads, codes, quotes, lists, hrs = {}, {}, {}, {}, {}
   pcall(function()
     local parser = vim.treesitter.get_parser(buf, 'markdown')
     if not parser then
@@ -346,6 +346,19 @@ local function collect_structure(buf, first, last)
         return -- no headings/quotes nest inside code content
       elseif t == 'block_quote' then
         quotes[#quotes + 1] = { sr, last_row(er, ec) }
+      elseif t == 'thematic_break' then
+        -- Leo's own divider convention: exactly '---', no more/fewer dashes,
+        -- no leading or trailing whitespace. thematic_break also matches
+        -- '***', '___', '----', and indented variants (CommonMark), which
+        -- are deliberately left undecorated; the node type still does the
+        -- useful work of excluding a bare '---' that is actually a setext
+        -- h2 underline (a different node, handled above) or frontmatter
+        -- ('minus_metadata', also a different node) or inside code content
+        -- (pruned above, codes/quotes return before reaching here).
+        if vim.api.nvim_buf_get_lines(buf, sr, sr + 1, false)[1] == '---' then
+          hrs[#hrs + 1] = sr
+        end
+        return
       end
       for child in node:iter_children() do
         walk(child)
@@ -354,7 +367,7 @@ local function collect_structure(buf, first, last)
     walk(root)
     lists = collect_list_depths(buf, root, first, last)
   end)
-  return heads, codes, quotes, lists
+  return heads, codes, quotes, lists, hrs
 end
 
 -- Closed folds overlapping the padded viewport, as { {startRow, endRow, text},
@@ -910,7 +923,7 @@ local function push(win)
     }
   end
 
-  local heads, codes, quotes, lists = collect_structure(buf, first, last)
+  local heads, codes, quotes, lists, hrs = collect_structure(buf, first, last)
   local payload = {
     first = first,
     last = last,
@@ -922,6 +935,7 @@ local function push(win)
     codes = codes,
     quotes = quotes,
     lists = lists,
+    hrs = hrs,
     -- Temporary Neovim-owned incsearch cursor, kept separate from the real
     -- editing cursor. The client follows it visually without changing CM's
     -- selection or the island's authoritative cursor decoration.
@@ -949,6 +963,13 @@ local function push(win)
     accent_fg = (function()
       local a = resolve_hl('Special')
       return a and a.fg or nil
+    end)(),
+    -- The '---' divider's rule line (see hrs above) uses 'NonText', the same
+    -- group Neovim itself paints EOL tildes and 'showbreak' with -- its own
+    -- convention for "this is decoration, not buffer content".
+    nontext_fg = (function()
+      local n = resolve_hl('NonText')
+      return n and n.fg or nil
     end)(),
     -- The heading icon's reversed-video cursor block (Leo's call,
     -- 2026-09-16) uses the colorscheme's own 'Cursor' highlight rather than

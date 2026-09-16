@@ -263,6 +263,17 @@ body {
   padding-left: 0.8em;
   color: color-mix(in srgb, var(--fg) 75%, transparent);
 }
+/* '---' divider: the literal text stays on-screen (untouched, so search /
+   EasyMotion / hop keep working on real text -- see hrs in
+   island-display-decorations.js), the rule itself is a ::after drawn below
+   it in the same line box, never a replacement. */
+.island .cm-hr-line::after {
+  content: "";
+  display: block;
+  height: 1px;
+  margin: 0.3em 0;
+  background: var(--nontext-fg, var(--fg));
+}
 /* Depth-aware list hanging indent (Bear-style): a level-N item's own marker
    lands on the level-(N-1) item's text column, and every physical line of
    an item -- including a hard-wrapped paragraph's later lines, which carry

@@ -194,6 +194,11 @@ export class IslandDisplayDecorations {
     } else {
       this.element.style.removeProperty("--accent");
     }
+    if (payload?.nontext_fg) {
+      this.element.style.setProperty("--nontext-fg", payload.nontext_fg);
+    } else {
+      this.element.style.removeProperty("--nontext-fg");
+    }
     // The heading icon's reversed-video cursor block: the colorscheme's own
     // 'Cursor' highlight, not an invented color. Either half can be missing
     // (see cursor_hl in md_decor.lua); styles.css falls back to --fg/--bg
@@ -498,6 +503,14 @@ export class IslandDisplayDecorations {
     }
     for (const [startRow, endRow] of payload?.quotes ?? []) {
       addLines(startRow, endRow, "cm-blockquote");
+    }
+    // '---' dividers keep their literal source text (search/EasyMotion/hop
+    // all read real text, not a widget's rendered stand-in -- see the
+    // heading-icon widget's Grammarly regression above), and just get a
+    // line class; the rule itself is a pure CSS ::after, drawn after the
+    // text rather than replacing it.
+    for (const row of payload?.hrs ?? []) {
+      addLines(row, row, "cm-hr-line");
     }
     // Every row belonging to a list item gets the depth's padding-left, so a
     // hard-wrapped item's continuation lines (no marker of their own) still

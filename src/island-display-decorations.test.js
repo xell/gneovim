@@ -103,6 +103,26 @@ describe("IslandDisplayDecorations", () => {
     expect(forceRepaint).toHaveBeenCalledOnce();
   });
 
+  it("applies a divider line class for '---' rows and publishes NonText as --nontext-fg", () => {
+    const { controller, decorationState, style, view } = fixture(
+      "para\n---\nafter",
+    );
+    controller.set({
+      nontext_fg: "#889900",
+      guard_row: -1,
+      hrs: [1],
+      hl: { runs: [], codespans: [], virt: [] },
+    });
+
+    expect(style.setProperty).toHaveBeenCalledWith(
+      "--nontext-fg",
+      "#889900",
+    );
+    expect(
+      view.state.field(decorationState.islandDecorField).size,
+    ).toBeGreaterThan(0);
+  });
+
   it("applies list depth line classes and bullet/ordinal marker decorations", () => {
     const { controller, decorationState, view } = fixture(
       "- item one\n  - nested a\n1. ordered one",
