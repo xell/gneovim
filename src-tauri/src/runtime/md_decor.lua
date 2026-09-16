@@ -950,6 +950,22 @@ local function push(win)
       local a = resolve_hl('Special')
       return a and a.fg or nil
     end)(),
+    -- The heading icon's reversed-video cursor block (Leo's call,
+    -- 2026-09-16) uses the colorscheme's own 'Cursor' highlight rather than
+    -- a plain fg/bg swap, same reasoning as visual_hl above. Either field
+    -- can come back nil (many colorschemes leave 'Cursor' unset, or set only
+    -- one side); the client falls back to its own --fg/--bg for whichever
+    -- half is missing.
+    cursor_hl = (function()
+      local c = resolve_hl('Cursor')
+      if not c then
+        return nil
+      end
+      return {
+        bg = c.reverse and c.fg or c.bg,
+        fg = c.reverse and c.bg or c.fg,
+      }
+    end)(),
   }
   pcall(vim.rpcnotify, chan, 'gnv_md_decor', win, vim.json.encode(payload))
 end

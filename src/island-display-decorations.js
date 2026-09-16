@@ -33,59 +33,69 @@ class ConcealWidget extends WidgetType {
   toDOM() {
     const span = this.document.createElement("span");
     span.className = "cm-concealed";
+    span.setAttribute("contenteditable", "false");
     span.textContent = this.text;
     return span;
   }
 }
 
-class HeadingIconWidget extends WidgetType {
-  constructor(document, level, cursorMode = null) {
+// The `#`/`>`/ordered-marker source characters this editor conceals
+// entirely, kept as a real (zero-size, in-flow) text node rather than
+// dropped from the DOM. See the .cm-ax-shadow comment in styles.css for why.
+class HiddenTextWidget extends WidgetType {
+  constructor(document, text) {
     super();
     this.document = document;
-    this.level = level;
-    this.cursorMode = cursorMode;
+    this.text = text;
   }
 
   eq(other) {
-    return (
-      other.level === this.level &&
-      other.cursorMode === this.cursorMode
-    );
+    return other.text === this.text;
   }
 
   toDOM() {
-    const span = this.document.createElement("span");
-    const cursorClass =
-      this.cursorMode == null
-        ? ""
-        : this.cursorMode[0] === "i"
-          ? " cm-heading-icon-cursor-bar"
-          : " cm-heading-icon-cursor-block";
-    span.className = `cm-heading-icon${cursorClass}`;
-    const glyph = this.document.createElement("span");
-    glyph.className =
-      `cm-heading-icon-glyph cm-heading-icon-${this.level}`;
-    span.append(glyph);
-    return span;
+    return hiddenText(this.document, this.text);
   }
 }
 
+function hiddenText(document, text) {
+  const span = document.createElement("span");
+  span.className = "cm-ax-shadow";
+  span.setAttribute("contenteditable", "false");
+  span.textContent = text;
+  return span;
+}
+
 class ListBulletWidget extends WidgetType {
-  constructor(document, depth) {
+  constructor(document, depth, text) {
     super();
     this.document = document;
     this.depth = depth;
+    this.text = text;
   }
 
   eq(other) {
-    return other.depth === this.depth;
+    return other.depth === this.depth && other.text === this.text;
   }
 
+  // .cm-list-bullet is deliberately position: absolute (out of text flow,
+  // for the hanging-indent alignment -- see styles.css), which is itself
+  // enough to throw off the same accessibility text-position translation
+  // .cm-ax-shadow otherwise fixes, independent of whether the widget has
+  // real text: confirmed live, this bullet's own glyph is real text and
+  // still drifted. The shadow sibling here stays in normal flow so an
+  // accessibility client's position math has something to count, while the
+  // visual bullet keeps its existing out-of-flow placement untouched.
   toDOM() {
-    const span = this.document.createElement("span");
-    span.className = "cm-list-bullet";
-    span.textContent = LIST_BULLET_GLYPHS[this.depth % LIST_BULLET_GLYPHS.length];
-    return span;
+    const bullet = this.document.createElement("span");
+    bullet.className = "cm-list-bullet";
+    bullet.setAttribute("contenteditable", "false");
+    bullet.textContent = LIST_BULLET_GLYPHS[this.depth % LIST_BULLET_GLYPHS.length];
+    const wrapper = this.document.createElement("span");
+    wrapper.setAttribute("contenteditable", "false");
+    wrapper.append(bullet);
+    wrapper.append(hiddenText(this.document, this.text));
+    return wrapper;
   }
 }
 
@@ -110,6 +120,7 @@ class OverlayWidget extends WidgetType {
 
   toDOM() {
     const span = this.document.createElement("span");
+    span.setAttribute("contenteditable", "false");
     for (const [text, group] of this.segments) {
       const segment = this.document.createElement("span");
       if (group) {
@@ -182,6 +193,20 @@ export class IslandDisplayDecorations {
       this.element.style.setProperty("--accent", payload.accent_fg);
     } else {
       this.element.style.removeProperty("--accent");
+    }
+    // The heading icon's reversed-video cursor block: the colorscheme's own
+    // 'Cursor' highlight, not an invented color. Either half can be missing
+    // (see cursor_hl in md_decor.lua); styles.css falls back to --fg/--bg
+    // itself via var()'s second argument, so only set what we actually have.
+    if (payload?.cursor_hl?.bg) {
+      this.element.style.setProperty("--cursor-bg", payload.cursor_hl.bg);
+    } else {
+      this.element.style.removeProperty("--cursor-bg");
+    }
+    if (payload?.cursor_hl?.fg) {
+      this.element.style.setProperty("--cursor-fg", payload.cursor_hl.fg);
+    } else {
+      this.element.style.removeProperty("--cursor-fg");
     }
 
     // The table and image-caption widgets replace real source text with
@@ -270,31 +295,52 @@ export class IslandDisplayDecorations {
 
     const guardRow = payload?.guard_row ?? -1;
     const spans = [];
+    // Confirmed live (see conversation): a custom widget standing in for the
+    // hidden "#"s is what broke Grammarly's own AX-based position math --
+    // independent of the widget's content, and independent of column-0 vs
+    // mid-line (markdown links conceal far more text this same
+    // widget-less way and never had the problem). So every heading level
+    // hides its marker exactly like quote/list markers and links do: real
+    // hidden text, no widget standing in for it. The icon is drawn
+    // separately below, as a line-level CSS decoration that never replaces
+    // any document text, so there is nothing left for that translation to
+    // get wrong.
+    //
+    // Leo's call, 2026-09-16: the icon is the permanent, always-visible
+    // representation of a heading marker; the raw "#"s only ever surface
+    // while actively typing there. So unlike quote/list markers (which keep
+    // sharing the ordinary guardRow -- reveal on the cursor's line in any
+    // mode), a heading's own marker reveals only in Insert mode; a Normal-
+    // mode cursor sitting on the line never uncovers it, and the icon shows
+    // a reversed-video cursor block instead (cm-heading-icon-cursor),
+    // reviving 7103ab0's visual with the new line-decoration structure.
+    const cursor = this.getCursor();
+    const mode = this.getMode();
+    const headingGuardRow = mode[0] === "i" ? guardRow : -1;
+    const headingIconLines = [];
     for (const { row, from, to, level } of headingMarkerRanges(
       doc,
       payload?.heads,
-      guardRow,
+      headingGuardRow,
       inFold,
     )) {
-      const cursor = this.getCursor();
-      const cursorMode =
-        cursor?.row === row && cursor.col === 0
-          ? this.getMode()
-          : null;
       spans.push({
         from,
         to,
-        deco:
-          level <= 3
-            ? Decoration.replace({
-                widget: new HeadingIconWidget(
-                  this.document,
-                  level,
-                  cursorMode,
-                ),
-              })
-            : concealHide,
+        deco: Decoration.replace({
+          widget: new HiddenTextWidget(
+            this.document,
+            doc.sliceString(from, to),
+          ),
+        }),
       });
+      if (level <= 3) {
+        headingIconLines.push({
+          from,
+          level,
+          cursorHere: cursor?.row === row && cursor.col === 0,
+        });
+      }
     }
     for (const { from, to } of quoteMarkerRanges(
       doc,
@@ -302,7 +348,13 @@ export class IslandDisplayDecorations {
       guardRow,
       inFold,
     )) {
-      spans.push({ from, to, deco: concealHide });
+      spans.push({
+        from,
+        to,
+        deco: Decoration.replace({
+          widget: new HiddenTextWidget(this.document, doc.sliceString(from, to)),
+        }),
+      });
     }
     for (const { from, to, depth, ordered } of listMarkerRanges(
       doc,
@@ -314,9 +366,15 @@ export class IslandDisplayDecorations {
         from,
         to,
         deco: ordered
-          ? concealHide
+          ? Decoration.replace({
+              widget: new HiddenTextWidget(this.document, doc.sliceString(from, to)),
+            })
           : Decoration.replace({
-              widget: new ListBulletWidget(this.document, depth),
+              widget: new ListBulletWidget(
+                this.document,
+                depth,
+                doc.sliceString(from, to),
+              ),
             }),
       });
     }
@@ -345,7 +403,12 @@ export class IslandDisplayDecorations {
             ? Decoration.replace({
                 widget: new ConcealWidget(this.document, text),
               })
-            : concealHide,
+            : Decoration.replace({
+                widget: new HiddenTextWidget(
+                  this.document,
+                  doc.sliceString(range.from, range.to),
+                ),
+              }),
         });
       }
     }
@@ -353,6 +416,22 @@ export class IslandDisplayDecorations {
     const ranges = [];
     for (const span of nonOverlappingSpans(spans)) {
       ranges.push(span.deco.range(span.from, span.to));
+    }
+    // The heading icon: a pure CSS line decoration (see .cm-heading-icon-*
+    // in styles.css), not a widget standing in for any text -- see the
+    // comment above headingIconLines. It never disappears on its own (the
+    // heading-specific guard row above already excludes a row from this
+    // list entirely once Insert mode reveals its raw "#"s, so there is
+    // nothing left to hide here); a Normal-mode cursor sitting on the line
+    // instead gets a reversed-video cursor block drawn behind the glyph.
+    for (const { from, level, cursorHere } of headingIconLines) {
+      ranges.push(
+        lineDecoration(
+          `cm-heading-icon-line cm-heading-icon-line-${level}${
+            cursorHere ? " cm-heading-icon-cursor" : ""
+          }`,
+        ).range(from),
+      );
     }
     for (const { from, to } of headingSuffixRanges(
       doc,

@@ -193,6 +193,19 @@ body {
 .island .cm-concealed {
   color: color-mix(in srgb, var(--fg) 65%, transparent);
 }
+/* Markup this editor fully hides (heading `#`s, quote/ordered-list markers,
+   textless conceals) keeps its real source characters as an ordinary,
+   in-flow text node -- just rendered at zero size -- rather than vanishing
+   from the DOM. display:none/visibility:hidden/aria-hidden would drop it
+   from the accessibility tree the same way removing it outright does; an
+   accessibility client (Grammarly) reading that tree's text and posting a
+   selection back against it needs the character count it read to still
+   match the live document, or its next selection lands off by however many
+   characters silently vanished. See docs/grammarly note in project memory. */
+.island .cm-ax-shadow {
+  font-size: 0;
+  line-height: 0;
+}
 /* Neovim's visual / select range, mirrored from the display bridge. Neutral
    wash until the highlight slice can resolve the real Visual group colour. */
 .island .cm-nvim-visual {
@@ -332,23 +345,29 @@ body {
   font-family: var(--font-mono, var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace));
 }
 
-/* H1-H3 marker icon, replacing the concealed "#.. " run. Source SVGs are solid
-   white; mask-image reads only their alpha and background-color supplies the
-   real colour, so one asset per level covers every theme. From zennotes
-   (assets/heading-{1,2,3}-indicator.svg, commit e4149083). Sized in em so it
-   scales with the heading's own cm-h1..h3 font-size. */
-.island .cm-heading-icon {
-  display: inline-block;
+/* H1-H3 marker icon. Deliberately NOT a widget standing in for the
+   concealed "#.. " run -- that was the actual cause of a Grammarly
+   position-drift bug (see the comment above headingIconLines in
+   island-display-decorations.js). This is a line-level decoration only;
+   the ::before glyph never replaces or stands in for any document text,
+   positioned out of the text flow the same way .cm-list-bullet is, so nothing
+   about its own rendered size can misalign the (now-hidden) marker's real
+   characters next to it. Source SVGs are solid white; mask-image reads only
+   their alpha and background-color supplies the real colour, so one asset
+   per level covers every theme. From zennotes
+   (assets/heading-{1,2,3}-indicator.svg, commit e4149083). */
+.island .cm-heading-icon-line {
   position: relative;
+  padding-left: 1em;
+}
+.island .cm-heading-icon-line::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
   width: 0.6em;
   height: 0.6em;
-  vertical-align: middle;
-  margin-right: 0.35em;
-}
-.island .cm-heading-icon-glyph {
-  display: block;
-  width: 100%;
-  height: 100%;
   mask-repeat: no-repeat;
   -webkit-mask-repeat: no-repeat;
   mask-position: center;
@@ -357,44 +376,50 @@ body {
   -webkit-mask-size: contain;
   background-color: color-mix(in srgb, var(--fg) 55%, transparent);
 }
-.island .cm-heading-icon-1 {
+.island .cm-heading-icon-line-1::before {
   mask-image: url("assets/heading-1-indicator.svg");
   -webkit-mask-image: url("assets/heading-1-indicator.svg");
 }
-.island .cm-heading-icon-2 {
+.island .cm-heading-icon-line-2::before {
   mask-image: url("assets/heading-2-indicator.svg");
   -webkit-mask-image: url("assets/heading-2-indicator.svg");
 }
-.island .cm-heading-icon-3 {
+.island .cm-heading-icon-line-3::before {
   mask-image: url("assets/heading-3-indicator.svg");
   -webkit-mask-image: url("assets/heading-3-indicator.svg");
 }
-/* The icon replaces the first "#" of an H1-H3 marker. When conceal stays
-   active there, it also stands in for the otherwise hidden Neovim cursor. */
-.island .cm-heading-icon-cursor-block {
-  /* Keep the widget's small icon box out of line measurement, but paint a
-     1.2em cursor behind it: 75% of the heading's 1.6em line height. */
+/* Leo's call, 2026-09-16: the icon is the heading marker's permanent face;
+   only actively typing there (Insert mode, cursor on the line) ever
+   uncovers the raw "#"s, at which point island-display-decorations.js stops
+   emitting this decoration for that row entirely, same as before. A
+   Normal-mode cursor sitting on the marker's own hidden character has
+   nowhere else to render (see nvimCursorField / nvim-cursor-bar|block on the
+   real, always-visible caret elsewhere) -- 7103ab0's reversed-video
+   treatment revived here on the new line-decoration structure: a solid
+   block behind the glyph, glyph re-tinted to the background so it reads as
+   punched out of the block instead of just sitting on top of it.
+   --cursor-bg/--cursor-fg (set in island-display-decorations.js from
+   cursor_hl in md_decor.lua) are the colorscheme's own 'Cursor' highlight,
+   not an invented color; var()'s fallback covers a colorscheme that leaves
+   'Cursor' unset. */
+.island .cm-heading-icon-cursor {
+  position: relative;
   z-index: 0;
 }
-.island .cm-heading-icon-cursor-block::before {
+.island .cm-heading-icon-cursor::after {
   content: "";
   position: absolute;
   z-index: -1;
-  top: -0.2em;
-  right: -0.1em;
-  bottom: -0.2em;
-  left: -0.1em;
-  background-color: var(--fg);
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 0.8em;
+  height: 0.96em;
+  background-color: var(--cursor-bg, var(--fg));
   border-radius: 1px;
 }
-.island .cm-heading-icon-cursor-block .cm-heading-icon-glyph {
-  /* The cursor is a solid rectangle; the masked glyph gets the inverse
-     background colour, making the heading indicator read as reverse video. */
-  background-color: var(--bg);
-}
-.island .cm-heading-icon-cursor-bar {
-  border-left: 2px solid var(--fg);
-  margin-left: -2px;
+.island .cm-heading-icon-cursor::before {
+  background-color: var(--cursor-fg, var(--bg));
 }
 
 /* hidden IME/keyboard sink for grid windows: a real <textarea> at the cursor so
