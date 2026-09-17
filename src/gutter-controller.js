@@ -1,4 +1,16 @@
-import { lineNumbers } from "@codemirror/view";
+import { RangeSet } from "@codemirror/state";
+import { GutterMarker, gutterLineClass, lineNumbers } from "@codemirror/view";
+
+// Singleton marker, like CodeMirror's own activeLineGutterMarker: GutterMarker.compare
+// checks reference equality before falling back to eq(), so reusing one instance across
+// every recompute is what keeps this cheap.
+class ActiveLineNumberMarker extends GutterMarker {
+  constructor() {
+    super();
+    this.elementClass = "cm-gutter-active-line-number";
+  }
+}
+const activeLineNumberMarker = new ActiveLineNumberMarker();
 
 export function formatGutterNumber(gutter, cursor, lineNumber, lineCount) {
   if (!gutter.relativenumber) return String(lineNumber);
@@ -68,6 +80,18 @@ export class GutterController {
               lineNumber,
               state.doc.lines,
             ),
+        }),
+        // Current line's number, coloured with the 'Cursor' highlight like the
+        // caret itself (see --cursor-bg in styles.css). gutterLineClass.compute
+        // recomputes on its own whenever cursorField changes, same mechanism
+        // CodeMirror's built-in highlightActiveLineGutter uses for 'selection'.
+        gutterLineClass.compute([this.cursorField], (state) => {
+          const cursor = state.field(this.cursorField, false)?.pos;
+          if (!cursor) return RangeSet.empty;
+          const line = state.doc.line(
+            Math.min(cursor.row + 1, state.doc.lines),
+          );
+          return RangeSet.of([activeLineNumberMarker.range(line.from)]);
         }),
       );
     } else {

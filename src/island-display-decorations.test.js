@@ -123,6 +123,17 @@ describe("IslandDisplayDecorations", () => {
     ).toBeGreaterThan(0);
   });
 
+  it("publishes LineNr as --linenr-fg for the gutter", () => {
+    const { controller, style } = fixture();
+    controller.set({
+      linenr_fg: "#445566",
+      guard_row: -1,
+      hl: { runs: [], codespans: [], virt: [] },
+    });
+
+    expect(style.setProperty).toHaveBeenCalledWith("--linenr-fg", "#445566");
+  });
+
   it("applies list depth line classes and bullet/ordinal marker decorations", () => {
     const { controller, decorationState, view } = fixture(
       "- item one\n  - nested a\n1. ordered one",

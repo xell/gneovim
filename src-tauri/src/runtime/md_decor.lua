@@ -971,6 +971,14 @@ local function push(win)
       local n = resolve_hl('NonText')
       return n and n.fg or nil
     end)(),
+    -- The number gutter's own text colour, mirroring Neovim's 'number' /
+    -- 'relativenumber' column instead of a hardcoded --fg dim (the client's
+    -- prior approximation). The current line's own number uses 'Cursor'
+    -- instead -- see cursor_hl below and --cursor-bg in styles.css.
+    linenr_fg = (function()
+      local l = resolve_hl('LineNr')
+      return l and l.fg or nil
+    end)(),
     -- The heading icon's reversed-video cursor block (Leo's call,
     -- 2026-09-16) uses the colorscheme's own 'Cursor' highlight rather than
     -- a plain fg/bg swap, same reasoning as visual_hl above. Either field

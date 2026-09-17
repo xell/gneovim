@@ -211,6 +211,11 @@ export class IslandDisplayDecorations {
     } else {
       this.element.style.removeProperty("--nontext-fg");
     }
+    if (payload?.linenr_fg) {
+      this.element.style.setProperty("--linenr-fg", payload.linenr_fg);
+    } else {
+      this.element.style.removeProperty("--linenr-fg");
+    }
     // The heading icon's reversed-video cursor block: the colorscheme's own
     // 'Cursor' highlight, not an invented color. Either half can be missing
     // (see cursor_hl in md_decor.lua); styles.css falls back to --fg/--bg

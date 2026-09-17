@@ -177,17 +177,27 @@ body {
   margin: 0 auto;
 }
 /* number column, mirrored from Neovim's `number` / `relativenumber`. Monospace
-   and muted like `LineNr`, flush with the island background. */
+   and coloured with the real `LineNr` highlight (--linenr-fg, set in
+   island-display-decorations.js), flush with the island background. Falls
+   back to the same muted --fg mix for a colorscheme that leaves `LineNr`
+   unset. */
 .island .cm-gutters {
   background: var(--bg);
   border-right: none;
-  color: color-mix(in srgb, var(--fg) 45%, transparent);
+  color: var(--linenr-fg, color-mix(in srgb, var(--fg) 45%, transparent));
 }
 .island .cm-lineNumbers .cm-gutterElement {
   font-family: var(--font-mono, var(--grid-font-family, ui-monospace, "SF Mono", Menlo, monospace));
   font-size: 0.85em;
   min-width: calc(var(--gutter-numw, 4) * 1ch);
   padding: 0 0.6ch 0 0.7ch;
+}
+/* Current line's number, in the colorscheme's own 'Cursor' colour (--cursor-bg,
+   set in island-display-decorations.js from cursor_hl) -- the same colour the
+   caret and the list-bullet cursor use, rather than a separate CursorLineNr
+   lookup. */
+.island .cm-lineNumbers .cm-gutterElement.cm-gutter-active-line-number {
+  color: var(--cursor-bg, var(--fg));
 }
 /* conceallevel 1 cchar mirrored from an extmark conceal (display bridge) */
 .island .cm-concealed {
