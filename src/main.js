@@ -521,6 +521,9 @@ const setTableConcealGuard = StateEffect.define();
 // HopPreview highlights on that text (an ordinary Decoration.mark elsewhere)
 // need to be fed to them directly instead. See markdown-presentation.js.
 const setInteractiveHighlights = StateEffect.define();
+// Only inline syntax with its own replacement DOM gets this extra table path.
+// The live preview intentionally does not mirror every grid highlight.
+const setTableInlineHighlights = StateEffect.define();
 // Same reasoning, for hop.nvim's per-target hint letters: a virt_text overlay
 // (Decoration.replace elsewhere) on text hidden behind the table's or the
 // image caption's own Decoration.replace has nothing left to replace either.
@@ -538,6 +541,7 @@ const {
   setImageBase: setIslandImageBase,
   setTableConcealGuard,
   setInteractiveHighlights,
+  setTableInlineHighlights,
   setInteractiveOverlays,
 });
 // Non-editable content is not focusable on its own; the tabindex keeps it the
@@ -684,6 +688,7 @@ class Island {
       decorationState: islandDecorationState,
       setTableConcealGuard,
       setInteractiveHighlights,
+      setTableInlineHighlights,
       setInteractiveOverlays,
       getCursor: () => this._nvimCursor,
       getMode: () => this.mode,

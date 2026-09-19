@@ -1,5 +1,6 @@
 import { StateField } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
+import { markdownLanguage } from "@codemirror/lang-markdown";
 import {
   imageCaptionHighlights,
   imageCaptionOverlays,
@@ -22,8 +23,14 @@ export function createMarkdownPresentation({
   setImageBase,
   setTableConcealGuard,
   setInteractiveHighlights,
+  setTableInlineHighlights,
   setInteractiveOverlays,
 }) {
+  const markdownParser = markdownLanguage.parser;
+  const markdownNodeNames = markdownParser.nodeSet.types.map(
+    (type) => type.name,
+  );
+
   // Both the table and the image caption widget replace real source text
   // with their own DOM, so a Neovim decoration that targets that text never
   // reaches it: a Decoration.mark or Decoration.replace on a byte hidden
@@ -104,8 +111,202 @@ export function createMarkdownPresentation({
       }))
       .filter(({ from, to }) => to > from);
   }
+
+  function appendHighlightedRange(
+    container,
+    text,
+    from,
+    to,
+    cellHighlights,
+    cellOverlays,
+  ) {
+    if (to <= from) return;
+    appendHighlightedText(
+      container,
+      text.slice(from, to),
+      clampSpans(
+        text.slice(from, to),
+        cellHighlights.map(([, , start, length, group]) => [
+          start - from,
+          length,
+          group,
+        ]),
+      ),
+      clampOverlaySpans(
+        text.slice(from, to),
+        cellOverlays.map(([, , start, length, segments]) => [
+          start - from,
+          length,
+          segments,
+        ]),
+      ),
+    );
+  }
+
+  function nodeName(node) {
+    return markdownNodeNames[node.type];
+  }
+
+  function childRange(node, markName) {
+    const marks = node.children.filter(
+      (child) => nodeName(child) === markName,
+    );
+    return marks.length >= 2
+      ? { from: marks[0].to, to: marks[1].from }
+      : null;
+  }
+
+  function inlineUrl(text, node) {
+    const url = node.children.find((child) => nodeName(child) === "URL");
+    return url ? text.slice(url.from, url.to) : null;
+  }
+
+  function appendSourceShadow(parent, text, from, to) {
+    if (to <= from) return;
+    const shadow = document.createElement("span");
+    shadow.className = "cm-markdown-source-shadow";
+    shadow.setAttribute("aria-hidden", "true");
+    shadow.textContent = text.slice(from, to);
+    parent.append(shadow);
+  }
+
+  function safeLinkHref(url) {
+    if (!url) return null;
+    if (/^(?:https?:|mailto:|#|\/|\.\.?\/)/i.test(url)) return url;
+    return null;
+  }
+
+  function appendInlineMarkdown(
+    container,
+    text,
+    cellHighlights,
+    cellOverlays,
+    bufferName,
+  ) {
+    const elements = markdownParser.parseInline(text, 0);
+
+    const appendPlain = (parent, from, to) =>
+      appendHighlightedRange(
+        parent,
+        text,
+        from,
+        to,
+        cellHighlights,
+        cellOverlays,
+      );
+
+    const appendElements = (parent, children, from, to) => {
+      let position = from;
+      for (const child of children) {
+        if (child.to <= from || child.from >= to) continue;
+        const childFrom = Math.max(child.from, from);
+        const childTo = Math.min(child.to, to);
+        if (childFrom > position) appendPlain(parent, position, childFrom);
+        appendElement(parent, child, childFrom, childTo);
+        position = Math.max(position, childTo);
+      }
+      if (position < to) appendPlain(parent, position, to);
+    };
+
+    const appendElement = (parent, node, from, to) => {
+      const name = nodeName(node);
+      if (name === "StrongEmphasis" || name === "Emphasis" || name === "Strikethrough") {
+        const range = childRange(
+          node,
+          name === "Strikethrough" ? "StrikethroughMark" : "EmphasisMark",
+        );
+        if (!range) return appendPlain(parent, from, to);
+        const element = document.createElement(
+          name === "StrongEmphasis"
+            ? "strong"
+            : name === "Emphasis"
+              ? "em"
+              : "del",
+        );
+        appendSourceShadow(element, text, node.from, range.from);
+        appendElements(
+          element,
+          node.children.filter(
+            (child) => child.from >= range.from && child.to <= range.to,
+          ),
+          Math.max(from, range.from),
+          Math.min(to, range.to),
+        );
+        appendSourceShadow(element, text, range.to, node.to);
+        parent.append(element);
+        return;
+      }
+
+      if (name === "InlineCode") {
+        const range = childRange(node, "CodeMark");
+        if (!range) return appendPlain(parent, from, to);
+        const code = document.createElement("code");
+        code.className = "cm-inline-code";
+        appendSourceShadow(code, text, node.from, range.from);
+        appendPlain(code, range.from, range.to);
+        appendSourceShadow(code, text, range.to, node.to);
+        parent.append(code);
+        return;
+      }
+
+      if (name === "Link" || name === "Autolink") {
+        const range = childRange(node, "LinkMark");
+        if (!range) return appendPlain(parent, from, to);
+        const link = document.createElement("a");
+        const href = safeLinkHref(inlineUrl(text, node));
+        if (href) {
+          link.href = href;
+          link.rel = "noreferrer noopener";
+        }
+        appendSourceShadow(link, text, node.from, range.from);
+        appendElements(
+          link,
+          node.children.filter(
+            (child) => child.from >= range.from && child.to <= range.to,
+          ),
+          Math.max(from, range.from),
+          Math.min(to, range.to),
+        );
+        appendSourceShadow(link, text, range.to, node.to);
+        parent.append(link);
+        return;
+      }
+
+      if (name === "Image") {
+        const range = childRange(node, "LinkMark");
+        const url = inlineUrl(text, node);
+        if (!range || !url) return appendPlain(parent, from, to);
+        const alt = text.slice(range.from, range.to);
+        const label = imageLabel(alt);
+        const src = imageSource(url, bufferName, convertFileSrc);
+        if (!src) return appendPlain(parent, from, to);
+        const image = document.createElement("img");
+        image.className = "cm-markdown-inline-image";
+        image.src = src;
+        image.alt = label.alt;
+        image.loading = "lazy";
+        if (label.width != null) image.style.width = `${label.width}px`;
+        parent.append(image);
+        appendSourceShadow(parent, text, node.from, node.to);
+        return;
+      }
+
+      appendPlain(parent, from, to);
+    };
+
+    appendElements(container, elements, 0, text.length);
+  }
+
   class MarkdownTableWidget extends WidgetType {
-    constructor(header, align, rows, cursor, cellHighlights, cellOverlays) {
+    constructor(
+      header,
+      align,
+      rows,
+      cursor,
+      cellHighlights,
+      cellOverlays,
+      bufferName,
+    ) {
       super();
       this.header = header;
       this.align = align;
@@ -113,6 +314,7 @@ export function createMarkdownPresentation({
       this.cursor = cursor;
       this.cellHighlights = cellHighlights;
       this.cellOverlays = cellOverlays;
+      this.bufferName = bufferName;
       this.key = JSON.stringify([
         header,
         align,
@@ -120,6 +322,7 @@ export function createMarkdownPresentation({
         cursor,
         cellHighlights,
         cellOverlays,
+        bufferName,
       ]);
     }
 
@@ -151,6 +354,7 @@ export function createMarkdownPresentation({
               ([overlayRow, overlayCell]) =>
                 overlayRow === rowIndex && overlayCell === index,
             ),
+            this.bufferName,
           );
           if (
             this.cursor?.row === rowIndex &&
@@ -174,44 +378,46 @@ export function createMarkdownPresentation({
     }
   }
 
-  function appendTableText(cell, text, cellHighlights, cellOverlays = []) {
-    appendHighlightedText(
+  function appendTableText(
+    cell,
+    text,
+    cellHighlights,
+    cellOverlays = [],
+    bufferName = "",
+  ) {
+    appendInlineMarkdown(
       cell,
       text,
-      clampSpans(
-        text,
-        cellHighlights.map(([, , start, length, group]) => [
-          start,
-          length,
-          group,
-        ]),
-      ),
-      clampOverlaySpans(
-        text,
-        cellOverlays.map(([, , start, length, segments]) => [
-          start,
-          length,
-          segments,
-        ]),
-      ),
+      cellHighlights,
+      cellOverlays,
+      bufferName,
     );
   }
 
   function addTableCursor(cell, cursor) {
+    const textNodes = [];
+    const collectTextNodes = (node) => {
+      if (node.nodeType === textNodeType) {
+        textNodes.push(node);
+        return;
+      }
+      for (const child of node.childNodes ?? []) collectTextNodes(child);
+    };
+    collectTextNodes(cell);
+    if (!textNodes.length) {
+      const textNode = document.createTextNode("");
+      cell.append(textNode);
+      textNodes.push(textNode);
+    }
     let offset = cursor.offset;
-    let textNode = null;
-    for (const node of cell.childNodes) {
-      const length = node.textContent.length;
-      if (offset < length || node === cell.lastChild) {
-        textNode =
-          node.nodeType === textNodeType ? node : node.firstChild;
+    const lastTextNode = textNodes[textNodes.length - 1];
+    let textNode = lastTextNode;
+    for (const candidate of textNodes) {
+      if (offset < candidate.length || candidate === lastTextNode) {
+        textNode = candidate;
         break;
       }
-      offset -= length;
-    }
-    if (!textNode) {
-      textNode = document.createTextNode("");
-      cell.append(textNode);
+      offset -= candidate.length;
     }
     offset = Math.min(offset, textNode.length);
     const range = document.createRange();
@@ -409,6 +615,7 @@ export function createMarkdownPresentation({
     guardRow,
     tableHighlights = [],
     tableOverlays = [],
+    bufferName = "",
   ) {
     const ranges = [];
     let fence = null;
@@ -496,6 +703,7 @@ export function createMarkdownPresentation({
               tableCursor,
               cellHighlights,
               cellOverlays,
+              bufferName,
             ),
           }).range(line.from, last.to),
         );
@@ -507,21 +715,29 @@ export function createMarkdownPresentation({
 
   const markdownTableField = StateField.define({
     create: (state) => ({
-      deco: tableDecorations(state.doc, null, null),
+      deco: tableDecorations(state.doc, null, null, [], [], ""),
+      bufferName: "",
       cursor: null,
       guardRow: null,
       highlights: [],
+      inlineHighlights: [],
       overlays: [],
     }),
     update(value, transaction) {
+      let bufferName = value.bufferName;
       let cursor = value.cursor;
       let guardRow = value.guardRow;
       let tableHighlights = value.highlights;
+      let inlineHighlights = value.inlineHighlights;
       let tableOverlays = value.overlays;
       for (const effect of transaction.effects) {
+        if (effect.is(setImageBase)) bufferName = effect.value;
         if (effect.is(setCursor)) cursor = effect.value;
         if (effect.is(setTableConcealGuard)) {
           guardRow = effect.value;
+        }
+        if (effect.is(setTableInlineHighlights)) {
+          inlineHighlights = effect.value;
         }
         if (effect.is(setInteractiveHighlights)) {
           tableHighlights = effect.value;
@@ -531,21 +747,26 @@ export function createMarkdownPresentation({
         }
       }
       return transaction.docChanged ||
+        bufferName !== value.bufferName ||
         cursor !== value.cursor ||
         guardRow !== value.guardRow ||
         tableHighlights !== value.highlights ||
+        inlineHighlights !== value.inlineHighlights ||
         tableOverlays !== value.overlays
         ? {
             deco: tableDecorations(
               transaction.state.doc,
               cursor,
               guardRow,
-              tableHighlights,
+              [...inlineHighlights, ...tableHighlights],
               tableOverlays,
+              bufferName,
             ),
+            bufferName,
             cursor,
             guardRow,
             highlights: tableHighlights,
+            inlineHighlights,
             overlays: tableOverlays,
           }
         : value;

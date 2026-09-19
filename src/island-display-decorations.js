@@ -156,6 +156,7 @@ export class IslandDisplayDecorations {
     decorationState,
     setTableConcealGuard,
     setInteractiveHighlights,
+    setTableInlineHighlights,
     setInteractiveOverlays,
     getCursor,
     getMode,
@@ -173,6 +174,7 @@ export class IslandDisplayDecorations {
     this.decorationState = decorationState;
     this.setTableConcealGuard = setTableConcealGuard;
     this.setInteractiveHighlights = setInteractiveHighlights;
+    this.setTableInlineHighlights = setTableInlineHighlights;
     this.setInteractiveOverlays = setInteractiveOverlays;
     this.getCursor = getCursor;
     this.getMode = getMode;
@@ -185,6 +187,7 @@ export class IslandDisplayDecorations {
     this.payload = null;
     this.easyMotionOverlay = false;
     this.interactiveHighlightsKey = null;
+    this.tableInlineHighlightsKey = null;
     this.interactiveOverlaysKey = null;
     this.incsearchKey = "";
   }
@@ -252,6 +255,21 @@ export class IslandDisplayDecorations {
     const interactiveEffects = [
       this.setTableConcealGuard.of(payload?.guard_row ?? null),
     ];
+    const codeSpans = payload?.hl?.codespans ?? [];
+    const tableInlineHighlights = (payload?.hl?.runs ?? []).filter(
+      ([row, start, end, group]) =>
+        codeSpans.some(
+          ([codeRow, codeStart, codeEnd]) =>
+            row === codeRow && start < codeEnd && end > codeStart,
+        ) || /math/i.test(group),
+    );
+    const tableInlineHighlightsKey = JSON.stringify(tableInlineHighlights);
+    if (this.tableInlineHighlightsKey !== tableInlineHighlightsKey) {
+      this.tableInlineHighlightsKey = tableInlineHighlightsKey;
+      interactiveEffects.push(
+        this.setTableInlineHighlights.of(tableInlineHighlights),
+      );
+    }
     if (this.interactiveHighlightsKey !== interactiveHighlightsKey) {
       this.interactiveHighlightsKey = interactiveHighlightsKey;
       interactiveEffects.push(

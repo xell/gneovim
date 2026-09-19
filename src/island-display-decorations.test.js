@@ -13,6 +13,7 @@ function fixture(
   });
   const setTableConcealGuard = StateEffect.define();
   const setInteractiveHighlights = StateEffect.define();
+  const setTableInlineHighlights = StateEffect.define();
   const setInteractiveOverlays = StateEffect.define();
   let state = EditorState.create({
     doc,
@@ -48,6 +49,7 @@ function fixture(
     decorationState,
     setTableConcealGuard,
     setInteractiveHighlights,
+    setTableInlineHighlights,
     setInteractiveOverlays,
     getCursor,
     getMode,
