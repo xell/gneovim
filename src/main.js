@@ -3,7 +3,12 @@
 
 import "../styles.css";
 import { EditorView, Decoration } from "@codemirror/view";
-import { Annotation, StateEffect, Compartment } from "@codemirror/state";
+import {
+  Annotation,
+  StateEffect,
+  Compartment,
+  EditorSelection,
+} from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
@@ -791,6 +796,62 @@ class Island {
   semanticWordTarget() {
     return findSemanticWordTarget(this.view.state.doc, this._nvimCursor);
   }
+  // Visual-line vertical motion for `gj`/`gk` (and, via fast-cursor-move.nvim's
+  // accelerated remap, plain `j`/`k`; see accelStep and the keydown handler).
+  // Neovim's own gj/gk computes display-line wrap against this window's real
+  // grid column width, which happens to match grid mode exactly because the
+  // island shares that same underlying nvim window; it knows nothing of
+  // CodeMirror's proportional markdown font, headings, or concealed syntax,
+  // so it can visually jump to an unrelated column. This instead asks
+  // CodeMirror's own rendered layout for the next line up/down, the same
+  // primitive the default ArrowUp/ArrowDown commands (cursorLineUp/
+  // cursorLineDown) are built on, so it follows the live preview's actual
+  // wrap. `forward` is true for gj/down, false for gk/up. `count` walks that
+  // many display lines in one pass, entirely in CodeMirror position space, so
+  // an accelerated multi-line move is still one queueNvimCursor call rather
+  // than several. Returns null if not even one step was possible (already at
+  // the first/last display line); a multi-step walk that runs out partway
+  // still returns as far as it got.
+  verticalMotionTarget(forward, count = 1) {
+    const cursor = this._nvimCursor;
+    if (!cursor) return null;
+    const doc = this.view.state.doc;
+    const line = doc.line(Math.min(cursor.row + 1, doc.lines));
+    let pos = Math.min(line.from + byteToCol(line.text, cursor.col), line.to);
+    // CodeMirror's own moveVertically silently falls back to an inaccurate
+    // monospace-width column estimate (view.defaultCharacterWidth times the
+    // character offset) when coordsAtPos can't find laid-out geometry for
+    // `pos` yet, rather than the real rendered pixel column. Right after an
+    // island first mounts, before the viewport has measured anything, that
+    // fallback fires on every call, so gj/gk visibly snap to column 0
+    // regardless of the real cursor column until something else (any
+    // unrelated reflow) happens to settle layout. Confirmed live
+    // 2026-09-18. Bail to the caller's native-forward fallback instead of
+    // ever returning that wrong column.
+    if (!this.view.coordsAtPos(pos)) return null;
+    let goal =
+      islandVerticalGoal && islandVerticalGoal.island === this
+        ? islandVerticalGoal.column
+        : undefined;
+    let stepped = false;
+    for (let i = 0; i < count; i++) {
+      const next = this.view.moveVertically(
+        EditorSelection.cursor(pos, undefined, undefined, goal),
+        forward,
+      );
+      if (next.head === pos) break; // first/last display line reached
+      pos = next.head;
+      goal = next.goalColumn;
+      stepped = true;
+    }
+    if (!stepped) return null;
+    islandVerticalGoal = { island: this, column: goal };
+    const targetLine = doc.lineAt(pos);
+    return {
+      row: targetLine.number - 1,
+      col: byteLen(targetLine.text.slice(0, pos - targetLine.from)),
+    };
+  }
   applyBufLines(a, lastline, linedata) {
     const doc = this.view.state.doc;
     // `nvim_buf_attach` reports at line granularity, so its range replaces whole
@@ -901,6 +962,14 @@ class Island {
     this._lastViewport = null;
     this._nvimCursor = null;
     this.inputController.reset();
+    // A stale gj/gk goal column from before this reset (e.g.
+    // :MarkdownLivePreviewOff then On reusing this same Island, see the
+    // comment above) has nothing to do with wherever the cursor actually
+    // lands in the buffer now. Confirmed live 2026-09-18: without this, gj/gk
+    // kept aiming for a column left over from before the toggle instead of
+    // the real current column.
+    if (islandVerticalGoal && islandVerticalGoal.island === this)
+      islandVerticalGoal = null;
     // clear decorations before the full-doc replace: if a stale set is what is
     // making dispatches throw, mapping it through this huge change would keep
     // the island wedged even across `:e` / a forced re-attach.
@@ -1386,11 +1455,72 @@ function handleFontZoom(e) {
   return true;
 }
 
+// Whether `key` continues a prefix that should keep protecting the next
+// completion key (see islandNativeWPending below) rather than let it decay:
+// a run of digits (with a leading-zero carve-out, so "10w" keeps counting
+// once already mid-count) or one of the operator/register/bracket letters
+// that can precede an operator's motion.
+function extendsNativePending(key, wasPending) {
+  return (
+    /^[1-9]$/.test(key) ||
+    (wasPending && key === "0") ||
+    /^[dcy><=!gz"'\[]$/.test(key)
+  );
+}
 let islandNativeWPending = false;
 // The island awaiting the second key of a Normal-mode `zz`, or null. Scoped
 // to one island by object identity, so switching focus mid-sequence cannot
 // let a stray `z` in a different island complete someone else's `zz`.
 let islandPendingZ = null;
+// The island (and its still-unsent keydown event) awaiting the second key of
+// a Normal-mode `g` prefix, or null. Held back instead of forwarded right
+// away because whether it means `gj`/`gk` (handled locally, see
+// Island.verticalMotionTarget) or some other g-command (gg, g~, gw, ...) is
+// only known once the next key arrives.
+let islandPendingG = null;
+// The horizontal target `gj`/`gk` tries to keep hitting through a run of
+// consecutive presses: this island's local analogue of Vim's curswant.
+// Reset whenever a key breaks the run (see the keydown handler below).
+let islandVerticalGoal = null; // { island, column }
+
+// Hand-ported from fast-cursor-move.nvim's own get_move_step
+// (~/.local/share/nvim/lazy/fast-cursor-move.nvim/plugin/fast-cursor-move.lua),
+// which remaps plain `j`/`k` to an accelerating `Ngj`/`Ngk` via an expr
+// keymap entirely inside Neovim: the browser only ever sees a `j`/`k`
+// keydown, never the `g` the mapping produces, so there is no keystroke here
+// to intercept the way literal `gj`/`gk` is above. This reproduces that same
+// hold-to-speed-up curve client-side so plain j/k in an island can be
+// answered locally too (see the keydown handler). Keep ACCEL_LIMIT_MS /
+// ACCEL_TABLE in sync with that plugin's ACCELERATION_LIMIT /
+// ACCELERATION_TABLE_VERTICAL if it's ever retuned. Deliberately not wired
+// to `vim.g.fast_cursor_move_acceleration`; toggling that off is rare enough
+// not to be worth syncing.
+const ACCEL_LIMIT_MS = 150;
+const ACCEL_TABLE = [7, 14, 20, 26, 31, 36, 40];
+let accelPrevDirection = null;
+let accelPrevTime = 0;
+let accelMoveCount = 0;
+function accelStep(direction) {
+  if (direction !== accelPrevDirection) {
+    accelPrevTime = 0;
+    accelMoveCount = 0;
+    accelPrevDirection = direction;
+  } else {
+    const time = performance.now();
+    // `accelPrevTime` is the plugin's own `prev_time = 0` sentinel meaning
+    // "just switched direction"; treat it as infinitely stale rather than
+    // literally subtracting from 0, since unlike Lua's boot-relative
+    // vim.loop.hrtime(), performance.now() starts near 0 on page load and a
+    // literal `time - 0` could read as "recent" early in the session.
+    const elapsed = accelPrevTime ? time - accelPrevTime : Infinity;
+    accelMoveCount = elapsed > ACCEL_LIMIT_MS ? 0 : accelMoveCount + 1;
+    accelPrevTime = time;
+  }
+  for (let i = 0; i < ACCEL_TABLE.length; i++) {
+    if (accelMoveCount < ACCEL_TABLE[i]) return i + 1;
+  }
+  return ACCEL_TABLE.length;
+}
 addEventListener("keydown", (e) => {
   if (imeComposing) return; // IME is mid-composition; let #ime + the OS handle it
   if (handleFontZoom(e)) return;
@@ -1398,6 +1528,70 @@ addEventListener("keydown", (e) => {
   // cursor grid is a Markdown island. Do not apply island Normal-mode physical
   // punctuation or semantic-motion interception to command-line text.
   const isl = session.cmdlineActive ? null : islandForGrid(session.cursorGrid);
+  const plain = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
+  // gj/gk's cached goal column (islandVerticalGoal) is only meaningful across
+  // a run of consecutive vertical-only motions, the same rule Vim's own
+  // curswant follows: any other key at all -- h/l/0/$, a click, an edit,
+  // switching windows, anything -- must invalidate it, or the next gj/gk
+  // snaps back to a column that has nothing to do with where the cursor
+  // actually is now. `g` is deliberately left alone here even though it is
+  // not itself vertical motion: whether it turns out to start a gj/gk (which
+  // must NOT have its incoming goal wiped before it even runs) or something
+  // else entirely is only known once the next key resolves it, and that
+  // resolution already clears the goal itself in its own non-gj/gk branches.
+  // This used to only reset in a couple of narrow spots (buffer reattach,
+  // one gj/gk fallback branch) and otherwise never decayed. Confirmed live
+  // 2026-09-18: reported as the cursor getting permanently "stuck" at one
+  // column no matter what else was pressed.
+  if (
+    !(isl && isl.mode === "n" && plain && /^[gjk]$/.test(e.key))
+  )
+    islandVerticalGoal = null;
+  // Snapshot before the digit/operator-prefix block below can set this flag
+  // for the *current* key (`g` is itself one of the characters that sets
+  // it). Used by the g-entry check further down to tell "a bare g" from "a
+  // g arriving right after an operator like d/c/y", e.g. typing literal
+  // `dgj`: without this, `g` would be deferred as a fresh pending-G instead
+  // of continuing the delete, and the following `j` would resolve into a
+  // silent cursor move, leaving the delete operator stranded in Neovim.
+  const hadNativePendingBefore = islandNativeWPending;
+  // Second key of a pending `g` prefix: resolve whether it completes a local
+  // gj/gk visual-line motion, or release the deferred `g` to Neovim and let
+  // this key fall through to its own normal handling below (gg, g_, gU, gw,
+  // g;, g`, ..., including the punctuation-key path just below). `skipGEntry`
+  // stops that fallthrough from treating a second literal `g` (as in `gg`)
+  // as the start of a brand new pending pair, which would swallow the key
+  // after it instead of letting `gg` complete. This runs before the
+  // punctuation-key path so a pending `g` followed by e.g. `;` or `` ` ``
+  // still releases correctly instead of leaving the `g` stranded.
+  let skipGEntry = false;
+  // Set whenever the block above consumes this keystroke as the second half
+  // of a literal `g` prefix, so the plain-j/k acceleration block further
+  // down (a *different* key path, for fast-cursor-move.nvim's remap, not for
+  // literal typed `gj`/`gk`) does not also try to handle the same keydown.
+  let gPrefixResolved = false;
+  if (islandPendingG) {
+    gPrefixResolved = true;
+    const { island: pendingIsl, event: gEvent } = islandPendingG;
+    islandPendingG = null;
+    if (pendingIsl === isl && plain && (e.key === "j" || e.key === "k")) {
+      const target = isl.verticalMotionTarget(e.key === "j");
+      if (target) {
+        e.preventDefault();
+        islandPendingZ = null;
+        isl.queueNvimCursor(target.row, target.col);
+        return;
+      }
+      // Already at the first/last display line: nothing to do locally, so
+      // let Neovim's own gj/gk answer this edge case instead.
+      pendingIsl.queueNvimKey("g", gEvent);
+      islandVerticalGoal = null;
+    } else {
+      pendingIsl.queueNvimKey("g", gEvent);
+      islandVerticalGoal = null;
+      skipGEntry = e.key === "g";
+    }
+  }
   const normalPunctuation =
     normalModeActive(isl) ? normalModePunctuation(e) : null;
   if (normalPunctuation != null) {
@@ -1414,14 +1608,11 @@ addEventListener("keydown", (e) => {
     else nvim.input(keys).catch((error) => jlog("grid input failed: " + error));
     return;
   }
-  const plain = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
   if (
     isl &&
     isl.mode === "n" &&
     plain &&
-    (/^[1-9]$/.test(e.key) ||
-      (islandNativeWPending && e.key === "0") ||
-      /^[dcy><=!gz"'\[]$/.test(e.key))
+    extendsNativePending(e.key, islandNativeWPending)
   )
     islandNativeWPending = true;
   if (
@@ -1438,7 +1629,74 @@ addEventListener("keydown", (e) => {
       return;
     }
   }
-  if (e.key === "w" || e.key === "Escape") islandNativeWPending = false;
+  // islandNativeWPending must decay after exactly the keystroke it exists to
+  // protect (w above, now also j/k below), not linger until some unrelated
+  // future w/Escape. It used to only reset on those two keys: typing a `:`
+  // command (normalModePunctuation sets this before Neovim's cmdline even
+  // opens, to protect a possible following operator+w) then running it with
+  // <CR> left it stuck true for the rest of the session, since neither w
+  // nor Escape necessarily follows, silently disabling both the w
+  // semantic-jump and gj/gk acceleration until a stray w/Escape happened to
+  // clear it. Confirmed live 2026-09-18 via :MarkdownLivePreviewOff/On.
+  if (!extendsNativePending(e.key, islandNativeWPending))
+    islandNativeWPending = false;
+  // First key of a possible `gj`/`gk`: hold it back instead of forwarding
+  // immediately, see islandPendingG above. `!hadNativePendingBefore` leaves a
+  // `g` that follows an operator (dgj, cgj, "gj on a register-prefixed
+  // command, ...) or a count alone, native, same as `w` already does for
+  // dw/cw/2w: `isl.mode` cannot be trusted here, it lags Neovim's real mode
+  // by one async echo, so a fast "d" then "g" can still see mode "n".
+  if (
+    isl &&
+    isl.mode === "n" &&
+    plain &&
+    e.key === "g" &&
+    !skipGEntry &&
+    !hadNativePendingBefore
+  ) {
+    e.preventDefault();
+    islandPendingZ = null;
+    islandPendingG = { island: isl, event: e };
+    return;
+  }
+  // Plain j/k: this is what actually reaches the browser for
+  // fast-cursor-move.nvim's remap (see accelStep above), since its expr
+  // mapping resolves to `Ngj`/`Ngk` entirely inside Neovim, never as a
+  // separate `g` keydown. Answered the same way literal gj/gk is above.
+  // `gPrefixResolved` excludes a literal typed `gj`/`gk`, already fully
+  // handled by the pending-`g` block, from also going through acceleration:
+  // a deliberately typed gj/gk is a one-off command, not a held key.
+  // `!hadNativePendingBefore` is the same operator-pending guard the g-entry
+  // check above uses, and for the same reason: `isl.mode` lags Neovim's
+  // actual mode by one async echo, so a fast "dj"/"cj"/"2j"/"5j" can still
+  // reach here while `isl.mode` misleadingly still reads "n". This must be
+  // the pre-this-keystroke snapshot, not the live islandNativeWPending: the
+  // general reset a few lines above already clears islandNativeWPending for
+  // any key that is not itself a prefix-continuation character, and j/k
+  // are not, so by the time this line runs the live flag has already been
+  // reset for the very keystroke it needs to protect against. Confirmed
+  // live 2026-09-19: using the live flag here left "5j" silently dropping
+  // the 5 and handling j locally, while Neovim was left holding a dangling
+  // count=5 that nothing ever completed, freezing the app until force quit.
+  if (
+    isl &&
+    isl.mode === "n" &&
+    plain &&
+    !gPrefixResolved &&
+    !hadNativePendingBefore &&
+    (e.key === "j" || e.key === "k")
+  ) {
+    const forward = e.key === "j";
+    const count = accelStep(e.key);
+    const target = isl.verticalMotionTarget(forward, count);
+    e.preventDefault();
+    islandPendingZ = null;
+    if (target) isl.queueNvimCursor(target.row, target.col);
+    // Already at the first/last display line: let Neovim's own remapped
+    // j/k answer this edge case instead.
+    else isl.queueNvimKey(keyToNvim(e), e);
+    return;
+  }
   // `zz`: Neovim still gets both keys, unchanged, like any other Normal-mode
   // command; the island just also centers its own pixel scroll on the
   // second one, since Neovim's resulting topline change is otherwise
