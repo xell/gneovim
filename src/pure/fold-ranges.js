@@ -4,8 +4,9 @@
 export function foldRanges(doc, folds) {
   const spans = [];
   const firstLines = [];
-  for (const [startRow, endRow] of folds || []) {
+  for (const [startRow, endRow, closed = true] of folds || []) {
     if (startRow < 0 || startRow >= doc.lines) continue;
+    if (!closed) continue;
     const first = doc.line(startRow + 1);
     const to = doc.line(Math.min(endRow + 1, doc.lines)).to;
     if (first.to > first.from) firstLines.push({ from: first.from, to: first.to });

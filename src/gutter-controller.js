@@ -12,6 +12,17 @@ class ActiveLineNumberMarker extends GutterMarker {
 }
 const activeLineNumberMarker = new ActiveLineNumberMarker();
 
+class FoldFirstLineMarker extends GutterMarker {
+  constructor(closed) {
+    super();
+    this.elementClass = closed
+      ? "cm-gutter-fold-first-line cm-gutter-fold-closed"
+      : "cm-gutter-fold-first-line cm-gutter-fold-open";
+  }
+}
+const openFoldFirstLineMarker = new FoldFirstLineMarker(false);
+const closedFoldFirstLineMarker = new FoldFirstLineMarker(true);
+
 export function formatGutterNumber(gutter, cursor, lineNumber, lineCount) {
   if (!gutter.relativenumber) return String(lineNumber);
   const cursorLine = cursor
@@ -40,6 +51,8 @@ export class GutterController {
     this.cancelFrame = cancelFrame;
     this.view = null;
     this.gutter = null;
+    this.foldRegions = [];
+    this.foldRegionsKey = "";
     this.frame = 0;
   }
 
@@ -54,6 +67,15 @@ export class GutterController {
   set(gutter) {
     this.gutter = gutter;
     this.apply();
+  }
+
+  setFoldRegions(regions) {
+    const next = regions || [];
+    const key = JSON.stringify(next);
+    if (key === this.foldRegionsKey) return;
+    this.foldRegions = next;
+    this.foldRegionsKey = key;
+    if (this.view && this.gutter) this.apply();
   }
 
   onUpdate(update) {
@@ -92,6 +114,20 @@ export class GutterController {
             Math.min(cursor.row + 1, state.doc.lines),
           );
           return RangeSet.of([activeLineNumberMarker.range(line.from)]);
+        }),
+        gutterLineClass.compute([], (state) => {
+          const markers = [];
+          for (const [startRow, , closed = true] of this.foldRegions) {
+            if (startRow < 0 || startRow >= state.doc.lines) continue;
+            const line = state.doc.line(startRow + 1);
+            markers.push(
+              (closed
+                ? closedFoldFirstLineMarker
+                : openFoldFirstLineMarker
+              ).range(line.from),
+            );
+          }
+          return markers.length ? RangeSet.of(markers) : RangeSet.empty;
         }),
       );
     } else {

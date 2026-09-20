@@ -206,10 +206,17 @@ body {
   min-width: calc(var(--gutter-numw, 4) * 1ch);
   padding: 0 0.6ch 0 0.7ch;
 }
-/* Current line's number, in the colorscheme's own 'Cursor' colour (--cursor-bg,
-   set in island-display-decorations.js from cursor_hl) -- the same colour the
-   caret and the list-bullet cursor use, rather than a separate CursorLineNr
-   lookup. */
+/* The first line of every fold gets a short rule below its number. Closed
+   folds also retint the number itself; the active-line rule below wins when
+   the cursor is on the fold's first line. */
+.island .cm-lineNumbers .cm-gutterElement.cm-gutter-fold-first-line {
+  text-decoration-line: underline;
+  text-decoration-thickness: 0.11em;
+  text-underline-offset: 2px;
+}
+.island .cm-lineNumbers .cm-gutterElement.cm-gutter-fold-closed {
+  color: var(--fg);
+}
 .island .cm-lineNumbers .cm-gutterElement.cm-gutter-active-line-number {
   color: var(--cursor-bg, var(--fg));
 }

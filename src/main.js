@@ -753,7 +753,7 @@ class Island {
   }
   // Display bridge (runtime/md_decor.lua). `d` is the parsed payload:
   // { first, last, conceal: [[row, sByte, eByte, text], ...],
-  //   visual: [[row, sByte, eByte], ...], folds: [[sRow, eRow], ...],
+  //   visual: [[row, sByte, eByte], ...], folds: [[sRow, eRow, closed], ...],
   //   hl: { runs: [[row, sByte, eByte, group], ...], defs: {...},
   //     codespans: [[row, sByte, eByte], ...],
   //     virt: [[row, col, hideBytes, [[text, group], ...]], ...] },
@@ -763,6 +763,7 @@ class Island {
   //   Decorations are view-only, so nothing here reaches nvim_edit. `hl.defs` is merged globally by the
   //   listener; this only consumes `hl.runs` / `hl.virt`.
   setDecor(d) {
+    this.gutterController.setFoldRegions(d?.folds);
     this.displayDecorations.set(d);
   }
   destroy() {

@@ -13,7 +13,7 @@
 --   conceal : union of synconcealed() (:syntax), the treesitter highlights
 --             query `conceal` metadata, and extmark `conceal`.
 --   visual  : the visual / select range.
---   folds   : closed folds (foldclosed / foldtextresult).
+--   folds   : fold regions as {startRow, endRow, closed}.
 --   hl      : { runs, defs } - union of every treesitter capture, hl_group
 --             extmark, active 'hlsearch' result, a live '/' or '?' incsearch
 --             preview, a live ':s'/':g' (substitute/global) 'inccommand'
@@ -370,10 +370,9 @@ local function collect_structure(buf, first, last)
   return heads, codes, quotes, lists, hrs
 end
 
--- Closed folds overlapping the padded viewport, as { {startRow, endRow, text},
--- ... } (0-based rows, inclusive). `text` is `foldtextresult`, trimmed of the
--- trailing fill run. There is no fold autocmd, so this re-runs on the same
--- broad trigger set as the rest.
+-- Fold regions whose first line overlaps the padded viewport, as
+-- { {startRow, endRow, closed}, ... } (0-based rows, inclusive). There is no
+-- fold autocmd, so this re-runs on the same broad trigger set as the rest.
 local function collect_folds(win, first, last)
   local folds = {}
   vim.api.nvim_win_call(win, function()
@@ -385,14 +384,19 @@ local function collect_folds(win, first, last)
     while l <= top do
       local fc = vim.fn.foldclosed(l)
       if fc == -1 then
+        local level = vim.fn.foldlevel(l)
+        local previous = l > 1 and vim.fn.foldlevel(l - 1) or 0
+        if level > 0 and level > previous then
+          local fe = l
+          while vim.fn.foldlevel(fe + 1) >= level do
+            fe = fe + 1
+          end
+          folds[#folds + 1] = { l - 1, fe - 1, false }
+        end
         l = l + 1
       else
         local fe = vim.fn.foldclosedend(l)
-        -- No foldtextresult(): the client shows the fold's own first line
-        -- exactly as it would unfolded and only recolours its text, it does
-        -- not render a summary line, so the fold's own text has nothing to
-        -- read it for.
-        folds[#folds + 1] = { fc - 1, fe - 1 }
+        folds[#folds + 1] = { fc - 1, fe - 1, true }
         l = fe + 1
       end
     end
@@ -958,8 +962,7 @@ local function push(win)
     -- closest thing to a template: nearly every colorscheme colours or
     -- sanely links them, since Neovim's own UI falls back to them.
     -- 'Special' is gneovim's chosen accent source; the client publishes it
-    -- as --accent. A closed fold's own first line (see collect_folds) uses
-    -- it as a text colour, the only cue that it is closed.
+    -- as --accent for other markdown decorations.
     accent_fg = (function()
       local a = resolve_hl('Special')
       return a and a.fg or nil

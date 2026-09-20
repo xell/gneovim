@@ -19,6 +19,13 @@ describe("foldRanges", () => {
     });
   });
 
+  it("ignores open folds because they do not hide content", () => {
+    expect(foldRanges(doc, [[0, 2, false], [1, 2, true]])).toEqual({
+      firstLines: [{ from: 8, to: 16 }],
+      spans: [{ from: 16, to: 25 }],
+    });
+  });
+
   it("detects only actual range overlap", () => {
     const ranges = [{ from: 7, to: 25 }];
     expect(overlapsRanges(ranges, 6, 8)).toBe(true);
