@@ -1463,12 +1463,12 @@ function handleFontZoom(e) {
 // Whether `key` continues a prefix that should keep protecting the next
 // completion key (see islandNativeWPending below) rather than let it decay:
 // a run of digits (with a leading-zero carve-out, so "10w" keeps counting
-// once already mid-count) or one of the operator/register/bracket letters
-// that can precede an operator's motion.
+// once already mid-count), an operator/register/bracket letter, or a text
+// object prefix after an operator.
 function extendsNativePending(key, wasPending) {
   return (
     /^[1-9]$/.test(key) ||
-    (wasPending && key === "0") ||
+    (wasPending && (key === "0" || /^[ai]$/.test(key))) ||
     /^[dcy><=!gz"'\[]$/.test(key)
   );
 }
