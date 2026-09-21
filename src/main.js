@@ -569,6 +569,22 @@ function rangeHidesPos(ranges, pos) {
   return hidden;
 }
 
+// True when some range in `ranges` falls strictly between `lower` and
+// `upper` (exclusive at both ends of the range itself, but the range only
+// needs to be within the span, not touching its edges). Used by
+// Island.verticalMotionTarget to detect a moveVertically step that jumped
+// clean over a table/image block widget rather than landing on it.
+function rangeBetween(ranges, lower, upper) {
+  let found = false;
+  ranges.between(lower, upper, (from, to) => {
+    if (from < upper && to > lower) {
+      found = true;
+      return false;
+    }
+  });
+  return found;
+}
+
 // One CodeMirror instance bound to one markdown window and its buffer.
 class Island {
   constructor(winId) {
@@ -840,12 +856,30 @@ class Island {
         ? islandVerticalGoal.column
         : undefined;
     let stepped = false;
+    const state = this.view.state;
     for (let i = 0; i < count; i++) {
       const next = this.view.moveVertically(
         EditorSelection.cursor(pos, undefined, undefined, goal),
         forward,
       );
       if (next.head === pos) break; // first/last display line reached
+      // CodeMirror's own moveVertically (see posAtCoords's scanY handling in
+      // @codemirror/view's cursor.ts) treats a non-text block -- our table/
+      // image Decoration.replace({block:true}) widgets included -- as a
+      // candidate to scan past rather than land on. Confirmed live: gj/gk
+      // jumped clean over a rendered table instead of entering its rows.
+      // Break instead of accepting a step that jumps over one of these
+      // widgets, so the caller's native-forward fallback below runs
+      // Neovim's own line-by-line motion instead, which knows nothing about
+      // the widget and steps into the table one row at a time, same as it
+      // did before this feature existed.
+      const lower = Math.min(pos, next.head);
+      const upper = Math.max(pos, next.head);
+      if (
+        rangeBetween(state.field(markdownTableField).deco, lower, upper) ||
+        rangeBetween(state.field(markdownImageField).deco, lower, upper)
+      )
+        break;
       pos = next.head;
       goal = next.goalColumn;
       stepped = true;
