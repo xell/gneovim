@@ -573,6 +573,14 @@ export class IslandDisplayDecorations {
     for (const { row, ordered } of listMarkerRows(doc, payload?.lists)) {
       if (ordered) addLines(row, row, "cm-list-marker-line");
     }
+    // The guard row's own marker reveals as raw text instead of staying
+    // concealed (see guardRow above and conceal_guard_row in md_decor.lua
+    // -- for Leo's 'concealcursor' this is Insert mode only), adding real
+    // visible characters where padding-left assumed a concealed/out-of-flow
+    // marker. Nudge that one row back to compensate.
+    for (const [row] of payload?.lists ?? []) {
+      if (row === guardRow) addLines(row, row, "cm-list-marker-revealed");
+    }
 
     const foldSet = Decoration.set(
       foldSpans.map((fold) => concealHide.range(fold.from, fold.to)),

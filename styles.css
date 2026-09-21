@@ -340,6 +340,18 @@ body {
 .island .cm-list-marker-line {
   text-indent: calc(-1 * var(--list-indent-step, 1.3em));
 }
+/* Guard-row reveal (see cm-list-marker-revealed in
+   island-display-decorations.js): the marker's raw text is now visible
+   inline instead of concealed/out-of-flow -- real leading whitespace from
+   the source plus the marker glyph and its own trailing space -- pushing
+   the item right. That leading whitespace grows with nesting depth (each
+   level indents by roughly another marker-width of raw spaces), so the
+   nudge back scales off --list-depth too; the two constants below are
+   fitted to Leo's own list-authoring convention, not derived from the
+   indent variables above. */
+.island .cm-list-marker-revealed {
+  left: calc(-1.1em - var(--list-depth) * 0.45em);
+}
 .island .cm-list-depth-0 {
   --list-depth: 0;
 }
