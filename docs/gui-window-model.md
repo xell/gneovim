@@ -59,6 +59,10 @@ Session restore across a full app restart in prod is a future feature. It would 
 
 Default: a new gui-window, a new nvim, launched as `nvim --headless --listen <sock> <file>`. The `[window] open_files_in` config key changes this to `"tab"` (a new gui-tab, still its own nvim) or `"nvim-tab"` (a new nvim tabpage in the last-focused gui-window, reusing its nvim; falls back to a new gui-window when none is ready). See `docs/configuration.md`.
 
+## The always-on-top window
+
+A gui-window like any other, except pinned above the rest via Tauri's own always-on-top support, opened from **File > New Always On Top Window** or a global keyboard shortcut (`[window] always_on_top_shortcut`, default `cmd+ctrl+space`) that works even while gneovim is not the active app. Only one exists at a time; the menu item greys out and the shortcut refocuses the existing one instead of creating another. See `docs/configuration.md`.
+
 ## What this does not change
 
 The decoupling is transport only. The browser client (`src/main.js`) still talks to the bridge over the `/nvim` WebSocket and cannot tell whether the bridge reached nvim over stdio or a socket. Buffer-sync, cursor, cmdline mirror, active buffer following: all unchanged. See `docs/state-ownership-and-the-tmux-analogy.md` for the state ownership model this builds on.

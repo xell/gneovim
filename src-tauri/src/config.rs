@@ -103,6 +103,14 @@ pub struct Window {
     /// "nvim-tab" falls back to "window" when there is no gui-window to receive
     /// the file. An unrecognised value logs a warning and uses "window".
     pub open_files_in: Option<String>,
+
+    /// Keyboard shortcut that opens, or brings to the front, the always-on-top
+    /// window (see `docs/configuration.md`). Global: it fires even while
+    /// gneovim is not the active app. macOS only. Modifier names joined by
+    /// "+", ending in one key name: cmd/command, ctrl/control, alt/option,
+    /// shift, e.g. "cmd+ctrl+space" (the default) or "cmd+alt+shift+a". An
+    /// unrecognised value logs a warning and falls back to the default.
+    pub always_on_top_shortcut: Option<String>,
 }
 
 impl Default for Window {
@@ -111,8 +119,43 @@ impl Default for Window {
             confirm_quit: true,
             confirm_close: true,
             open_files_in: None,
+            always_on_top_shortcut: None,
         }
     }
+}
+
+/// A parsed `[window] always_on_top_shortcut`: modifiers plus one key name,
+/// lowercased (e.g. "space", "a", "f1"). Platform-specific code maps `key` to
+/// its own key-code table; this stays platform-neutral.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shortcut {
+    pub cmd: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub key: String,
+}
+
+const DEFAULT_AOT_SHORTCUT: &str = "cmd+ctrl+space";
+
+/// Parses "cmd+ctrl+space" style strings: modifier names (cmd/command,
+/// ctrl/control, alt/option, shift), '+'-joined, ending in exactly one key
+/// name. Case-insensitive. `None` for an empty string, a string with no key
+/// token, or an unrecognised modifier.
+fn parse_shortcut(s: &str) -> Option<Shortcut> {
+    let parts: Vec<&str> = s.split('+').map(str::trim).filter(|p| !p.is_empty()).collect();
+    let (key, mods) = parts.split_last()?;
+    let mut sc = Shortcut { cmd: false, ctrl: false, alt: false, shift: false, key: key.to_ascii_lowercase() };
+    for m in mods {
+        match m.to_ascii_lowercase().as_str() {
+            "cmd" | "command" => sc.cmd = true,
+            "ctrl" | "control" => sc.ctrl = true,
+            "alt" | "option" => sc.alt = true,
+            "shift" => sc.shift = true,
+            _ => return None,
+        }
+    }
+    Some(sc)
 }
 
 /// Resolved value of `[window] open_files_in`.
@@ -141,6 +184,27 @@ impl Window {
                 OpenTarget::Window
             }
         }
+    }
+
+    /// Resolved `always_on_top_shortcut`, defaulting to "cmd+ctrl+space" when
+    /// unset, empty, or unparsable (a bad value logs a warning first).
+    pub fn always_on_top_shortcut(&self) -> Shortcut {
+        let raw = self
+            .always_on_top_shortcut
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(raw) = raw {
+            if let Some(sc) = parse_shortcut(raw) {
+                return sc;
+            }
+            log::warn!(
+                "config: [window] always_on_top_shortcut = {raw:?} is not a valid shortcut \
+                 (modifier names joined by \"+\", ending in a key, e.g. \"cmd+ctrl+space\"); \
+                 using the default"
+            );
+        }
+        parse_shortcut(DEFAULT_AOT_SHORTCUT).expect("default shortcut parses")
     }
 }
 
@@ -360,6 +424,44 @@ mod tests {
             args: Some("--clean  +startinsert".into()),
         };
         assert_eq!(some.extra_args(), vec!["--clean", "+startinsert"]);
+    }
+
+    #[test]
+    fn always_on_top_shortcut_defaults() {
+        let w = Window::default();
+        let sc = w.always_on_top_shortcut();
+        assert!(sc.cmd && sc.ctrl && !sc.alt && !sc.shift);
+        assert_eq!(sc.key, "space");
+    }
+
+    #[test]
+    fn always_on_top_shortcut_parses_config() {
+        let mk = |s: &str| {
+            toml::from_str::<Config>(&format!("[window]\nalways_on_top_shortcut = \"{s}\"\n"))
+                .unwrap()
+                .window
+                .always_on_top_shortcut()
+        };
+        let sc = mk("cmd+alt+shift+a");
+        assert!(sc.cmd && sc.alt && sc.shift && !sc.ctrl);
+        assert_eq!(sc.key, "a");
+        let sc = mk("Command+Control+Space");
+        assert!(sc.cmd && sc.ctrl);
+        assert_eq!(sc.key, "space");
+    }
+
+    #[test]
+    fn always_on_top_shortcut_falls_back_on_bad_value() {
+        let mk = |s: &str| {
+            toml::from_str::<Config>(&format!("[window]\nalways_on_top_shortcut = \"{s}\"\n"))
+                .unwrap()
+                .window
+                .always_on_top_shortcut()
+        };
+        // unknown modifier, and no key at all: both fall back to the default.
+        assert_eq!(mk("cmd+bogus+a"), Window::default().always_on_top_shortcut());
+        assert_eq!(mk("++"), Window::default().always_on_top_shortcut());
+        assert_eq!(mk(""), Window::default().always_on_top_shortcut());
     }
 
     #[test]

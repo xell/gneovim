@@ -83,6 +83,10 @@ All three variables are gneovim's output, not input. Setting one directly does n
 
 Gneovim's own version string, for configuration that needs to branch on a minimum version.
 
+### `g:gneovim_aot_window`
+
+`true` in the one Neovim instance embedded by the always-on-top window (`File > New Always On Top Window`, or its keyboard shortcut; see `configuration.md`), unset in every other gneovim window. Since a gui-window is one whole embedded Neovim process, this is a global rather than a window variable: it does not vary between splits or tabpages within that instance.
+
 ## `config.toml` options
 
 Every key is optional; see `configuration.md` for the file's location, reload policy, and behaviour detail. Listed here purely for a single at-a-glance reference of what exists and what it defaults to.
@@ -104,6 +108,7 @@ Every key is optional; see `configuration.md` for the file's location, reload po
 - `confirm_quit` (bool, `true`) — confirm before Cmd+Q quits the app.
 - `confirm_close` (bool, `true`) — confirm before Cmd+W closes a gui-window or gui-tab.
 - `open_files_in` (string, `"window"`) — where an externally opened file lands: `"window"`, `"tab"`, or `"nvim-tab"`.
+- `always_on_top_shortcut` (string, `"cmd+ctrl+space"`) — global keyboard shortcut that opens, or brings to the front, the always-on-top window (`File > New Always On Top Window`); see `g:gneovim_aot_window` above.
 
 ### `[markdown]`
 

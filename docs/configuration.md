@@ -63,6 +63,13 @@ confirm_close = true
 # Neovim tabpages in the one window.
 open_files_in = "window"
 
+# Keyboard shortcut that opens, or brings to the front, the always-on-top
+# window (see "Always-on-top window" below). Works even while gneovim is not
+# the active app. macOS only. Modifier names joined by "+", ending in a key
+# name: cmd/command, ctrl/control, alt/option, shift. An unrecognised value
+# logs a warning and falls back to the default.
+always_on_top_shortcut = "cmd+ctrl+space"
+
 [markdown]
 # Whether a filetype=markdown window renders as a CodeMirror live-preview
 # island by default. Overridable per window at runtime (see below). Default
@@ -189,6 +196,38 @@ Each works only when the current window's `filetype` is `markdown` and
 `w:gnv_md_preview` is `1` (an active live-preview island); otherwise it warns
 and does nothing. There is no bang form and no per-window state to read back,
 unlike the live-preview, Grammarly, and optimal-width flags above.
+
+## Always-on-top window
+
+**File > New Always On Top Window**, or the `[window] always_on_top_shortcut`
+keyboard shortcut (default `cmd+ctrl+space`), opens a gui-window like any
+other (its own Neovim, `Cmd+N`'s equal) except it is pinned above every other
+window, via Tauri's own always-on-top window support. Always-on-top is
+independent of visibility: `Cmd+H` still hides it along with the rest of the
+app.
+
+Only one such window exists at a time:
+
+- While it is open, the menu item is greyed out and the shortcut does not
+  create a second one. Instead, the shortcut brings the existing window to
+  the front, unhiding the app first if `Cmd+H` had hidden it.
+- Closing it re-enables the menu item and frees the shortcut to create a new
+  one.
+- Its size and position are remembered (macOS's own window-frame autosave) and
+  restored the next time it opens, including across an app restart.
+
+Its embedded Neovim carries `g:gneovim_aot_window = true` (unset in every
+other gneovim window), so an `init.lua` or script can branch on running inside
+it; see `neovim-api-surface.md`. Being pinned above other windows also takes
+it out of `Cmd+\``'s window cycling, which macOS limits to normal-level
+windows; the same as any other floating-level window in any Mac app.
+
+The shortcut is a global (Carbon) hot key, registered once at startup and
+never released, so it fires even while gneovim is not the active app. The
+format is modifier names joined by `+`, ending in one key name:
+`cmd`/`command`, `ctrl`/`control`, `alt`/`option`, `shift`, e.g. `cmd+ctrl+space`
+or `cmd+alt+shift+a`. macOS only; an unrecognised value logs a warning and
+falls back to the default.
 
 ## Closing and quitting
 

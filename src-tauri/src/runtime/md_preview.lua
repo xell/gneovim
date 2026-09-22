@@ -1,6 +1,7 @@
 -- Injected into every embedded nvim by `bridge::connect` (nvim.exec_lua).
 -- NOT a user plugin: it is GUI protocol glue and must match the Rust
--- `handle_notify` / `BridgeEvent` contract. Args: (channel, default, version).
+-- `handle_notify` / `BridgeEvent` contract. Args: (channel, default, version,
+-- grammarly_default, optimal_width_default, aot_window).
 --
 --   :MarkdownLivePreviewOn / Off / Toggle    current window
 --   :MarkdownLivePreviewOn! / ...             every markdown window in the tab
@@ -22,11 +23,18 @@
 -- (0 or 1) likewise: when 1, the island's text column is capped and centred
 -- instead of filling the window. The three :MarkdownFont* commands carry no
 -- window variable of their own; see md_font_command below.
+--
+-- `g:gneovim_aot_window` is `true` in the one nvim embedded by the
+-- always-on-top window (see `docs/configuration.md`), unset in every other
+-- gneovim window.
 
-local chan, default, version, grammarly_default, optimal_width_default = ...
+local chan, default, version, grammarly_default, optimal_width_default, aot_window = ...
 
 vim.g.gneovim = true
 vim.g.gneovim_version = version
+if aot_window == 1 then
+  vim.g.gneovim_aot_window = true
+end
 do
   local mj, mn, pt = tostring(version):match('(%d+)%.(%d+)%.(%d+)')
   pcall(

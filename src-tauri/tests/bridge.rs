@@ -43,7 +43,7 @@ async fn island_round_trip() {
         }
     });
 
-    let (b, _child) = bridge::connect(tx, Default::default()).await.expect("connect");
+    let (b, _child) = bridge::connect(tx, Default::default(), false).await.expect("connect");
     b.ui_start(120, 40).await.expect("ui_start");
     b.input(":edit /tmp/gnv-island-test.md\r").await.unwrap();
     // User configs are intentionally loaded by connect(); make the fixture

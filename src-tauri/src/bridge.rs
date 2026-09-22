@@ -1019,6 +1019,7 @@ pub struct Bridge {
 pub async fn connect(
     tx: UnboundedSender<BridgeEvent>,
     open: OpenSpec,
+    always_on_top: bool,
 ) -> Result<(Bridge, Child), String> {
     let bin = find_nvim().await;
     let nv = &crate::config::get().neovim;
@@ -1197,6 +1198,7 @@ pub async fn connect(
         let grammarly_default: i64 = crate::config::get().markdown.grammarly_default.into();
         let optimal_width_default: i64 =
             crate::config::get().markdown.optimal_width_default.into();
+        let aot_window: i64 = always_on_top.into();
         if let Err(e) = nvim
             .exec_lua(
                 include_str!("runtime/md_preview.lua"),
@@ -1206,6 +1208,7 @@ pub async fn connect(
                     env!("CARGO_PKG_VERSION").into(),
                     grammarly_default.into(),
                     optimal_width_default.into(),
+                    aot_window.into(),
                 ],
             )
             .await

@@ -29,7 +29,14 @@ struct AppState {
     /// harmless window and say nothing about it. Cleared once the window is
     /// destroyed.
     failed: Mutex<HashMap<String, String>>,
+    /// Label of the one always-on-top window, while it exists. `None` means
+    /// the shortcut / menu item should create one instead of focusing it.
+    aot_window: Mutex<Option<String>>,
 }
+
+/// The File menu's "New Always On Top Window" item, greyed out while
+/// `AppState::aot_window` is occupied. Set once in `build_menu`.
+static AOT_MENU_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
 
 struct WindowBridge {
     bridge: Bridge,
@@ -443,6 +450,189 @@ mod lookup_hotkey {
     }
 }
 
+/// `[window] always_on_top_shortcut`'s global hot key. Unlike
+/// `lookup_hotkey`, this stays registered for the whole process lifetime,
+/// regardless of window focus: it must fire even while gneovim is not the
+/// active app, which is exactly what a Carbon application hot key already
+/// does (it is `lookup_hotkey` that additionally chooses to release its
+/// binding on blur, not a limitation of the mechanism itself).
+#[cfg(target_os = "macos")]
+mod always_on_top_hotkey {
+    use std::ffi::c_void;
+    use std::ptr;
+    use std::sync::OnceLock;
+
+    use tauri::AppHandle;
+
+    use crate::config::Shortcut;
+
+    const NO_ERR: i32 = 0;
+    const CMD_KEY: u32 = 1 << 8;
+    const SHIFT_KEY: u32 = 1 << 9;
+    const OPTION_KEY: u32 = 1 << 11;
+    const CONTROL_KEY: u32 = 1 << 12;
+    const EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
+    const EVENT_HOT_KEY_PRESSED: u32 = 6;
+    const AOT_HOTKEY_ID: u32 = 1;
+    const AOT_SIGNATURE: u32 = u32::from_be_bytes(*b"gnvA");
+
+    #[repr(C)]
+    struct EventTypeSpec {
+        event_class: u32,
+        event_kind: u32,
+    }
+
+    #[repr(C)]
+    struct EventHotKeyId {
+        signature: u32,
+        id: u32,
+    }
+
+    type EventHandlerCallRef = *mut c_void;
+    type EventRef = *mut c_void;
+    type EventHandlerRef = *mut c_void;
+    type EventHotKeyRef = *mut c_void;
+    type EventTargetRef = *mut c_void;
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        fn GetApplicationEventTarget() -> EventTargetRef;
+        fn InstallEventHandler(
+            target: EventTargetRef,
+            handler: extern "C" fn(EventHandlerCallRef, EventRef, *mut c_void) -> i32,
+            num_types: u32,
+            types: *const EventTypeSpec,
+            user_data: *mut c_void,
+            handler_ref: *mut EventHandlerRef,
+        ) -> i32;
+        fn RegisterEventHotKey(
+            key_code: u32,
+            modifiers: u32,
+            hot_key_id: EventHotKeyId,
+            target: EventTargetRef,
+            options: u32,
+            hot_key_ref: *mut EventHotKeyRef,
+        ) -> i32;
+    }
+
+    static APP: OnceLock<AppHandle> = OnceLock::new();
+
+    extern "C" fn handle_hotkey(
+        _next: EventHandlerCallRef,
+        _event: EventRef,
+        _user_data: *mut c_void,
+    ) -> i32 {
+        // No `isActive()` gate, unlike `lookup_hotkey`: this shortcut is
+        // meant to reach the app precisely when it is *not* active.
+        if let Some(app) = APP.get() {
+            super::open_or_focus_aot_window(app);
+        }
+        NO_ERR
+    }
+
+    /// macOS virtual key codes (`HIToolbox/Events.h`) for the key names our
+    /// config format accepts: letters, digits, space, arrows, function keys,
+    /// and a handful of named keys. `None` for anything else (an unknown key
+    /// name logs a warning at the call site and the shortcut is left
+    /// unregistered).
+    fn vk_code(key: &str) -> Option<u32> {
+        Some(match key {
+            "a" => 0x00, "s" => 0x01, "d" => 0x02, "f" => 0x03, "h" => 0x04,
+            "g" => 0x05, "z" => 0x06, "x" => 0x07, "c" => 0x08, "v" => 0x09,
+            "b" => 0x0B, "q" => 0x0C, "w" => 0x0D, "e" => 0x0E, "r" => 0x0F,
+            "y" => 0x10, "t" => 0x11, "1" => 0x12, "2" => 0x13, "3" => 0x14,
+            "4" => 0x15, "6" => 0x16, "5" => 0x17, "equal" | "=" => 0x18,
+            "9" => 0x19, "7" => 0x1A, "minus" | "-" => 0x1B, "8" => 0x1C,
+            "0" => 0x1D, "rightbracket" | "]" => 0x1E, "o" => 0x1F, "u" => 0x20,
+            "leftbracket" | "[" => 0x21, "i" => 0x22, "p" => 0x23,
+            "return" | "enter" => 0x24, "l" => 0x25, "j" => 0x26,
+            "quote" | "'" => 0x27, "k" => 0x28, "semicolon" | ";" => 0x29,
+            "backslash" | "\\" => 0x2A, "comma" | "," => 0x2B, "slash" | "/" => 0x2C,
+            "n" => 0x2D, "m" => 0x2E, "period" | "." => 0x2F,
+            "tab" => 0x30, "space" => 0x31, "grave" | "`" => 0x32,
+            "delete" | "backspace" => 0x33, "escape" | "esc" => 0x35,
+            "f1" => 0x7A, "f2" => 0x78, "f3" => 0x63, "f4" => 0x76,
+            "f5" => 0x60, "f6" => 0x61, "f7" => 0x62, "f8" => 0x64,
+            "f9" => 0x65, "f10" => 0x6D, "f11" => 0x67, "f12" => 0x6F,
+            "home" => 0x73, "end" => 0x77, "pageup" => 0x74, "pagedown" => 0x79,
+            "forwarddelete" => 0x75,
+            "left" => 0x7B, "right" => 0x7C, "down" => 0x7D, "up" => 0x7E,
+            _ => return None,
+        })
+    }
+
+    fn carbon_modifiers(sc: &Shortcut) -> u32 {
+        let mut m = 0;
+        if sc.cmd {
+            m |= CMD_KEY;
+        }
+        if sc.ctrl {
+            m |= CONTROL_KEY;
+        }
+        if sc.alt {
+            m |= OPTION_KEY;
+        }
+        if sc.shift {
+            m |= SHIFT_KEY;
+        }
+        m
+    }
+
+    pub(super) fn install(app: AppHandle) {
+        let sc = crate::config::get().window.always_on_top_shortcut();
+        let Some(key_code) = vk_code(&sc.key) else {
+            log::warn!(
+                "always-on-top: {:?} in [window] always_on_top_shortcut is not a key this \
+                 build recognises; the shortcut is disabled",
+                sc.key
+            );
+            return;
+        };
+        let modifiers = carbon_modifiers(&sc);
+
+        APP.set(app).expect("always-on-top hot key installed twice");
+        let event = EventTypeSpec {
+            event_class: EVENT_CLASS_KEYBOARD,
+            event_kind: EVENT_HOT_KEY_PRESSED,
+        };
+        let mut handler = ptr::null_mut();
+        let status = unsafe {
+            InstallEventHandler(
+                GetApplicationEventTarget(),
+                handle_hotkey,
+                1,
+                &event,
+                ptr::null_mut(),
+                &mut handler,
+            )
+        };
+        if status != NO_ERR {
+            log::warn!("always-on-top: could not install hot-key handler (status {status})");
+            return;
+        }
+
+        let mut hotkey = ptr::null_mut();
+        let status = unsafe {
+            RegisterEventHotKey(
+                key_code,
+                modifiers,
+                EventHotKeyId {
+                    signature: AOT_SIGNATURE,
+                    id: AOT_HOTKEY_ID,
+                },
+                GetApplicationEventTarget(),
+                0,
+                &mut hotkey,
+            )
+        };
+        if status != NO_ERR {
+            log::warn!("always-on-top: could not register global shortcut (status {status})");
+            return;
+        }
+        log::info!("always-on-top: global shortcut installed");
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Unsaved-changes guard for Cmd+W / Cmd+Q
@@ -725,10 +915,43 @@ fn guard_exit(app: &AppHandle) {
     });
 }
 
+/// Fixed name macOS uses to save/restore the always-on-top window's frame
+/// (`NSWindow` autosave, in the user defaults database) across app launches.
+/// One name is correct because only one such window ever exists at a time.
+#[cfg(target_os = "macos")]
+const AOT_FRAME_AUTOSAVE_NAME: &str = "gnv-always-on-top";
+
+/// Restore `win`'s frame from a previous run under `name` if one was saved,
+/// then keep saving it there on every future move/resize. Must run on the
+/// main thread, before the window is shown, so a restored frame does not
+/// visibly jump from the builder's default size/position.
+#[cfg(target_os = "macos")]
+fn restore_and_autosave_frame(win: &tauri::WebviewWindow, name: &str) {
+    use objc2_app_kit::NSWindow;
+    use objc2_foundation::NSString;
+
+    let Ok(ptr) = win.ns_window() else { return };
+    if ptr.is_null() {
+        return;
+    }
+    let ns_window = unsafe { &*(ptr as *const NSWindow) };
+    let name = NSString::from_str(name);
+    ns_window.setFrameUsingName(&name);
+    ns_window.setFrameAutosaveName(&name);
+}
+
 /// Create a gui-window with its own nvim. `as_tab` adds it to the focused
 /// window's tab group (macOS); otherwise it is a standalone window. `open`
 /// carries any files / text the new nvim should load (`:OpenInNewGneovimTab`).
-fn spawn_window(app: &AppHandle, as_tab: bool, open: OpenSpec) -> Option<String> {
+/// `always_on_top` pins it above other windows (Tauri's own API; see
+/// `open_or_focus_aot_window`) and, on macOS, restores its remembered frame
+/// instead of the usual default size.
+fn spawn_window(
+    app: &AppHandle,
+    as_tab: bool,
+    open: OpenSpec,
+    always_on_top: bool,
+) -> Option<String> {
     let _ = as_tab;
     #[cfg(target_os = "macos")]
     let parent: Option<tauri::WebviewWindow> = if as_tab {
@@ -748,11 +971,12 @@ fn spawn_window(app: &AppHandle, as_tab: bool, open: OpenSpec) -> Option<String>
     let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
         .title("gneovim")
         .inner_size(1100.0, 750.0)
-        .min_inner_size(480.0, 360.0);
+        .min_inner_size(480.0, 360.0)
+        .always_on_top(always_on_top);
     #[cfg(target_os = "macos")]
     let builder = builder
         .tabbing_identifier("gneovim")
-        .visible(!as_tab)
+        .visible(!as_tab && !always_on_top)
         .title_bar_style(tauri::TitleBarStyle::Overlay);
 
     let win = match builder.build() {
@@ -763,9 +987,9 @@ fn spawn_window(app: &AppHandle, as_tab: bool, open: OpenSpec) -> Option<String>
         }
     };
 
-    // The macOS tab grouping must run on the main thread; `spawn_window` is
-    // also reached from worker threads (file-association `open_paths`, the
-    // `OpenNewTab` bridge event).
+    // The macOS tab grouping / frame restore must run on the main thread;
+    // `spawn_window` is also reached from worker threads (file-association
+    // `open_paths`, the `OpenNewTab` bridge event).
     #[cfg(target_os = "macos")]
     {
         let w = win.clone();
@@ -784,18 +1008,22 @@ fn spawn_window(app: &AppHandle, as_tab: bool, open: OpenSpec) -> Option<String>
                         let _ = w.show();
                     }
                 }
+            } else if always_on_top {
+                restore_and_autosave_frame(&w, AOT_FRAME_AUTOSAVE_NAME);
+                let _ = w.show();
             }
         });
     }
 
-    spawn_bridge(app.clone(), label.clone(), open);
+    spawn_bridge(app.clone(), label.clone(), open, always_on_top);
     Some(label)
 }
 
 /// Connect a fresh nvim for `label` and stream its events to that window alone.
 /// `open` is forwarded to [`bridge::connect`] so the new nvim boots with the
-/// requested files / text loaded.
-fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec) {
+/// requested files / text loaded. `always_on_top` is forwarded too, so that
+/// nvim's own `g:gneovim_aot_window` matches the gui-window it is running in.
+fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec, always_on_top: bool) {
     let (ready_tx, ready_rx) = tokio::sync::watch::channel(None);
     app.state::<AppState>()
         .readiness
@@ -836,7 +1064,7 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec) {
                     BridgeEvent::OpenNewTab { paths, content } => {
                         let tab_app = emit_app.clone();
                         emit_app.run_on_main_thread(move || {
-                            spawn_window(&tab_app, true, OpenSpec { paths, content });
+                            spawn_window(&tab_app, true, OpenSpec { paths, content }, false);
                         })
                     }
                     BridgeEvent::Gone(reason) => {
@@ -877,7 +1105,7 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec) {
             }
         });
 
-        match bridge::connect(tx, open).await {
+        match bridge::connect(tx, open, always_on_top).await {
             Ok((bridge, child)) => {
                 app.state::<AppState>().windows.lock().unwrap().insert(
                     label.clone(),
@@ -1237,13 +1465,13 @@ async fn tabbar_visible(app: AppHandle, window: tauri::Window) -> bool {
 
 #[tauri::command]
 async fn new_window(app: AppHandle) -> Result<(), String> {
-    spawn_window(&app, false, OpenSpec::default());
+    spawn_window(&app, false, OpenSpec::default(), false);
     Ok(())
 }
 
 #[tauri::command]
 async fn new_tab(app: AppHandle) -> Result<(), String> {
-    spawn_window(&app, true, OpenSpec::default());
+    spawn_window(&app, true, OpenSpec::default(), false);
     Ok(())
 }
 
@@ -1257,6 +1485,19 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         true,
         Some("CmdOrCtrl+N"),
     )?;
+    // No accelerator here: the actual shortcut is a global Carbon hot key
+    // (`always_on_top_hotkey`), registered independently of app focus so it
+    // also works while gneovim is not the active app, which a plain NSMenu
+    // key equivalent cannot do. Giving this item the same accelerator too
+    // would risk firing both while gneovim is focused.
+    let aot_window = MenuItem::with_id(
+        app,
+        "gnv:new_aot_window",
+        "New Always On Top Window",
+        true,
+        Option::<&str>::None,
+    )?;
+    let _ = AOT_MENU_ITEM.set(aot_window.clone());
     let new_tab = MenuItem::with_id(app, "gnv:new_tab", "New Tab", true, Some("CmdOrCtrl+T"))?;
     let sep = PredefinedMenuItem::separator(app)?;
 
@@ -1304,7 +1545,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         }
         match sub.text().as_deref() {
             Ok("File") => {
-                sub.insert_items(&[&new_window, &new_tab, &sep], 0)?;
+                sub.insert_items(&[&new_window, &aot_window, &new_tab, &sep], 0)?;
             }
             Ok("Edit") => {
                 for it in sub.items()? {
@@ -1326,6 +1567,40 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         }
     }
     Ok(menu)
+}
+
+/// Open the one-at-a-time always-on-top window, or bring the existing one
+/// forward if there already is one. Always-on-top is independent of
+/// visibility: `Cmd+H` can still hide the whole app, so bringing it forward
+/// also unhides the app first. Reached from both the File menu item and the
+/// global keyboard shortcut, always on the main thread (a menu action, or the
+/// Carbon hot-key callback, which macOS itself delivers on the main thread).
+fn open_or_focus_aot_window(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let existing = state.aot_window.lock().unwrap().clone();
+    if let Some(win) = existing.and_then(|l| app.get_webview_window(&l)) {
+        #[cfg(target_os = "macos")]
+        {
+            use objc2::MainThreadMarker;
+            use objc2_app_kit::NSApplication;
+            let mtm = MainThreadMarker::new().expect("always-on-top shortcut off the main thread");
+            let ns_app = NSApplication::sharedApplication(mtm);
+            ns_app.unhide(None);
+            ns_app.activate();
+        }
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+
+    let Some(label) = spawn_window(app, false, OpenSpec::default(), true) else {
+        return;
+    };
+    *state.aot_window.lock().unwrap() = Some(label);
+    if let Some(item) = AOT_MENU_ITEM.get() {
+        let _ = item.set_enabled(false);
+    }
 }
 
 /// Run `f` against the focused (or last-focused) window's bridge, off the menu
@@ -1393,7 +1668,7 @@ async fn open_paths(app: AppHandle, paths: Vec<String>) {
     // "tab" -> each file a new gui-tab; "window" (default) -> each a new window.
     let as_tab = crate::config::get().window.open_target() == OpenTarget::Tab;
     for path in paths {
-        let Some(label) = spawn_window(&app, as_tab, OpenSpec::default()) else {
+        let Some(label) = spawn_window(&app, as_tab, OpenSpec::default(), false) else {
             continue;
         };
         if let Ok(b) = bridge_for(&app, &label).await {
@@ -1441,10 +1716,13 @@ pub fn run() {
         .menu(|handle| build_menu(handle))
         .on_menu_event(|app, event| match event.id().as_ref() {
             "gnv:new_window" => {
-                spawn_window(app, false, OpenSpec::default());
+                spawn_window(app, false, OpenSpec::default(), false);
+            }
+            "gnv:new_aot_window" => {
+                open_or_focus_aot_window(app);
             }
             "gnv:new_tab" => {
-                spawn_window(app, true, OpenSpec::default());
+                spawn_window(app, true, OpenSpec::default(), false);
             }
             "gnv:copy" => focused_bridge(app, |b| async move { b.clip_yank(false).await }),
             "gnv:cut" => focused_bridge(app, |b| async move { b.clip_yank(true).await }),
@@ -1484,6 +1762,13 @@ pub fn run() {
                     state.windows.lock().unwrap().remove(window.label());
                     state.readiness.lock().unwrap().remove(window.label());
                     state.failed.lock().unwrap().remove(window.label());
+                    let mut aot = state.aot_window.lock().unwrap();
+                    if aot.as_deref() == Some(window.label()) {
+                        *aot = None;
+                        if let Some(item) = AOT_MENU_ITEM.get() {
+                            let _ = item.set_enabled(true);
+                        }
+                    }
                     log::info!("window {} closed", window.label());
                 }
                 // Closing one tab can drop its former group back to a single
@@ -1513,12 +1798,13 @@ pub fn run() {
             _ => {}
         })
         .setup(|app| {
-            spawn_bridge(app.handle().clone(), "main".to_string(), OpenSpec::default());
+            spawn_bridge(app.handle().clone(), "main".to_string(), OpenSpec::default(), false);
             #[cfg(target_os = "macos")]
             {
                 install_native_shortcut_monitor();
                 webview_accessibility::install();
                 lookup_hotkey::install(app.handle().clone());
+                always_on_top_hotkey::install(app.handle().clone());
             }
             Ok(())
         })
