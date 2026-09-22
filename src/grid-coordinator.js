@@ -120,7 +120,10 @@ export class GridCoordinator {
           this.onModeInfo(!!op.enabled);
           break;
         case "title":
-          this.onTitle(op.title || "gneovim");
+          // Neovim sends an empty string for `:set notitle`, distinct from
+          // never having sent a title op at all; only the latter should
+          // fall back to the app default.
+          this.onTitle(op.title ?? "gneovim");
           break;
         case "flush":
           break;

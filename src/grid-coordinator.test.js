@@ -102,4 +102,11 @@ describe("GridCoordinator", () => {
     expect(callbacks.onHighlight).toHaveBeenCalledWith(3, { bold: true });
     expect(callbacks.onTitle).toHaveBeenCalledWith("notes.md");
   });
+
+  it("passes through the empty title Neovim sends for :set notitle", () => {
+    const { callbacks, coordinator } = fixture();
+    coordinator.render([{ op: "title", title: "" }]);
+
+    expect(callbacks.onTitle).toHaveBeenCalledWith("");
+  });
 });

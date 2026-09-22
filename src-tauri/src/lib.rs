@@ -753,8 +753,7 @@ fn spawn_window(app: &AppHandle, as_tab: bool, open: OpenSpec) -> Option<String>
     let builder = builder
         .tabbing_identifier("gneovim")
         .visible(!as_tab)
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true);
+        .title_bar_style(tauri::TitleBarStyle::Overlay);
 
     let win = match builder.build() {
         Ok(w) => w,

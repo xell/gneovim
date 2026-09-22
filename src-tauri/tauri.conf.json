@@ -21,8 +21,7 @@
         "resizable": true,
         "fullscreen": false,
         "tabbingIdentifier": "gneovim",
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "titleBarStyle": "Overlay"
       }
     ],
     "security": {
