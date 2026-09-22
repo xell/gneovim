@@ -272,16 +272,36 @@ local HEAD_MARKER_LEVEL = {
 -- next row is actually a new sibling item) -- last_row(er, ec), used below
 -- for heads/codes/quotes, cannot be trusted for list content the way it can
 -- for those simpler, single-shot block kinds.
+--
+-- A row's probe column has to clear any leading block-quote markers first,
+-- not just whitespace: inside a `> ` prefix, column 0 is real text (the
+-- '>' itself), not indentation, so a plain leading-whitespace count lands
+-- short and probes into the quote marker (or a per-row `block_continuation`
+-- standing in for it) instead of the list content that actually starts
+-- after it -- wrong node, wrong list_item ancestry, wrong depth.
+local function first_content_col(text)
+  local col = 0
+  while true do
+    local marker = text:sub(col + 1):match('^%s*>%s?')
+    if not marker then
+      break
+    end
+    col = col + #marker
+  end
+  col = col + #text:sub(col + 1):match('^%s*')
+  if col >= #text then
+    col = math.max(#text - 1, 0)
+  end
+  return col
+end
+
 local function collect_list_depths(buf, root, first, last)
   local lists = {}
   pcall(function()
     local lines = vim.api.nvim_buf_get_lines(buf, first, last + 1, false)
     for i, text in ipairs(lines) do
       local row = first + i - 1
-      local col = math.max(#text:match('^%s*'), 0)
-      if col >= #text then
-        col = math.max(#text - 1, 0)
-      end
+      local col = first_content_col(text)
       local node = root:descendant_for_range(row, col, row, col)
       local depth = -1
       while node do

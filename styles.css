@@ -290,8 +290,9 @@ body {
   background: color-mix(in srgb, var(--fg) 6%, transparent);
 }
 .island .cm-blockquote {
+  --quote-indent: 0.8em;
   border-left: 3px solid color-mix(in srgb, var(--fg) 30%, transparent);
-  padding-left: 0.8em;
+  padding-left: var(--quote-indent);
   color: color-mix(in srgb, var(--fg) 75%, transparent);
 }
 /* '---' divider: the literal text stays on-screen (untouched, so search /
@@ -337,6 +338,20 @@ body {
     var(--list-indent-base, 2em) + (var(--list-depth) + 1) * var(--list-indent-step, 1.3em)
   );
 }
+/* A list row that's also a block-quote row (a list living inside a quote)
+   already gets its "clear the raw island edge" clearance from the quote
+   itself (border-left + padding-left: var(--quote-indent), above) -- the
+   exact job --list-indent-base does for an unquoted top-level list.
+   Stacking the list's own base on top of the quote's double-counts that
+   clearance, so every depth (not just depth 0) ends up a full extra
+   --list-indent-base past where it should sit. Overriding the base to the
+   quote's own indent instead means every formula that already reads
+   --list-indent-base -- padding-left above, .cm-list-bullet's left below
+   -- lines up with the quote's own text column for free, with no separate
+   calc to keep in sync. */
+.island .cm-blockquote[class*="cm-list-depth-"] {
+  --list-indent-base: var(--quote-indent, 0.8em);
+}
 .island .cm-list-marker-line {
   text-indent: calc(-1 * var(--list-indent-step, 1.3em));
 }
@@ -348,9 +363,31 @@ body {
    level indents by roughly another marker-width of raw spaces), so the
    nudge back scales off --list-depth too; the two constants below are
    fitted to Leo's own list-authoring convention, not derived from the
-   indent variables above. */
+   indent variables above.
+
+   text-indent, not left/position: this row can also be a .cm-blockquote
+   row, which draws its own border-left directly on this same line box (one
+   segment per row, forming the quote's vertical rule down the whole
+   block). left on a position: relative box shifts the *whole* border box,
+   dragging that one row's border segment out of line with its neighbours
+   -- a good 17px+ jog to the left of the quote's rule, measured against
+   this same stylesheet in a headless DOM check. text-indent only nudges
+   where the line's inline content starts, leaving
+   the border (and padding box) exactly where every other row's sits.
+
+   A row can also be an ordered item's own marker line (cm-list-marker-line
+   above), which already spends text-indent pulling the digits back by one
+   step -- since only one text-indent wins per element, the combined rule
+   below folds that step into the guard-row nudge so an ordered marker's
+   guard row still gets both pull-backs, just added into a single value
+   instead of split across two properties. */
 .island .cm-list-marker-revealed {
-  left: calc(-1.1em - var(--list-depth) * 0.45em);
+  text-indent: calc(-1.1em - var(--list-depth) * 0.45em);
+}
+.island .cm-list-marker-line.cm-list-marker-revealed {
+  text-indent: calc(
+    -1.1em - var(--list-depth) * 0.45em - var(--list-indent-step, 1.3em)
+  );
 }
 .island .cm-list-depth-0 {
   --list-depth: 0;
