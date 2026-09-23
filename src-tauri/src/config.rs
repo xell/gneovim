@@ -111,6 +111,14 @@ pub struct Window {
     /// shift, e.g. "cmd+ctrl+space" (the default) or "cmd+alt+shift+a". An
     /// unrecognised value logs a warning and falls back to the default.
     pub always_on_top_shortcut: Option<String>,
+
+    /// Keyboard shortcut that focuses the frontmost normal (non-always-on-top)
+    /// gui-window (see `docs/configuration.md`). Local: unlike
+    /// `always_on_top_shortcut`, it only fires while gneovim is the active
+    /// app, as a plain menu accelerator. Same format as
+    /// `always_on_top_shortcut`. Default "cmd+shift+j". An unrecognised value
+    /// logs a warning and falls back to the default.
+    pub focus_normal_window_shortcut: Option<String>,
 }
 
 impl Default for Window {
@@ -120,6 +128,7 @@ impl Default for Window {
             confirm_close: true,
             open_files_in: None,
             always_on_top_shortcut: None,
+            focus_normal_window_shortcut: None,
         }
     }
 }
@@ -137,6 +146,7 @@ pub struct Shortcut {
 }
 
 const DEFAULT_AOT_SHORTCUT: &str = "cmd+ctrl+space";
+const DEFAULT_FOCUS_NORMAL_WINDOW_SHORTCUT: &str = "cmd+shift+j";
 
 /// Parses "cmd+ctrl+space" style strings: modifier names (cmd/command,
 /// ctrl/control, alt/option, shift), '+'-joined, ending in exactly one key
@@ -189,23 +199,39 @@ impl Window {
     /// Resolved `always_on_top_shortcut`, defaulting to "cmd+ctrl+space" when
     /// unset, empty, or unparsable (a bad value logs a warning first).
     pub fn always_on_top_shortcut(&self) -> Shortcut {
-        let raw = self
-            .always_on_top_shortcut
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        if let Some(raw) = raw {
-            if let Some(sc) = parse_shortcut(raw) {
-                return sc;
-            }
-            log::warn!(
-                "config: [window] always_on_top_shortcut = {raw:?} is not a valid shortcut \
-                 (modifier names joined by \"+\", ending in a key, e.g. \"cmd+ctrl+space\"); \
-                 using the default"
-            );
-        }
-        parse_shortcut(DEFAULT_AOT_SHORTCUT).expect("default shortcut parses")
+        resolve_shortcut(
+            self.always_on_top_shortcut.as_deref(),
+            "always_on_top_shortcut",
+            DEFAULT_AOT_SHORTCUT,
+        )
     }
+
+    /// Resolved `focus_normal_window_shortcut`, defaulting to "cmd+shift+j"
+    /// when unset, empty, or unparsable (a bad value logs a warning first).
+    pub fn focus_normal_window_shortcut(&self) -> Shortcut {
+        resolve_shortcut(
+            self.focus_normal_window_shortcut.as_deref(),
+            "focus_normal_window_shortcut",
+            DEFAULT_FOCUS_NORMAL_WINDOW_SHORTCUT,
+        )
+    }
+}
+
+/// Shared by every `[window] *_shortcut` key: parse `raw`, or fall back to
+/// `default` (logging a warning naming `field` first) when it is unset,
+/// empty, or unparsable.
+fn resolve_shortcut(raw: Option<&str>, field: &str, default: &str) -> Shortcut {
+    let raw = raw.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(raw) = raw {
+        if let Some(sc) = parse_shortcut(raw) {
+            return sc;
+        }
+        log::warn!(
+            "config: [window] {field} = {raw:?} is not a valid shortcut (modifier names \
+             joined by \"+\", ending in a key, e.g. {default:?}); using the default"
+        );
+    }
+    parse_shortcut(default).expect("default shortcut parses")
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -462,6 +488,33 @@ mod tests {
         assert_eq!(mk("cmd+bogus+a"), Window::default().always_on_top_shortcut());
         assert_eq!(mk("++"), Window::default().always_on_top_shortcut());
         assert_eq!(mk(""), Window::default().always_on_top_shortcut());
+    }
+
+    #[test]
+    fn focus_normal_window_shortcut_defaults() {
+        let w = Window::default();
+        let sc = w.focus_normal_window_shortcut();
+        assert!(sc.cmd && sc.shift && !sc.ctrl && !sc.alt);
+        assert_eq!(sc.key, "j");
+    }
+
+    #[test]
+    fn focus_normal_window_shortcut_parses_config() {
+        let sc = toml::from_str::<Config>("[window]\nfocus_normal_window_shortcut = \"cmd+alt+k\"\n")
+            .unwrap()
+            .window
+            .focus_normal_window_shortcut();
+        assert!(sc.cmd && sc.alt && !sc.shift && !sc.ctrl);
+        assert_eq!(sc.key, "k");
+    }
+
+    #[test]
+    fn focus_normal_window_shortcut_falls_back_on_bad_value() {
+        let sc = toml::from_str::<Config>("[window]\nfocus_normal_window_shortcut = \"cmd+bogus+k\"\n")
+            .unwrap()
+            .window
+            .focus_normal_window_shortcut();
+        assert_eq!(sc, Window::default().focus_normal_window_shortcut());
     }
 
     #[test]

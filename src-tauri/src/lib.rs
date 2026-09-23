@@ -1563,6 +1563,28 @@ async fn new_tab(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Render a parsed `config::Shortcut` as a muda accelerator string
+/// ("Cmd+Shift+J"). muda's own parser accepts our modifier names and key
+/// names directly (case-insensitively), so this is just reassembly, not
+/// translation.
+fn accelerator_string(sc: &config::Shortcut) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if sc.cmd {
+        parts.push("Cmd".into());
+    }
+    if sc.ctrl {
+        parts.push("Ctrl".into());
+    }
+    if sc.alt {
+        parts.push("Alt".into());
+    }
+    if sc.shift {
+        parts.push("Shift".into());
+    }
+    parts.push(sc.key.to_uppercase());
+    parts.join("+")
+}
+
 /// `Menu::default` plus New Window / New Tab in the File submenu.
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::default(app)?;
@@ -1588,6 +1610,23 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let _ = AOT_MENU_ITEM.set(aot_window.clone());
     let new_tab = MenuItem::with_id(app, "gnv:new_tab", "New Tab", true, Some("CmdOrCtrl+T"))?;
     let sep = PredefinedMenuItem::separator(app)?;
+
+    // Local (app-focus-only) shortcut, a plain menu accelerator: unlike the
+    // always-on-top shortcut it has no need to work while gneovim is not
+    // active. It exists because Cmd+` ("Cycle Through Windows") silently
+    // excludes the always-on-top window -- macOS's window cycling only
+    // walks normal-level windows -- and does nothing at all when only one
+    // normal window exists, leaving no keyboard-only way out of the
+    // always-on-top window otherwise.
+    let focus_normal_window = MenuItem::with_id(
+        app,
+        "gnv:focus_normal_window",
+        "Jump to Normal Window",
+        true,
+        Some(accelerator_string(
+            &crate::config::get().window.focus_normal_window_shortcut(),
+        )),
+    )?;
 
     // Edit submenu: the predefined Cut/Copy/Paste/Select All target the webview,
     // which is useless for a grid window. Replace them with items that route to
@@ -1651,6 +1690,9 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                     &look_up,
                 ])?;
             }
+            Ok("Window") => {
+                sub.append_items(&[&PredefinedMenuItem::separator(app)?, &focus_normal_window])?;
+            }
             _ => {}
         }
     }
@@ -1689,6 +1731,34 @@ fn open_or_focus_aot_window(app: &AppHandle) {
     if let Some(item) = AOT_MENU_ITEM.get() {
         let _ = item.set_enabled(false);
     }
+}
+
+/// Focus the frontmost normal (non-always-on-top) gui-window, for
+/// `[window] focus_normal_window_shortcut`'s menu item. "Frontmost" is
+/// best-effort: `last_focused` if it is not itself the always-on-top window,
+/// else any other gui-window there is -- there is no cheaper way to learn
+/// true window z-order, and any normal window is an acceptable answer here
+/// (there is usually only one anyway, in the situation this exists for).
+fn focus_normal_window(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let aot_label = state.aot_window.lock().unwrap().clone();
+    let last_focused = state.last_focused.lock().unwrap().clone();
+    let candidate = last_focused
+        .filter(|l| Some(l) != aot_label.as_ref())
+        .and_then(|l| app.get_webview_window(&l))
+        .or_else(|| {
+            app.webview_windows()
+                .into_iter()
+                .find(|(label, _)| Some(label) != aot_label.as_ref())
+                .map(|(_, w)| w)
+        });
+    let Some(win) = candidate else {
+        log::info!("focus normal window: no normal window to focus");
+        return;
+    };
+    let _ = win.unminimize();
+    let _ = win.show();
+    let _ = win.set_focus();
 }
 
 /// Run `f` against the focused (or last-focused) window's bridge, off the menu
@@ -1808,6 +1878,9 @@ pub fn run() {
             }
             "gnv:new_aot_window" => {
                 open_or_focus_aot_window(app);
+            }
+            "gnv:focus_normal_window" => {
+                focus_normal_window(app);
             }
             "gnv:new_tab" => {
                 spawn_window(app, true, OpenSpec::default(), false);

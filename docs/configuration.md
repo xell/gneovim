@@ -70,6 +70,13 @@ open_files_in = "window"
 # logs a warning and falls back to the default.
 always_on_top_shortcut = "cmd+ctrl+space"
 
+# Keyboard shortcut that focuses the frontmost normal (non-always-on-top)
+# gui-window (see "Always-on-top window" below). Local: unlike
+# always_on_top_shortcut, it only fires while gneovim is the active app, as a
+# plain menu accelerator. Same format as always_on_top_shortcut. An
+# unrecognised value logs a warning and falls back to the default.
+focus_normal_window_shortcut = "cmd+shift+j"
+
 [markdown]
 # Whether a filetype=markdown window renders as a CodeMirror live-preview
 # island by default. Overridable per window at runtime (see below). Default
@@ -220,7 +227,16 @@ Its embedded Neovim carries `g:gneovim_aot_window = true` (unset in every
 other gneovim window), so an `init.lua` or script can branch on running inside
 it; see `neovim-api-surface.md`. Being pinned above other windows also takes
 it out of `Cmd+\``'s window cycling, which macOS limits to normal-level
-windows; the same as any other floating-level window in any Mac app.
+windows; the same as any other floating-level window in any Mac app. With
+only one normal gui-window open, that leaves no keyboard-only way back out of
+the always-on-top window at all once it has focus: `Cmd+\`` does nothing
+(macOS's window cycling is a no-op with fewer than two normal windows,
+regardless of what is currently focused), and the always-on-top shortcut only
+ever brings the always-on-top window itself forward. `[window]
+focus_normal_window_shortcut` (default `cmd+shift+j`) is the way out: a local
+menu accelerator, only active while gneovim itself is the active app, that
+focuses the frontmost normal gui-window (best-effort when more than one
+exists; any one of them otherwise).
 
 The shortcut is a global (Carbon) hot key, registered once at startup and
 never released, so it fires even while gneovim is not the active app. The

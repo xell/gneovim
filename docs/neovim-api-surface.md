@@ -109,6 +109,7 @@ Every key is optional; see `configuration.md` for the file's location, reload po
 - `confirm_close` (bool, `true`) — confirm before Cmd+W closes a gui-window or gui-tab.
 - `open_files_in` (string, `"window"`) — where an externally opened file lands: `"window"`, `"tab"`, or `"nvim-tab"`.
 - `always_on_top_shortcut` (string, `"cmd+ctrl+space"`) — global keyboard shortcut that opens, or brings to the front, the always-on-top window (`File > New Always On Top Window`); see `g:gneovim_aot_window` above.
+- `focus_normal_window_shortcut` (string, `"cmd+shift+j"`) — local (app-focus-only) keyboard shortcut that focuses the frontmost normal (non-always-on-top) gui-window; the way back out when the always-on-top window has focus and `Cmd+\`` has nothing to cycle to.
 
 ### `[markdown]`
 
