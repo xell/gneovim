@@ -321,6 +321,15 @@ mod lookup_hotkey {
     use tauri::{AppHandle, Emitter};
 
     const NO_ERR: i32 = 0;
+    // Returning this (rather than `NO_ERR`) from a handler tells Carbon's
+    // Event Manager to keep walking the handler chain for this target/event
+    // type instead of treating the event as fully handled. Both this module
+    // and `always_on_top_hotkey` install a handler for the same generic
+    // `kEventHotKeyPressed` type on the same application-wide target (there
+    // is no per-hot-key registration granularity), so returning `NO_ERR` for
+    // a press that is not this handler's own would silently swallow it
+    // before the other module's handler ever ran.
+    const EVENT_NOT_HANDLED_ERR: i32 = -9874;
     const KEY_D: u32 = 2;
     const CMD_KEY: u32 = 1 << 8;
     const CONTROL_KEY: u32 = 1 << 12;
@@ -367,16 +376,53 @@ mod lookup_hotkey {
             hot_key_ref: *mut EventHotKeyRef,
         ) -> i32;
         fn UnregisterEventHotKey(hot_key: EventHotKeyRef) -> i32;
+        fn GetEventParameter(
+            event: EventRef,
+            param_name: u32,
+            desired_type: u32,
+            actual_type: *mut u32,
+            buffer_size: usize,
+            actual_size: *mut usize,
+            out_data: *mut c_void,
+        ) -> i32;
     }
+
+    const EVENT_PARAM_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
+    const TYPE_EVENT_HOT_KEY_ID: u32 = u32::from_be_bytes(*b"hkid");
 
     static APP: OnceLock<AppHandle> = OnceLock::new();
     static HOTKEY: Mutex<Option<usize>> = Mutex::new(None);
 
+    /// `InstallEventHandler` targets the whole `kEventHotKeyPressed` event
+    /// type, not one specific hot key: every handler registered for it on
+    /// this target (this one, and `always_on_top_hotkey`'s) is invoked for
+    /// *any* registered hot key press. `GetEventParameter` reads back which
+    /// one actually fired, so each handler can ignore presses that are not
+    /// its own.
+    fn event_matches(event: EventRef, signature: u32, id: u32) -> bool {
+        let mut hotkey_id = EventHotKeyId { signature: 0, id: 0 };
+        let status = unsafe {
+            GetEventParameter(
+                event,
+                EVENT_PARAM_DIRECT_OBJECT,
+                TYPE_EVENT_HOT_KEY_ID,
+                ptr::null_mut(),
+                std::mem::size_of::<EventHotKeyId>(),
+                ptr::null_mut(),
+                &mut hotkey_id as *mut _ as *mut c_void,
+            )
+        };
+        status == NO_ERR && hotkey_id.signature == signature && hotkey_id.id == id
+    }
+
     extern "C" fn handle_lookup(
         _next: EventHandlerCallRef,
-        _event: EventRef,
+        event: EventRef,
         _user_data: *mut c_void,
     ) -> i32 {
+        if !event_matches(event, LOOKUP_SIGNATURE, LOOKUP_HOTKEY_ID) {
+            return EVENT_NOT_HANDLED_ERR;
+        }
         // The registration is application-wide, so do nothing while another
         // application is active. It must not claim this shortcut globally.
         let mtm = MainThreadMarker::new().expect("Carbon invoked off the main thread");
@@ -467,6 +513,11 @@ mod always_on_top_hotkey {
     use crate::config::Shortcut;
 
     const NO_ERR: i32 = 0;
+    // See the matching comment in `lookup_hotkey`: both modules share one
+    // Carbon handler chain for the generic `kEventHotKeyPressed` type, so a
+    // press that is not this handler's own must return this, not `NO_ERR`,
+    // or it is swallowed before the other module's handler ever runs.
+    const EVENT_NOT_HANDLED_ERR: i32 = -9874;
     const CMD_KEY: u32 = 1 << 8;
     const SHIFT_KEY: u32 = 1 << 9;
     const OPTION_KEY: u32 = 1 << 11;
@@ -513,15 +564,52 @@ mod always_on_top_hotkey {
             options: u32,
             hot_key_ref: *mut EventHotKeyRef,
         ) -> i32;
+        fn GetEventParameter(
+            event: EventRef,
+            param_name: u32,
+            desired_type: u32,
+            actual_type: *mut u32,
+            buffer_size: usize,
+            actual_size: *mut usize,
+            out_data: *mut c_void,
+        ) -> i32;
     }
+
+    const EVENT_PARAM_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
+    const TYPE_EVENT_HOT_KEY_ID: u32 = u32::from_be_bytes(*b"hkid");
 
     static APP: OnceLock<AppHandle> = OnceLock::new();
 
+    /// `InstallEventHandler` targets the whole `kEventHotKeyPressed` event
+    /// type, not one specific hot key: every handler registered for it on
+    /// this target (this one, and `lookup_hotkey`'s) is invoked for *any*
+    /// registered hot key press. `GetEventParameter` reads back which one
+    /// actually fired, so each handler can ignore presses that are not its
+    /// own.
+    fn event_matches(event: EventRef, signature: u32, id: u32) -> bool {
+        let mut hotkey_id = EventHotKeyId { signature: 0, id: 0 };
+        let status = unsafe {
+            GetEventParameter(
+                event,
+                EVENT_PARAM_DIRECT_OBJECT,
+                TYPE_EVENT_HOT_KEY_ID,
+                ptr::null_mut(),
+                std::mem::size_of::<EventHotKeyId>(),
+                ptr::null_mut(),
+                &mut hotkey_id as *mut _ as *mut c_void,
+            )
+        };
+        status == NO_ERR && hotkey_id.signature == signature && hotkey_id.id == id
+    }
+
     extern "C" fn handle_hotkey(
         _next: EventHandlerCallRef,
-        _event: EventRef,
+        event: EventRef,
         _user_data: *mut c_void,
     ) -> i32 {
+        if !event_matches(event, AOT_SIGNATURE, AOT_HOTKEY_ID) {
+            return EVENT_NOT_HANDLED_ERR;
+        }
         // No `isActive()` gate, unlike `lookup_hotkey`: this shortcut is
         // meant to reach the app precisely when it is *not* active.
         if let Some(app) = APP.get() {
