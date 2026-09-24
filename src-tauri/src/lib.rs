@@ -1028,6 +1028,27 @@ fn restore_and_autosave_frame(win: &tauri::WebviewWindow, name: &str) {
     ns_window.setFrameAutosaveName(&name);
 }
 
+/// A floating-level window (which `always_on_top` makes this) only follows
+/// its owning app to a different Space by default when that Space already
+/// has one of the app's normal windows open; otherwise it stays behind on
+/// whatever Space last showed it. `CanJoinAllSpaces` is the explicit opt
+/// out, the same flag Spotlight-style overlays use, so the always-on-top
+/// window is reachable from every Space unconditionally. Must run on the
+/// main thread. ORs onto whatever collection behavior tao/AppKit already
+/// set, rather than replacing it outright.
+#[cfg(target_os = "macos")]
+fn join_all_spaces(win: &tauri::WebviewWindow) {
+    use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+
+    let Ok(ptr) = win.ns_window() else { return };
+    if ptr.is_null() {
+        return;
+    }
+    let ns_window = unsafe { &*(ptr as *const NSWindow) };
+    let behavior = ns_window.collectionBehavior() | NSWindowCollectionBehavior::CanJoinAllSpaces;
+    ns_window.setCollectionBehavior(behavior);
+}
+
 /// Create a gui-window with its own nvim. `as_tab` adds it to the focused
 /// window's tab group (macOS); otherwise it is a standalone window. `open`
 /// carries any files / text the new nvim should load (`:OpenInNewGneovimTab`).
@@ -1098,6 +1119,7 @@ fn spawn_window(
                 }
             } else if always_on_top {
                 restore_and_autosave_frame(&w, AOT_FRAME_AUTOSAVE_NAME);
+                join_all_spaces(&w);
                 let _ = w.show();
             }
         });
@@ -1739,21 +1761,45 @@ fn open_or_focus_aot_window(app: &AppHandle) {
 /// else any other gui-window there is -- there is no cheaper way to learn
 /// true window z-order, and any normal window is an acceptable answer here
 /// (there is usually only one anyway, in the situation this exists for).
+/// Whether `win` is on the currently active Space. Always `true` outside
+/// macOS, where every window is trivially "on" the one desktop there is.
+#[cfg(target_os = "macos")]
+fn is_on_active_space(win: &tauri::WebviewWindow) -> bool {
+    use objc2_app_kit::NSWindow;
+
+    let Ok(ptr) = win.ns_window() else { return true };
+    if ptr.is_null() {
+        return true;
+    }
+    unsafe { &*(ptr as *const NSWindow) }.isOnActiveSpace()
+}
+#[cfg(not(target_os = "macos"))]
+fn is_on_active_space(_win: &tauri::WebviewWindow) -> bool {
+    true
+}
+
 fn focus_normal_window(app: &AppHandle) {
     let state = app.state::<AppState>();
     let aot_label = state.aot_window.lock().unwrap().clone();
+    // Not the always-on-top window, and on the Space the user is actually
+    // looking at: a window on some other Space is not a usable answer here,
+    // even if it was the most recently focused one overall.
+    let is_normal = |label: &String, win: &tauri::WebviewWindow| {
+        Some(label) != aot_label.as_ref() && is_on_active_space(win)
+    };
     let last_focused = state.last_focused.lock().unwrap().clone();
     let candidate = last_focused
-        .filter(|l| Some(l) != aot_label.as_ref())
-        .and_then(|l| app.get_webview_window(&l))
+        .and_then(|l| app.get_webview_window(&l).map(|w| (l, w)))
+        .filter(|(l, w)| is_normal(l, w))
+        .map(|(_, w)| w)
         .or_else(|| {
             app.webview_windows()
                 .into_iter()
-                .find(|(label, _)| Some(label) != aot_label.as_ref())
+                .find(|(l, w)| is_normal(l, w))
                 .map(|(_, w)| w)
         });
     let Some(win) = candidate else {
-        log::info!("focus normal window: no normal window to focus");
+        log::info!("focus normal window: no normal window on the active space to focus");
         return;
     };
     let _ = win.unminimize();

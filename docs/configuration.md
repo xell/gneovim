@@ -222,6 +222,11 @@ Only one such window exists at a time:
   one.
 - Its size and position are remembered (macOS's own window-frame autosave) and
   restored the next time it opens, including across an app restart.
+- It is reachable from every macOS Space, not just the one it was created on
+  (`NSWindowCollectionBehaviorCanJoinAllSpaces`, the same flag Spotlight-style
+  overlays use). Without this, a floating-level window like this one only
+  follows its app to a different Space when that Space already has one of the
+  app's normal windows open, and otherwise stays behind.
 
 Its embedded Neovim carries `g:gneovim_aot_window = true` (unset in every
 other gneovim window), so an `init.lua` or script can branch on running inside
@@ -235,8 +240,10 @@ regardless of what is currently focused), and the always-on-top shortcut only
 ever brings the always-on-top window itself forward. `[window]
 focus_normal_window_shortcut` (default `cmd+shift+j`) is the way out: a local
 menu accelerator, only active while gneovim itself is the active app, that
-focuses the frontmost normal gui-window (best-effort when more than one
-exists; any one of them otherwise).
+focuses the frontmost normal gui-window on the current Space (best-effort
+when more than one exists there; any one of them otherwise). A normal window
+on some other Space is never a candidate, even if it was more recently
+focused overall.
 
 The shortcut is a global (Carbon) hot key, registered once at startup and
 never released, so it fires even while gneovim is not the active app. The
