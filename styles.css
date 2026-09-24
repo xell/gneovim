@@ -101,6 +101,21 @@ body {
   height: var(--cell-h, 17px);
   white-space: pre;
 }
+/* Every same-highlight run is one inline <span> carrying that cell range's
+   background (paintRow in grid-view.js). An inline box paints its background
+   over the font's content area (ascent + descent) rather than over the line
+   box, so the half-leading --cell-h adds on top of that stays unpainted: a
+   hairline of the window's own var(--bg) along the top and bottom of every
+   row. Invisible while cells carry no background of their own (highlight 0
+   emits none, so the whole window is just .gridwin's var(--bg)), but a
+   :terminal TUI paints a background on every cell, and the seams then read as
+   light horizontal lines across the buffer. inline-block plus the cell height
+   makes each run's background box exactly one cell tall, the same trick
+   .wide below already uses for its own reason. */
+.grid-row > span {
+  display: inline-block;
+  height: var(--cell-h, 17px);
+}
 /* a double-width glyph pinned to exactly two cells */
 .grid-row .wide {
   display: inline-block;
