@@ -29,16 +29,18 @@ function fixture() {
     refreshMarkdownDecorations: vi.fn(async () => {}),
   };
   const layout = vi.fn();
+  const repaintGrid = vi.fn();
   const reportError = vi.fn();
   const manager = new IslandManager({
     session,
     nvim,
     createIsland: island,
     layout,
+    repaintGrid,
     reportError,
     livePreviewDefault: () => true,
   });
-  return { session, nvim, layout, reportError, manager };
+  return { session, nvim, layout, repaintGrid, reportError, manager };
 }
 
 describe("IslandManager", () => {
@@ -64,6 +66,32 @@ describe("IslandManager", () => {
     expect(mounted.destroy).toHaveBeenCalledOnce();
     expect(nvim.detachIsland).toHaveBeenCalledWith(7);
     expect(manager.get(1000)).toBeUndefined();
+  });
+
+  it("repaints a grid handed back from an island to the grid renderer", async () => {
+    // GridCoordinator skips repainting a grid an island covers, so that grid's
+    // DOM is stale (empty, if the window has been an island since it opened)
+    // the moment the island goes away. `:MarkdownLivePreviewOff` arrives on its
+    // own notification rather than inside a redraw batch, so nothing else marks
+    // the grid dirty and the window stayed blank until an unrelated redraw.
+    const { session, repaintGrid, manager } = fixture();
+    session.setWindowInfo(1000, 7, "markdown");
+    session.placeGrid(2, {}, 1000);
+    manager.reconcile();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(manager.gridIds).toEqual(new Set([2]));
+    expect(repaintGrid).not.toHaveBeenCalled();
+
+    session.setPreview(1000, 0);
+    manager.reconcile();
+    await Promise.resolve();
+    expect(repaintGrid).toHaveBeenCalledExactlyOnceWith(2);
+
+    // still an ordinary grid: no island to hand back, nothing to repaint
+    repaintGrid.mockClear();
+    manager.reconcile();
+    expect(repaintGrid).not.toHaveBeenCalled();
   });
 
   it("resyncs one window's island without touching any other", async () => {

@@ -209,6 +209,14 @@ const islandManager = new IslandManager({
   nvim,
   createIsland: (win) => new Island(win),
   layout,
+  // one grid handed back from an island to the grid renderer (see reconcile)
+  repaintGrid: (id) => {
+    const grid = grids.get(id);
+    if (!grid) return;
+    grid.fullDirty = true;
+    grid.repaint();
+    forceRepaint(grid.el);
+  },
   reportError: jlog,
   livePreviewDefault: () => livePreviewDefault,
 });

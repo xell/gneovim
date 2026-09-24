@@ -5,6 +5,7 @@ export class IslandManager {
     nvim,
     createIsland,
     layout,
+    repaintGrid,
     reportError,
     livePreviewDefault,
   }) {
@@ -12,6 +13,7 @@ export class IslandManager {
     this.nvim = nvim;
     this.createIsland = createIsland;
     this.layout = layout;
+    this.repaintGrid = repaintGrid;
     this.reportError = reportError;
     this.getLivePreviewDefault = livePreviewDefault;
     this.islands = new Map();
@@ -78,8 +80,21 @@ export class IslandManager {
       }
     }
 
-    this.gridIds = new Set(desired.values());
+    const nextGridIds = new Set(desired.values());
+    const released = [...this.gridIds].filter((grid) => !nextGridIds.has(grid));
+    this.gridIds = nextGridIds;
     this.layout();
+    // GridCoordinator never repaints a grid an island covers, but it does keep
+    // feeding every grid_line op into that grid's store. So a grid handed back
+    // to the renderer here has a correct store and a stale DOM: entirely empty
+    // when the window has been an island since it opened. That is what made the
+    // first `:MarkdownLivePreviewOff` on a file show a blank window until some
+    // unrelated redraw (moving the cursor, entering Visual) happened to mark the
+    // grid dirty again, and why it only showed up once per window. The flag
+    // arrives on its own `md_preview` notification, not inside a redraw batch,
+    // so nothing is guaranteed to mark the grid dirty; repaint it at the
+    // transition itself.
+    for (const grid of released) this.repaintGrid(grid);
   }
 
   // Reattach one window's island from a fresh buffer snapshot, the same
