@@ -578,8 +578,14 @@ export class IslandDisplayDecorations {
     // -- for Leo's 'concealcursor' this is Insert mode only), adding real
     // visible characters where padding-left assumed a concealed/out-of-flow
     // marker. Nudge that one row back to compensate.
-    for (const [row] of payload?.lists ?? []) {
-      if (row === guardRow) addLines(row, row, "cm-list-marker-revealed");
+    // Marker rows only: an over-indented pseudo-item (prose the grammar reads
+    // as a continuation, see collect_list_depths) never had its marker hidden
+    // in the first place, so there is nothing for it to reveal and the nudge
+    // would just shift the row as the cursor entered it.
+    for (const [row, , marker] of payload?.lists ?? []) {
+      if (marker && row === guardRow) {
+        addLines(row, row, "cm-list-marker-revealed");
+      }
     }
 
     const foldSet = Decoration.set(

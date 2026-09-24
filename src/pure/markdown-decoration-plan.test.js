@@ -65,10 +65,10 @@ describe("Markdown decoration planning", () => {
       "   10) nested ordered",
     ]);
     const lists = [
-      [0, 0],
-      [1, 1],
-      [2, 0],
-      [3, 1],
+      [0, 0, true],
+      [1, 1, true],
+      [2, 0, true],
+      [3, 1, true],
     ];
     expect(listMarkerRanges(listDoc, lists, -1, visible)).toEqual([
       { row: 0, from: 0, to: 2, depth: 0, ordered: false },
@@ -83,8 +83,33 @@ describe("Markdown decoration planning", () => {
       { row: 3, from: 39, to: 42, depth: 1, ordered: true },
     ]);
     expect(
-      listMarkerRanges(listDoc, [[1, 1]], -1, (from) => from === 11),
+      listMarkerRanges(listDoc, [[1, 1, true]], -1, (from) => from === 11),
     ).toEqual([]);
+  });
+
+  it("leaves an over-indented pseudo-item alone", () => {
+    // 8 columns is 4 past item one's content column, so CommonMark reads this
+    // as a lazy continuation of item one's paragraph, not a nested item: the
+    // text `- buried` is prose. md_decor.lua reports the row at the parent's
+    // depth (right, it shares the hanging indent) but flags it as no marker,
+    // which is the only thing distinguishing it from a real marker row --
+    // LIST_MARKER_PATTERN matches both. Without the flag this row lost its
+    // literal text to a replace decoration and gained a depth-0 bullet,
+    // drawing it as a sibling of the list it is actually buried inside.
+    const buriedDoc = Text.of(["- item one", "        - buried", "- item two"]);
+    const lists = [
+      [0, 0, true],
+      [1, 0, false],
+      [2, 0, true],
+    ];
+    expect(listMarkerRanges(buriedDoc, lists, -1, visible)).toEqual([
+      { row: 0, from: 0, to: 2, depth: 0, ordered: false },
+      { row: 2, from: 28, to: 30, depth: 0, ordered: false },
+    ]);
+    expect(listMarkerRows(buriedDoc, lists)).toEqual([
+      { row: 0, depth: 0, ordered: false },
+      { row: 2, depth: 0, ordered: false },
+    ]);
   });
 
   it("flags marker rows (and whether they're ordered) regardless of guard row", () => {
@@ -97,9 +122,9 @@ describe("Markdown decoration planning", () => {
       "1. ordered, flush left",
     ]);
     const lists = [
-      [0, 0],
-      [1, 0],
-      [2, 0],
+      [0, 0, true],
+      [1, 0, false],
+      [2, 0, true],
     ];
     expect(listMarkerRows(wrappedDoc, lists)).toEqual([
       { row: 0, depth: 0, ordered: false },

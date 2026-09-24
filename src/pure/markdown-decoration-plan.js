@@ -46,11 +46,17 @@ export function headingSuffixRanges(doc, headings, inFold) {
 // whitespace ahead of them is hidden. The depth-driven hanging indent
 // itself is a plain per-row line class (see apply()), not part of this
 // span.
+//
+// Only ever run against a row md_decor.lua already flagged as a marker row:
+// this pattern happily matches an over-indented `        - item`, which the
+// grammar parses as prose inside the item above it, not as a marker of its
+// own.
 const LIST_MARKER_PATTERN = /^([ \t]*)((?:[-+*])|(?:\d{1,9}[.)]))([ \t]+|$)/;
 
 export function listMarkerRanges(doc, lists, guardRow, inFold) {
   const ranges = [];
-  for (const [row, depth] of lists || []) {
+  for (const [row, depth, marker] of lists || []) {
+    if (!marker) continue; // a continuation row, even when its text looks like one
     if (row < 0 || row >= doc.lines || row === guardRow) continue;
     const line = doc.line(row + 1);
     const match = LIST_MARKER_PATTERN.exec(line.text);
@@ -79,7 +85,8 @@ export function listMarkerRanges(doc, lists, guardRow, inFold) {
 // the marker text is the guard/fold-aware listMarkerRanges above.
 export function listMarkerRows(doc, lists) {
   const rows = [];
-  for (const [row, depth] of lists || []) {
+  for (const [row, depth, marker] of lists || []) {
+    if (!marker) continue;
     if (row < 0 || row >= doc.lines) continue;
     const match = LIST_MARKER_PATTERN.exec(doc.line(row + 1).text);
     if (!match) continue;

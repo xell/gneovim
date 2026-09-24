@@ -149,9 +149,9 @@ describe("IslandDisplayDecorations", () => {
       // decoration that CodeMirror rejects outright; asserting this doesn't
       // throw is the point of the case.
       lists: [
-        [0, 0],
-        [1, 1],
-        [2, 0],
+        [0, 0, true],
+        [1, 1, true],
+        [2, 0, true],
       ],
       hl: { runs: [], codespans: [], virt: [] },
     });
@@ -337,7 +337,7 @@ describe("IslandDisplayDecorations", () => {
       );
       controller.set({
         guard_row: -1,
-        lists: [[0, 0]],
+        lists: [[0, 0, true]],
         hl: { runs: [], codespans: [], virt: [] },
       });
       expect(bulletWidget(view, decorationState).cursorHere).toBe(true);
@@ -351,7 +351,7 @@ describe("IslandDisplayDecorations", () => {
       );
       controller.set({
         guard_row: -1,
-        lists: [[0, 0]],
+        lists: [[0, 0, true]],
         hl: { runs: [], codespans: [], virt: [] },
       });
       expect(bulletWidget(view, decorationState).cursorHere).toBe(false);
@@ -366,7 +366,7 @@ describe("IslandDisplayDecorations", () => {
       );
       controller.set({
         guard_row: 0,
-        lists: [[0, 0]],
+        lists: [[0, 0, true]],
         hl: { runs: [], codespans: [], virt: [] },
       });
       expect(bulletWidget(view, decorationState)).toBeNull();

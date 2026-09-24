@@ -258,9 +258,9 @@ local HEAD_MARKER_LEVEL = {
   atx_h6_marker = 6,
 }
 
--- Per-row list nesting depth over the padded viewport, as one {row, depth}
--- pair (0-based row, 0-based depth) for every row that belongs to a list
--- item -- not just its marker line. A hard-wrapped item's later physical
+-- Per-row list nesting depth over the padded viewport, as one
+-- {row, depth, is_marker_row} triple (0-based row, 0-based depth) for every
+-- row that belongs to a list item -- not just its marker line. A hard-wrapped item's later physical
 -- lines (no marker, just continuation prose) need the same depth as their
 -- marker line so the client can hang-indent the whole paragraph, not just
 -- its first row.
@@ -303,6 +303,19 @@ local function collect_list_depths(buf, root, first, last)
       local row = first + i - 1
       local col = first_content_col(text)
       local node = root:descendant_for_range(row, col, row, col)
+      -- Whether this row actually *starts* an item, answered by the grammar
+      -- rather than by the row's own text. A row indented 4 columns past its
+      -- parent's content column is a lazy paragraph continuation inside that
+      -- parent (or, after a blank line, an indented code block), so
+      -- `        - item` is prose that merely looks like a marker: it gets the
+      -- parent's depth, correctly, but has no marker of its own. The client's
+      -- LIST_MARKER_PATTERN is a plain text regex and cannot tell the two
+      -- apart, so it used to hide that text and stamp a bullet on it, drawing
+      -- an over-indented pseudo-item as a sibling of the list it is really
+      -- buried in. Probed against quoted, tab-indented, checkbox, ordered,
+      -- `*` / `+`, bare (`-` alone) and 4-deep items: a genuine marker row
+      -- always resolves to a `list_marker_*` leaf at this point.
+      local marker = node ~= nil and node:type():find('^list_marker_') ~= nil
       local depth = -1
       while node do
         if node:type() == 'list_item' then
@@ -311,7 +324,7 @@ local function collect_list_depths(buf, root, first, last)
         node = node:parent()
       end
       if depth >= 0 then
-        lists[#lists + 1] = { row, depth }
+        lists[#lists + 1] = { row, depth, marker }
       end
     end
   end)
