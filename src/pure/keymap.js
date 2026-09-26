@@ -61,6 +61,31 @@ const SHIFT_CODE_CHAR = {
   Slash: "?",
 };
 
+// Normal-mode keys that hand the keyboard to another mode -- Insert, Replace,
+// Select, Visual -- on their own, with no motion or second key to wait for.
+// Operator prefixes (`c`, `d`, `y`, ...) are deliberately absent: those leave
+// Neovim in operator-pending, which the keydown handler's own
+// `islandNativeWPending` latch already tracks.
+const EXITS_NORMAL_MODE = new Set([
+  "i",
+  "I",
+  "a",
+  "A",
+  "o",
+  "O",
+  "s",
+  "S",
+  "C",
+  "R",
+  "v",
+  "V",
+]);
+
+export function exitsNormalMode(event) {
+  if (event.metaKey || event.ctrlKey || event.altKey) return false;
+  return EXITS_NORMAL_MODE.has(event.key);
+}
+
 export function normalModePunctuation(event) {
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
   if (!Object.hasOwn(SHIFT_CODE_CHAR, event.code)) return null;

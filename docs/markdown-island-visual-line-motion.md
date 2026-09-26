@@ -165,6 +165,114 @@ at the moment of the freeze (a second, Neovim-side issue, e.g. a hit-enter
 prompt per the "nvim headless/embed quirks" memory) versus the UI simply
 being unresponsive while `nvim` sits idle.
 
+## Bug 6: a `k` typed in Insert mode moving the cursor up
+
+(Bug 5, `gk` stepping over several real lines at once instead of into them,
+was fixed in `c320e20` and lives only in that commit message.)
+
+Leo: "sometimes, in Live Preview mode, in insert mode, typing `k` will move
+the cursor up *in the insert mode* rather than typing the actual character",
+with no reliable repro, "it occurs from time to time".
+
+That is the signature of this feature's one unsynchronized assumption. Every
+gate here asks `isl.mode === "n"`, and `isl.mode` is only ever written by the
+`gnv_cursor` echo (`Island.applyCursor`), one full round trip behind the
+keystroke that caused the mode change: `nvim_input` through the Tauri
+command, Neovim processing it, `ModeChanged`, `rpcnotify`, `bridge.rs`, a
+Tauri event, the listener. Nothing anywhere holds keystrokes back while that
+is in flight, so an `i`/`a`/`o` followed quickly enough by a `k` finds
+`isl.mode` still reading `"n"`: the acceleration block answers it locally,
+`preventDefault()`s it, and reports a cursor one display line up. Insert mode
+never sees the key. The same window makes a `w` a word jump and a `g` a
+swallowed prefix.
+
+The handler already knew this, in two places, for a narrower case: both the
+`g`-entry and plain-`j`/`k` comments say `isl.mode` "lags Neovim's real mode
+by one async echo, so a fast `d` then `g` can still see mode `n`", and guard
+against it with `hadNativePendingBefore`. Operator pending was covered
+because the client tracks it locally (`islandNativeWPending`); the other
+direction out of Normal mode, into Insert, was not tracked at all.
+
+Fix: predict it the same way. `exitsNormalMode(event)`
+(`src/pure/keymap.js`) names the keys that leave Normal mode on their own
+(`i I a A o O s S C R v V`, no modifiers, operator prefixes deliberately
+excluded since `islandNativeWPending` already owns those), and
+`islandModeUnconfirmed` holds the island whose mode Neovim has not confirmed
+since one of them was forwarded. `islandLocalNormal(isl)` replaces the raw
+`isl && isl.mode === "n"` test at every local-answer gate: the
+`islandVerticalGoal` reset, the `w` jump, the `g` entry, and the `j`/`k`
+acceleration.
+
+The clearing rule is the part worth remembering: the latch is released only
+by an echo reporting a mode that is *not* `"n"`, never by an `"n"` echo. An
+echo emitted before the keystroke was processed (the cursor set from the
+`j`/`k` that preceded the `i`, say) also reports `"n"` and can arrive at any
+point inside the window, so clearing on it would reopen exactly the gap being
+closed. A wrong prediction therefore leaves the latch set until the next real
+mode change, which costs nothing but local answers: `j`/`k`/`w`/`g` fall back
+to Neovim's own handling for those keystrokes, the same fallback the feature
+already takes at a first/last display line or on a freshly mounted island.
+Failing towards "Neovim decides" is always safe here; failing towards
+"the client decides" is what produced this bug.
+
+Still open by design, same root cause, different keys: entering Insert mode
+some way the client cannot see (`:startinsert`, a mapping that ends in Insert
+mode, `3i`) is not predicted, and the `normalModePunctuation` path keeps
+using the lagging mode on purpose, since suppressing it would send Neovim a
+full-width CJK character instead of the physical key, i.e. a lost keystroke
+rather than a safe fallback.
+
+### Confirmed live, both directions, 2026-09-26
+
+Leo asked the right question about the first fix: if he cannot reproduce the
+bug, does it not recurring prove anything? It does not, since he could not
+reproduce it before the fix either. So the race was made deterministic in the
+real app instead, behind two temporary constants, and A/B'd.
+
+Getting the harness right took three tries, and the failures are the
+interesting part:
+
+1. Delay every `gnv_cursor` echo by 300ms. Correct in principle, unusable in
+   practice: "it's very very stutter and laggy while typing", because the
+   caret and scrolling ride the same feed.
+2. Delay only the *mode transition* echo by 300ms, which restored normal
+   typing. Leo typed `ikill` and it came out clean, seemingly falsifying the
+   whole diagnosis. The log said otherwise: zero latch events, because he had
+   been typing in `/Applications/gneovim.app`, a release build with none of
+   this code in it. Worth checking which binary a live test is actually
+   running before believing its result.
+3. Delay widened to 1500ms in the dev window. Still no latch events: the log
+   showed 2 to 3 seconds between his `i` and the next letter every time. A
+   timer cannot bracket a window whose closing depends on how fast somebody
+   types.
+4. Hold the mode transition echo until exactly one further keydown has been
+   handled. That is the real race, one keystroke wide, and it is independent
+   of typing speed. Released from a `setTimeout(..., 0)` at the top of the
+   keydown handler so the key under test is the one that sees the stale mode.
+
+With that harness, the same keystrokes in the same state produced opposite
+outcomes decided by one constant, which is the part that makes this a proof
+rather than an absence of complaints:
+
+```
+fix off: key=k win=1000 mode=n latch=set -> ANSWERING k -> answering k locally, target=3:0
+fix on : key=k win=1000 mode=n latch=set -> forwarding k   (no local answer follows)
+```
+
+Same for `w` (553ms), `g` (1050ms), and `j` (434ms). The `k` case was also
+caught once at a real 219ms, with a 300ms simulated echo, before the harness
+was speed-independent.
+
+The `jlog` that reports a rescued keystroke and how late the echo was is
+deliberately kept. It fires only inside the window the latch covers, so a
+whole prose session can pass without one, and it is the only way to watch this
+race rather than infer it: read
+`~/Library/Logs/com.xell.gneovim/gneovim.log`.
+
+One harness artefact worth recognising if it is ever reintroduced: while the
+echo is held, the caret stays a block until the next keystroke, since the
+caret shape is drawn from the same mode feed. Leo spotted that immediately.
+
 ## Scope: Normal mode only, deliberately
 
 Every gate added for this feature (`islandVerticalGoal`'s reset,
@@ -224,6 +332,21 @@ object identity from the code alone produced two plausible-sounding wrong
 theories in a row. Adding temporary `jlog()` calls at the actual decision
 points and reading the real log should have been the first move, not the
 third.
+
+**To prove a fix for an intermittent race, make the race deterministic in
+the real app and A/B it with one constant.** Not reproducing it afterwards is
+worthless evidence when it was never reproducible on demand to begin with. And
+build the harness around the event, not around a timer: the window here closes
+when an echo arrives, so holding the echo for one keystroke reproduces it every
+time, while 300ms and 1500ms delays both missed depending on typing speed.
+Check which binary the live test is running before trusting a negative result.
+
+**An intermittent "the wrong thing happened instead of my keystroke" is a
+mode-lag bug until proven otherwise.** The client's idea of Neovim's mode is
+always one round trip old, and no part of this feature waits for it. When a
+predicted-state latch fixes that, decide deliberately which echo is allowed
+to clear it: an echo that predates the keystroke reports the old state and is
+indistinguishable from a correction.
 
 **A client-side interception that silently swallows a Normal-mode key
 must be sure Neovim isn't still mid-parsing a multi-key command it is

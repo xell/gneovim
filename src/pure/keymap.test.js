@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { keyToNvim, normalModePunctuation } from "./keymap.js";
+import { exitsNormalMode, keyToNvim, normalModePunctuation } from "./keymap.js";
 
 const event = (overrides = {}) => ({
   key: "a",
@@ -42,5 +42,23 @@ describe("normalModePunctuation", () => {
     expect(normalModePunctuation(event({ key: "≤", code: "Comma" }))).toBe(",");
     expect(normalModePunctuation(event({ key: ">", code: "Period", shiftKey: true }))).toBe(">");
     expect(normalModePunctuation(event({ code: "Period", altKey: true }))).toBeNull();
+  });
+});
+
+describe("exitsNormalMode", () => {
+  it("names the keys that leave Normal mode on their own", () => {
+    for (const key of ["i", "I", "a", "A", "o", "O", "s", "S", "C", "R", "v", "V"])
+      expect(exitsNormalMode(event({ key }))).toBe(true);
+  });
+
+  it("ignores motions, operators, and counts", () => {
+    for (const key of ["j", "k", "w", "g", "c", "d", "y", "3", "x", "z"])
+      expect(exitsNormalMode(event({ key }))).toBe(false);
+  });
+
+  it("ignores modified keys, which are their own commands", () => {
+    expect(exitsNormalMode(event({ key: "i", ctrlKey: true }))).toBe(false);
+    expect(exitsNormalMode(event({ key: "o", altKey: true }))).toBe(false);
+    expect(exitsNormalMode(event({ key: "v", metaKey: true }))).toBe(false);
   });
 });

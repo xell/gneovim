@@ -27,6 +27,7 @@ import {
 import { byteLen, byteToCol } from "./pure/text-geometry.js";
 import { parseGuifont } from "./pure/guifont.js";
 import {
+  exitsNormalMode,
   keyToNvim as encodeKeyToNvim,
   normalModePunctuation,
 } from "./pure/keymap.js";
@@ -911,6 +912,10 @@ class Island {
   }
   applyCursor(row, col, mode, scrolloff = this.scrolloff) {
     this.mode = mode;
+    // Neovim has spoken: any mode that is not Normal confirms the prediction
+    // made when a mode-leaving key was forwarded (see islandModeUnconfirmed).
+    if (islandModeUnconfirmed?.island === this && mode !== "n")
+      islandModeUnconfirmed = null;
     const nextScrolloff = Math.max(0, scrolloff);
     const scrolloffChanged = this.scrolloff !== nextScrolloff;
     // EasyMotion's marker prompt temporarily sets its window's 'scrolloff' to
@@ -1216,22 +1221,7 @@ addEventListener("error", (e) => {
       for (const isl of islands.values())
         if (isl.bufnr === buf) isl.applyBufLines(firstline, lastline, linedata);
     }),
-    nvim.on("cursor", (e) => {
-      // CursorMoved reports the current window explicitly. Never infer its
-      // buffer from cursorGrid: a redraw can deliver this notification before
-      // its grid_cursor_goto, which previously applied another window's row to
-      // the island and scrolled it to that clamped position.
-      session.setCursor(e.payload);
-      const isl = islands.get(e.payload.win);
-      if (isl)
-        isl.applyCursor(
-          e.payload.row,
-          e.payload.col,
-          e.payload.mode,
-          e.payload.scrolloff,
-        );
-      syncGrammarlyAccessibility();
-    }),
+    nvim.on("cursor", (e) => applyCursorEcho(e.payload)),
     nvim.on("cmdline", () => {
       session.setCmdlineActive(true);
       updateImeFocus();
@@ -1437,6 +1427,18 @@ function keyToNvim(e) {
   return encodeKeyToNvim(e, { optionIsMeta, forwardCmdKeys });
 }
 
+// One gnv_cursor notification applied. CursorMoved reports the current window
+// explicitly. Never infer its buffer from cursorGrid: a redraw can deliver this
+// notification before its grid_cursor_goto, which previously applied another
+// window's row to the island and scrolled it to that clamped position.
+function applyCursorEcho(payload) {
+  session.setCursor(payload);
+  islands
+    .get(payload.win)
+    ?.applyCursor(payload.row, payload.col, payload.mode, payload.scrolloff);
+  syncGrammarlyAccessibility();
+}
+
 function islandLookup() {
   const isl = islandForGrid(session.cursorGrid);
   if (!isl) {
@@ -1519,6 +1521,31 @@ let islandPendingG = null;
 // consecutive presses: this island's local analogue of Vim's curswant.
 // Reset whenever a key breaks the run (see the keydown handler below).
 let islandVerticalGoal = null; // { island, column }
+// The island whose mode Neovim has not confirmed since a key that takes it out
+// of Normal mode (see exitsNormalMode), or null. `isl.mode` only catches up one
+// async echo after such a keystroke -- an `nvim_input` round trip, then
+// ModeChanged, then the `gnv_cursor` notification back through Tauri -- and
+// nothing synchronizes the two: further keydowns keep arriving inside that
+// window. While it is open, a plain `k` typed into freshly entered Insert mode
+// still reads as Normal-mode vertical motion, so the blocks below answer it
+// locally: the cursor jumps up a display line and the "k" is never typed. Leo
+// reported exactly that, intermittently, which is what an unsynchronized round
+// trip looks like from the outside.
+//
+// Held until Neovim echoes a mode that is not "n", and deliberately never
+// cleared by an "n" echo: an echo already in flight from *before* the keystroke
+// (the cursor set from a preceding accelerated `j`/`k`, say) also reports "n",
+// and clearing on it would reopen the very window this exists to cover.
+// A wrong prediction (`i` in a nomodifiable buffer, a user remap of `i`) leaves
+// it set until the next real mode change, and costs nothing but local answers:
+// `j`/`k`/`w`/`g` each fall back to Neovim's own handling, which is what they
+// already do at a first/last display line or on a fresh island.
+let islandModeUnconfirmed = null; // { island, at }
+// True when this island is in a Normal mode solid enough to answer a motion key
+// locally instead of forwarding it to Neovim.
+function islandLocalNormal(isl) {
+  return Boolean(isl) && isl.mode === "n" && islandModeUnconfirmed?.island !== isl;
+}
 
 // Hand-ported from fast-cursor-move.nvim's own get_move_step
 // (~/.local/share/nvim/lazy/fast-cursor-move.nvim/plugin/fast-cursor-move.lua),
@@ -1580,9 +1607,7 @@ addEventListener("keydown", (e) => {
   // one gj/gk fallback branch) and otherwise never decayed. Confirmed live
   // 2026-09-18: reported as the cursor getting permanently "stuck" at one
   // column no matter what else was pressed.
-  if (
-    !(isl && isl.mode === "n" && plain && /^[gjk]$/.test(e.key))
-  )
+  if (!(islandLocalNormal(isl) && plain && /^[gjk]$/.test(e.key)))
     islandVerticalGoal = null;
   // Snapshot before the digit/operator-prefix block below can set this flag
   // for the *current* key (`g` is itself one of the characters that sets
@@ -1592,6 +1617,32 @@ addEventListener("keydown", (e) => {
   // of continuing the delete, and the following `j` would resolve into a
   // silent cursor move, leaving the delete operator stranded in Neovim.
   const hadNativePendingBefore = islandNativeWPending;
+  // A key that hands Normal mode over to Insert/Replace/Select/Visual: treat
+  // this island's mode as unconfirmed until Neovim echoes the new one, so the
+  // keys typed inside that round trip are not mistaken for Normal-mode motions
+  // (see islandModeUnconfirmed). Runs after the snapshot above because an `i`
+  // that continues an operator or a count (`di`, `3i`) does not leave Normal
+  // mode by itself, and before every local-answer block below, which is what
+  // this protects.
+  if (isl && isl.mode === "n" && !hadNativePendingBefore && exitsNormalMode(e))
+    islandModeUnconfirmed = { island: isl, at: performance.now() };
+  // Kept deliberately: this fires only inside the window the latch exists to
+  // cover, on exactly the keystrokes it rescues, so it is rare in real use (a
+  // whole prose session can pass without one) and it is the only way to see
+  // this race happening rather than infer it. The measured lateness is the
+  // number the diagnosis rests on; live values so far range from 219ms with a
+  // simulated slow echo to nothing at all when the echo beats the next key.
+  if (
+    isl &&
+    islandModeUnconfirmed?.island === isl &&
+    plain &&
+    !hadNativePendingBefore &&
+    /^[gjkw]$/.test(e.key)
+  )
+    jlog(
+      `island: mode unconfirmed ${Math.round(performance.now() - islandModeUnconfirmed.at)}ms ` +
+        `after the mode key, forwarding ${e.key} instead of answering it`,
+    );
   // Second key of a pending `g` prefix: resolve whether it completes a local
   // gj/gk visual-line motion, or release the deferred `g` to Neovim and let
   // this key fall through to its own normal handling below (gg, g_, gU, gw,
@@ -1653,8 +1704,7 @@ addEventListener("keydown", (e) => {
   )
     islandNativeWPending = true;
   if (
-    isl &&
-    isl.mode === "n" &&
+    islandLocalNormal(isl) &&
     e.key === "w" &&
     plain &&
     !islandNativeWPending
@@ -1684,8 +1734,7 @@ addEventListener("keydown", (e) => {
   // dw/cw/2w: `isl.mode` cannot be trusted here, it lags Neovim's real mode
   // by one async echo, so a fast "d" then "g" can still see mode "n".
   if (
-    isl &&
-    isl.mode === "n" &&
+    islandLocalNormal(isl) &&
     plain &&
     e.key === "g" &&
     !skipGEntry &&
@@ -1716,8 +1765,7 @@ addEventListener("keydown", (e) => {
   // the 5 and handling j locally, while Neovim was left holding a dangling
   // count=5 that nothing ever completed, freezing the app until force quit.
   if (
-    isl &&
-    isl.mode === "n" &&
+    islandLocalNormal(isl) &&
     plain &&
     !gPrefixResolved &&
     !hadNativePendingBefore &&
