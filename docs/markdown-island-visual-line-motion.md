@@ -224,6 +224,11 @@ rather than a safe fallback.
 
 ### Confirmed live, both directions, 2026-09-26
 
+Leo confirmed on 2026-09-28, after several days of ordinary prose use, that
+the bug is gone. That is the confirmation that actually counts here: the A/B
+below proves the mechanism, and only sustained real use can speak to how often
+the window opened in the first place.
+
 Leo asked the right question about the first fix: if he cannot reproduce the
 bug, does it not recurring prove anything? It does not, since he could not
 reproduce it before the fix either. So the race was made deterministic in the
