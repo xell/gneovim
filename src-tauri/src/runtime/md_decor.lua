@@ -80,6 +80,17 @@ end
 -- client-side heading-marker / blockquote-marker hiding, which is otherwise
 -- not real conceal at all and would not honour this option on its own.
 local function conceal_guard_row(win)
+  -- Only the *current* window ever reveals its cursor line. mode() is global,
+  -- so without this every other window would reveal its own (stale) cursor
+  -- line the moment the focused window entered a mode 'concealcursor' does
+  -- not name -- typing in one split would un-conceal a line in another.
+  -- Confirmed live against Neovim itself (two vsplits, conceallevel=2,
+  -- concealcursor=nc, `i` in one of them): the unfocused window's cursor line
+  -- stays concealed, and only the focused window reveals. Same current-window
+  -- condition as collect_visual / current_incsearch below.
+  if win ~= vim.api.nvim_get_current_win() then
+    return nil
+  end
   local mc = vim.api.nvim_get_mode().mode:sub(1, 1):lower()
   if mc == '\22' then
     mc = 'v'
