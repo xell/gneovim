@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>gneovim needs access to Reminders so that scripts run in its terminal can create, read, and update your reminders.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>gneovim needs access to Reminders so that scripts run in its terminal can create, read, and update your reminders.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>gneovim needs to send Apple Events so that scripts run in its terminal can control other apps, such as Reminders and Calendar.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>gneovim needs access to Calendars so that scripts run in its terminal can create, read, and update events.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>gneovim needs access to Calendars so that scripts run in its terminal can create, read, and update events.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>gneovim needs access to Contacts so that scripts run in its terminal can look up or edit contact entries.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>gneovim needs access to Photos so that scripts run in its terminal can read or save photos.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>gneovim needs access to save items to Photos from scripts run in its terminal.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>gneovim needs access to speech recognition so that scripts run in its terminal can transcribe audio.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>gneovim needs access to the microphone so that scripts run in its terminal can capture audio input.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>gneovim needs access to the camera so that scripts run in its terminal can capture photos or video.</string>
+	<key>NSLocationUsageDescription</key>
+	<string>gneovim needs access to your location so that scripts run in its terminal can use it.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>gneovim needs access to your location so that scripts run in its terminal can use it.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>gneovim needs access to the local network so that scripts run in its terminal can discover devices on your network.</string>
+	<key>NSSystemAdministrationUsageDescription</key>
+	<string>gneovim needs to administer the system so that scripts run in its terminal can drive other apps via System Events.</string>
+</dict>
+</plist>
