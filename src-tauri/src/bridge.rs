@@ -218,6 +218,14 @@ pub enum BridgeEvent {
         paths: Vec<String>,
         content: Option<Vec<String>>,
     },
+    /// `ZZ` on the last window would otherwise end this whole Neovim session
+    /// right there in nvim: no confirmation at all (unlike Cmd+W's
+    /// `confirm_close`), and any interactive prompt nvim might show first
+    /// (e.g. a live `:terminal` job) never renders in this embedded UI, so it
+    /// would just hang. Routed through the same guard Cmd+W's
+    /// `WindowEvent::CloseRequested` uses instead. From
+    /// `runtime/quit_guard.lua`.
+    QuitRequest,
     /// nvim's stdio closed (it exited or the connection dropped).
     Gone(String),
 }
@@ -772,6 +780,9 @@ impl Handler for NvHandler {
                 self.shared
                     .send(BridgeEvent::OpenNewTab { paths, content });
             }
+            "gnv_quit_request" => {
+                self.shared.send(BridgeEvent::QuitRequest);
+            }
             "redraw" => {
                 let mut batch = lock_recover(&self.shared.grid_batch, "grid batch");
                 for group in &args {
@@ -1239,6 +1250,20 @@ pub async fn connect(
             .await
         {
             log::warn!("open_in_new_tab.lua injection failed: {e}");
+        }
+
+        // Route a session-ending `ZZ` through the same Cmd+W close guard
+        // (`guard_close` in lib.rs) instead of letting nvim quit itself.
+        // macOS only: that guard, like Cmd+W's, only exists there. Its
+        // `gnv_quit_request` rpcnotify must match `handle_notify`'s arm and
+        // `BridgeEvent::QuitRequest`.
+        if cfg!(target_os = "macos") {
+            if let Err(e) = nvim
+                .exec_lua(include_str!("runtime/quit_guard.lua"), vec![chan.into()])
+                .await
+            {
+                log::warn!("quit_guard.lua injection failed: {e}");
+            }
         }
 
         // A moved `[No Name]` buffer (`:OpenInNewGneovimTab` with no args, on

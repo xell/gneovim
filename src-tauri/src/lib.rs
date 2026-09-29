@@ -1177,6 +1177,17 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec, always_on_top: bo
                             spawn_window(&tab_app, true, OpenSpec { paths, content }, false);
                         })
                     }
+                    // `ZZ` would have ended this nvim's session; run it through
+                    // the exact guard Cmd+W's `CloseRequested` uses instead of
+                    // letting nvim quit unguarded (see `runtime/quit_guard.lua`).
+                    BridgeEvent::QuitRequest => {
+                        #[cfg(target_os = "macos")]
+                        if let Some(w) = emit_app.get_webview_window(&emit_label) {
+                            let webview: &tauri::Webview<_> = w.as_ref();
+                            guard_close(&webview.window());
+                        }
+                        Ok(())
+                    }
                     BridgeEvent::Gone(reason) => {
                         log::info!("{emit_label}: {reason}");
                         // The io loop task (spawned right after `create::new_child_cmd`,

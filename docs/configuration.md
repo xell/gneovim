@@ -267,6 +267,13 @@ window with unsaved changes is never silently killed:
 A confirmed or unblocked close runs `:qall` so ShaDa and `VimLeave` autocommands
 run; only a leftover hang is force-killed (after 3s).
 
+`ZZ` on the last window of the last tabpage would otherwise end the session
+right there in Neovim, bypassing all of the above (and, for a live
+`:terminal` job, showing a confirm prompt this embedded UI cannot render, so
+it would just hang). It is remapped to go through the same Cmd+W path
+instead: on any other window it still behaves like plain `ZZ` (write if
+modified, close that window).
+
 ## Loading your Neovim config
 
 By default gneovim runs `nvim -u NONE`, so your `~/.config/nvim` is not read. This keeps the renderer working against a predictable nvim while it is still being built. Set `config = "user"` to load your real config.
