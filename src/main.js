@@ -668,6 +668,9 @@ class Island {
           this.inputController.onSelectionUpdate(u),
         ),
         EditorView.updateListener.of((u) => this.gutterController.onUpdate(u)),
+        EditorView.updateListener.of((u) => {
+          if (u.viewportChanged) this.scheduleDecorView();
+        }),
         EditorView.domEventHandlers({
           mousedown: (ev, v) => this.inputController.onMousedown(ev, v),
           compositionstart: () => this.inputController.onCompositionStart(),
@@ -775,8 +778,29 @@ class Island {
     this.gutterController.setFoldRegions(d?.folds);
     this.displayDecorations.set(d);
   }
+  // A mouse wheel over the island scrolls CodeMirror natively, without
+  // moving Neovim's window, so md_decor.lua would only ever decorate rows
+  // near Neovim's own viewport. Report the rows CodeMirror actually renders
+  // instead (0-based, like the payload); see __gnv_md_decor_view there.
+  scheduleDecorView() {
+    clearTimeout(this._decorViewTimer);
+    this._decorViewTimer = setTimeout(() => {
+      if (this.el.hidden || this.bufnr == null) return;
+      const { doc } = this.view.state;
+      const { from, to } = this.view.viewport;
+      const top = doc.lineAt(from).number - 1;
+      const bot = doc.lineAt(to).number - 1;
+      const key = this.bufnr + ":" + top + ":" + bot;
+      if (key === this._decorViewKey) return;
+      this._decorViewKey = key;
+      nvim
+        .setMarkdownDecorationView(this.winId, top, bot)
+        .catch((e) => jlog("md_decor_view failed: " + e));
+    }, 50);
+  }
   destroy() {
     this.gutterController.destroy();
+    clearTimeout(this._decorViewTimer);
     this.cursorScroller.destroy();
     this.view.destroy();
     this.el.remove();

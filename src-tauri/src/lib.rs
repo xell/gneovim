@@ -1548,6 +1548,20 @@ async fn nvim_md_decor(app: AppHandle, window: tauri::Window) -> Result<(), Stri
         .await
 }
 
+#[tauri::command]
+async fn nvim_md_decor_view(
+    app: AppHandle,
+    window: tauri::Window,
+    win: i64,
+    top: i64,
+    bot: i64,
+) -> Result<(), String> {
+    bridge_for(&app, window.label())
+        .await?
+        .md_decor_view(win, top, bot)
+        .await
+}
+
 /// Pulled once at boot: the `sync_tab_bars` push can fire before a freshly
 /// created tab's own webview has registered its `tabbar` listener, so it asks
 /// AppKit directly instead of waiting on a maybe-already-missed event.
@@ -1922,6 +1936,7 @@ pub fn run() {
             nvim_winoptimalwidth,
             set_accessibility_hidden,
             nvim_md_decor,
+            nvim_md_decor_view,
             nvim_paste_clip,
             nvim_clip_yank,
             new_window,

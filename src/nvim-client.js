@@ -100,6 +100,10 @@ export class NvimClient {
     return this.invoke("nvim_md_decor");
   }
 
+  setMarkdownDecorationView(win, top, bot) {
+    return this.invoke("nvim_md_decor_view", { win, top, bot });
+  }
+
   pasteClipboard() {
     return this.invoke("nvim_paste_clip");
   }

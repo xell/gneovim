@@ -86,6 +86,16 @@ describe("NvimClient", () => {
     ]);
   });
 
+  it("sends an island's own decoration view range", () => {
+    const { invoke, nvim } = client();
+
+    nvim.setMarkdownDecorationView(1000, 120, 180);
+
+    expect(invoke.mock.calls).toEqual([
+      ["nvim_md_decor_view", { win: 1000, top: 120, bot: 180 }],
+    ]);
+  });
+
   it("preserves commands with no payload", () => {
     const { invoke, nvim } = client();
 

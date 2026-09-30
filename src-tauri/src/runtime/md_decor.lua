@@ -32,6 +32,9 @@ local PAD = 40 -- extra buffer rows queried around the window viewport
 local hl_cache = {}
 -- Per-window highlight snapshot, to skip the capture walk on a bare cursor move.
 local hl_by_win = {}
+-- Per-window row range the island itself is showing, reported by the client
+-- (see __gnv_md_decor_view below), plus the cursor it was reported against.
+local view_by_win = {}
 
 local function hex(n)
   return n and string.format('#%06x', n) or nil
@@ -857,8 +860,24 @@ local function push(win)
     return
   end
   local n = vim.api.nvim_buf_line_count(buf)
-  local first = math.max((info.topline or 1) - 1 - PAD, 0)
-  local last = math.min((info.botline or info.topline or 1) + PAD, n - 1)
+  local top, bot = (info.topline or 1) - 1, (info.botline or info.topline or 1)
+  -- A mouse wheel over the island scrolls CodeMirror natively and never
+  -- moves Neovim's own window, so text scrolled more than PAD rows away from
+  -- topline/botline would get no decorations at all. While the island shows
+  -- its own range, decorate that instead. Only valid until Neovim's cursor
+  -- moves (a click, a motion, typing): the island scrolls back to follow the
+  -- cursor then, and reports again if it lands somewhere new.
+  local v = view_by_win[win]
+  if v then
+    local cur = vim.api.nvim_win_get_cursor(win)
+    if v.buf == buf and v.row == cur[1] and v.col == cur[2] then
+      top, bot = v.top, v.bot
+    else
+      view_by_win[win] = nil
+    end
+  end
+  local first = math.max(top - PAD, 0)
+  local last = math.min(bot + PAD, n - 1)
 
   -- Highlights are the heavy part (a treesitter walk); reuse the last
   -- snapshot when nothing collect_highlights reads has changed. `tick` and
@@ -1078,6 +1097,25 @@ _G.__gnv_resync_decor = function(win)
   if preview_on(win) then
     pcall(push, win)
   end
+end
+
+-- Called by the client (bridge.rs md_decor_view) when an island's rendered
+-- range moves on its own, i.e. a mouse wheel scroll. `top` / `bot` are
+-- 0-based buffer rows. Records them against the current cursor and
+-- schedules a normal push; see the view_by_win check in push.
+_G.__gnv_md_decor_view = function(win, top, bot)
+  if not preview_on(win) then
+    return
+  end
+  local cur = vim.api.nvim_win_get_cursor(win)
+  view_by_win[win] = {
+    buf = vim.api.nvim_win_get_buf(win),
+    row = cur[1],
+    col = cur[2],
+    top = top,
+    bot = bot,
+  }
+  schedule()
 end
 
 -- One always-registered augroup. It fires on every matching event, but the

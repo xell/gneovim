@@ -1702,6 +1702,20 @@ impl Bridge {
             .map_err(err)
     }
 
+    /// Tell `md_decor.lua` which 0-based buffer rows an island is showing
+    /// after it scrolled on its own (a mouse wheel), so they get decorations
+    /// even when they lie outside Neovim's own window viewport.
+    pub async fn md_decor_view(&self, win: i64, top: i64, bot: i64) -> Result<(), String> {
+        self.nvim
+            .exec_lua(
+                "if _G.__gnv_md_decor_view then _G.__gnv_md_decor_view(...) end",
+                vec![Value::from(win), Value::from(top), Value::from(bot)],
+            )
+            .await
+            .map(|_| ())
+            .map_err(err)
+    }
+
     /// `:edit` a file path, splitting nothing on spaces.
     pub async fn open_file(&self, path: &str) -> Result<(), String> {
         self.nvim

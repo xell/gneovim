@@ -108,7 +108,11 @@ A grid window costs one variable read per event and nothing else.
 
 The callback is debounced with `vim.defer_fn(flush, 20)` because the trigger events arrive in bursts (a held `j`, a paste, an insert).
 
-The payload covers the Neovim window's `topline..botline` padded by 40 rows each side, so it always spans what the island can show even though the island fits a different line count than the Neovim window (see the scroll section).
+The payload covers the Neovim window's `topline..botline` padded by 40 rows each side, so it spans what the island shows while the island follows Neovim's cursor, even though the island fits a different line count than the Neovim window (see the scroll section).
+A mouse wheel over the island is the exception: CodeMirror scrolls natively and Neovim's window never moves, so the island could scroll far past that range and show raw text.
+To cover it, the island reports CodeMirror's rendered row range on every `viewportChanged` (debounced 50 ms, deduplicated) through `invoke("nvim_md_decor_view")`, which calls `_G.__gnv_md_decor_view`.
+`push` then pads that range instead of Neovim's own, but only while Neovim's cursor sits exactly where it was when the range was reported; the first cursor move (a click, a motion, typing) drops it, because the island scrolls back to follow the cursor then.
+The cursor itself is never moved by this.
 The client rebuilds its whole decoration set from each payload; anything outside the padded range is simply absent.
 
 ### Getting the first payload
