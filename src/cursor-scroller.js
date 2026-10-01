@@ -59,13 +59,23 @@ export class CursorScroller {
         line.from + byteToCol(line.text, position.col),
         line.to,
       );
-      const rect = this.view.coordsAtPos(offset);
+      // A cursor behind a rendered table measures as the whole table block,
+      // so prefer the caret the table draws into its own cursor cell (only
+      // the table holding Neovim's cursor renders one).
+      const rect =
+        this.view.contentDOM
+          .querySelector?.(".cm-markdown-table .nvim-cursor")
+          ?.getBoundingClientRect() ?? this.view.coordsAtPos(offset);
       if (!rect) return;
       const bounds = scroller.getBoundingClientRect();
       const top = rect.top - bounds.top;
       const bottom = rect.bottom - bounds.top;
       let delta = 0;
       if (force || margin === height / 2) delta = (top + bottom) / 2 - height / 2;
+      // A rect taller than the scrolloff band (e.g. a tall image) can never
+      // satisfy both margins; once it spans the band, leave it, or each
+      // keystroke would flip between aligning its top and its bottom.
+      else if (top < margin && bottom > height - margin) delta = 0;
       else if (top < margin) delta = top - margin;
       else if (bottom > height - margin) delta = bottom - (height - margin);
       if (!delta) return;

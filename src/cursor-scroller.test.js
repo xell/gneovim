@@ -71,6 +71,29 @@ describe("CursorScroller", () => {
     expect(scroller.scrollTop).toBe(10);
   });
 
+  it("measures a rendered table's own caret, not the whole table", () => {
+    const { cursorScroller, frames, scroller, view } = fixture();
+    view.contentDOM.querySelector = vi.fn(() => ({
+      getBoundingClientRect: () => ({ top: 185, bottom: 195 }),
+    }));
+    cursorScroller.keepInView({ row: 1, col: 1 }, 2);
+    [...frames.values()][0]();
+
+    expect(view.contentDOM.querySelector).toHaveBeenCalledWith(
+      ".cm-markdown-table .nvim-cursor",
+    );
+    expect(view.coordsAtPos).not.toHaveBeenCalled();
+    expect(scroller.scrollTop).toBe(65);
+  });
+
+  it("leaves a rect taller than the scrolloff band alone once it spans it", () => {
+    const { cursorScroller, frames, scroller, view } = fixture();
+    view.coordsAtPos.mockReturnValue({ top: 110, bottom: 190 });
+    cursorScroller.keepInView({ row: 1, col: 1 }, 2);
+    [...frames.values()][0]();
+    expect(scroller.scrollTop).toBe(50);
+  });
+
   it("cancels superseded frames and pending timers on destroy", () => {
     const { cursorScroller, frames, timers } = fixture();
     cursorScroller.keepInView({ row: 0, col: 0 }, 2);
