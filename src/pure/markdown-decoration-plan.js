@@ -135,3 +135,66 @@ export function nonOverlappingSpans(spans) {
   }
   return accepted;
 }
+
+// A due date pinned to the end of a to-do list item:
+//
+//     - ship the thing |2026-09-30|
+//
+// Anchored to the end of the line so it reads as metadata rather than prose.
+// The literal `|2026-09-30|` is never concealed: `/2026-09` has to keep
+// finding it and the syntax highlighting has to keep colouring it, the same
+// reasoning that keeps a '---' divider's source text on screen.
+const DUE_DATE_PATTERN = /\|(\d{4})-(\d{2})-(\d{2})\|[ \t]*$/;
+
+// Whole days since the epoch for a local calendar date. Date.UTC rather than
+// a local Date: two local midnights are 23 or 25 hours apart across a DST
+// boundary, so subtracting local timestamps lands a day out twice a year.
+export function dayNumber(year, month, day) {
+  return Math.round(Date.UTC(year, month - 1, day) / 86_400_000);
+}
+
+export function todayNumber(now = new Date()) {
+  return dayNumber(now.getFullYear(), now.getMonth() + 1, now.getDate());
+}
+
+// One capsule per list item carrying a due date, as {row, label, state}.
+// `today` is a dayNumber, injected so this stays a pure function of the doc
+// and a date rather than of the wall clock.
+//
+// Marker rows only, from the same payload the bullets use: a continuation row
+// ending in a date belongs to prose, and an over-indented pseudo-item is not a
+// task at all (see collect_list_depths in md_decor.lua).
+//
+// The label is deliberately a closed set -- a decimal count, "Today", or
+// "Overdue" -- because the caller interpolates it straight into a CSS custom
+// property. Anything derived from buffer text would have to be escaped first.
+export function dueDateBadges(doc, lists, today) {
+  const badges = [];
+  for (const [row, , marker] of lists || []) {
+    if (!marker) continue;
+    if (row < 0 || row >= doc.lines) continue;
+    const match = DUE_DATE_PATTERN.exec(doc.line(row + 1).text);
+    if (!match) continue;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const due = dayNumber(year, month, day);
+    // Reject a well-shaped but impossible date ("2026-13-40") rather than let
+    // Date.UTC roll it silently into next year and show a confident count.
+    const check = new Date(due * 86_400_000);
+    if (
+      check.getUTCFullYear() !== year ||
+      check.getUTCMonth() + 1 !== month ||
+      check.getUTCDate() !== day
+    ) {
+      continue;
+    }
+    const delta = due - today;
+    badges.push({
+      row,
+      state: delta > 0 ? "future" : delta === 0 ? "today" : "overdue",
+      label: delta > 0 ? String(delta) : delta === 0 ? "Today" : "Overdue",
+    });
+  }
+  return badges;
+}

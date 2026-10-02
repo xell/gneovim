@@ -324,6 +324,55 @@ body {
   margin: 0.3em 0;
   background: var(--nontext-fg, var(--fg));
 }
+/* Due-date capsule for a to-do list item: `- ship the thing |2026-09-30|`.
+   A future date shows the whole-day count, today shows "Today", a past date
+   shows "Overdue" (see dueDateBadges in pure/markdown-decoration-plan.js).
+
+   The label is CSS generated content fed by --due-label rather than a widget,
+   for the same reason the '---' divider above is: a widget's rendered text is
+   real DOM text with no counterpart in the buffer, and the accessibility layer
+   counts DOM text to map Grammarly's offsets back onto nvim's byte positions
+   (see .cm-ax-shadow, kept at font-size 0 rather than display:none precisely
+   so it still counts). Generated content is not part of that text. The source
+   `|2026-09-30|` is never concealed either way, so search and the syntax
+   highlighting still see it.
+
+   Positioned exactly as .cm-list-bullet is, off the other edge: the row is
+   already `position: relative` for the hanging indent, and `right: 0` is the
+   right edge of the reading column rather than of the window, because
+   --optimal-width caps .cm-content itself. */
+.island .cm-due-badge {
+  position: relative; /* already true via cm-list-depth-N; not worth relying on */
+}
+.island .cm-due-badge::after {
+  content: var(--due-label);
+  position: absolute;
+  right: 0;
+  /* Pinned to the item's *first* visual row, so a hard-wrapped task keeps its
+     capsule beside the task text. Every length below is in the capsule's own
+     em (0.72 of the row's font), so the whole thing scales with
+     --island-font-size: line-height 1.56 makes the pill 1.12 row-em tall, and
+     0.33em drops it by half of what the row's 1.6 line box has left over. */
+  top: 0.33em;
+  font-size: 0.72em;
+  line-height: 1.56;
+  padding: 0 0.85em;
+  border-radius: 999px;
+  white-space: nowrap;
+  font-family: var(--font-sans-serif, inherit);
+  background: color-mix(in srgb, var(--fg) 11%, transparent);
+  color: color-mix(in srgb, var(--fg) 62%, transparent);
+}
+/* Special's fg and Normal's sp, the same colorscheme-derived colours the
+   heading accent and undercurls already use. */
+.island .cm-due-badge-today::after {
+  background: color-mix(in srgb, var(--accent, var(--fg)) 18%, transparent);
+  color: var(--accent, var(--fg));
+}
+.island .cm-due-badge-overdue::after {
+  background: color-mix(in srgb, var(--sp, var(--fg)) 18%, transparent);
+  color: var(--sp, var(--fg));
+}
 /* Depth-aware list hanging indent (Bear-style): a level-N item's own marker
    lands on the level-(N-1) item's text column, and every physical line of
    an item -- including a hard-wrapped paragraph's later lines, which carry

@@ -151,13 +151,19 @@ export function createIslandDecorationState({ document, log }) {
   const visualMark = Decoration.mark({ class: "cm-nvim-visual" });
   const concealHide = Decoration.replace({});
   const lineDecorations = new Map();
-  const lineDecoration = (className) => {
-    let decoration = lineDecorations.get(className);
+  // `style` is optional and carries a CSS custom property for the handful of
+  // line classes whose appearance is data-driven (the due-date capsule's
+  // --due-label). Cached on the pair, since those labels come from a small
+  // closed set and a fresh Decoration object per row per push would defeat
+  // CodeMirror's range-set reuse.
+  const lineDecoration = (className, style) => {
+    const key = style ? className + "\n" + style : className;
+    let decoration = lineDecorations.get(key);
     if (!decoration) {
       decoration = Decoration.line({
-        attributes: { class: className },
+        attributes: style ? { class: className, style } : { class: className },
       });
-      lineDecorations.set(className, decoration);
+      lineDecorations.set(key, decoration);
     }
     return decoration;
   };

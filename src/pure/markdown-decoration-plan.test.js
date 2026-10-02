@@ -1,6 +1,8 @@
 import { Text } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 import {
+  dayNumber,
+  dueDateBadges,
   headingMarkerRanges,
   headingSuffixRanges,
   listMarkerRanges,
@@ -8,6 +10,7 @@ import {
   nonOverlappingSpans,
   quoteMarkerRanges,
   structuralLineStarts,
+  todayNumber,
 } from "./markdown-decoration-plan.js";
 
 describe("Markdown decoration planning", () => {
@@ -153,5 +156,66 @@ describe("Markdown decoration planning", () => {
     const overlap = { from: 3, to: 4, source: "overlap" };
     const touching = { from: 5, to: 7, source: "touching" };
     expect(nonOverlappingSpans([touching, overlap, first])).toEqual([first, touching]);
+  });
+});
+
+describe("dueDateBadges", () => {
+  const today = dayNumber(2026, 9, 25);
+
+  it("counts future days and names today and overdue", () => {
+    const doc = Text.of([
+      "- ship the thing |2026-09-30|",
+      "- write it up |2026-09-25|",
+      "- forgot this |2026-09-20|",
+      "- no date here",
+    ]);
+    const lists = [
+      [0, 0, true],
+      [1, 0, true],
+      [2, 0, true],
+      [3, 0, true],
+    ];
+    expect(dueDateBadges(doc, lists, today)).toEqual([
+      { row: 0, label: "5", state: "future" },
+      { row: 1, label: "Today", state: "today" },
+      { row: 2, label: "Overdue", state: "overdue" },
+    ]);
+  });
+
+  it("only badges a real marker row, and only a trailing date", () => {
+    const doc = Text.of([
+      "- a task |2026-09-30|",
+      "  |2026-09-30| continuation prose",
+      "        - buried |2026-09-30|",
+      "- date |2026-09-30| mid-sentence",
+      "- trailing spaces |2026-09-30|   ",
+    ]);
+    const lists = [
+      [0, 0, true],
+      [1, 0, false],
+      [2, 0, false],
+      [3, 0, true],
+      [4, 0, true],
+    ];
+    expect(dueDateBadges(doc, lists, today)).toEqual([
+      { row: 0, label: "5", state: "future" },
+      { row: 4, label: "5", state: "future" },
+    ]);
+  });
+
+  it("ignores a well-shaped impossible date", () => {
+    // Date.UTC would roll 2026-13-40 into 2027 and show a confident count.
+    const doc = Text.of(["- bad |2026-13-40|", "- also bad |2026-02-30|"]);
+    expect(
+      dueDateBadges(doc, [[0, 0, true], [1, 0, true]], today),
+    ).toEqual([]);
+  });
+
+  it("counts whole calendar days across a DST boundary", () => {
+    // US DST ends 2026-11-01, so local midnights around it are 23 and 25
+    // hours apart; subtracting local timestamps would land a day out.
+    expect(dayNumber(2026, 11, 2) - dayNumber(2026, 10, 30)).toBe(3);
+    const now = new Date(2026, 8, 25, 23, 59, 59);
+    expect(todayNumber(now)).toBe(today);
   });
 });

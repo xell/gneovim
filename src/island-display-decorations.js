@@ -3,6 +3,7 @@ import { byteRange } from "./pure/text-geometry.js";
 import { visualRanges } from "./pure/visual-ranges.js";
 import { foldRanges, overlapsRanges } from "./pure/fold-ranges.js";
 import {
+  dueDateBadges,
   headingMarkerRanges,
   headingSuffixRanges,
   listMarkerRanges,
@@ -10,6 +11,7 @@ import {
   nonOverlappingSpans,
   quoteMarkerRanges,
   structuralLineStarts,
+  todayNumber,
 } from "./pure/markdown-decoration-plan.js";
 
 // Depth-cycled glyphs for unordered bullets, repeating every 3 levels
@@ -563,6 +565,26 @@ export class IslandDisplayDecorations {
         row,
         `cm-list-depth-${Math.min(Math.max(depth, 0), MAX_LIST_DEPTH_CLASS)}`,
       );
+    }
+    // `- task |2026-09-30|`: a right-aligned countdown capsule on the task's
+    // own marker row. Pure line decoration plus a CSS ::after (same shape as
+    // the '---' divider above), so the source date keeps its literal text and
+    // nothing is added to the DOM's text content -- a widget's rendered label
+    // would be real characters with no buffer counterpart, and the
+    // accessibility layer counts DOM text to map Grammarly's offsets back
+    // onto the buffer (see .cm-ax-shadow and ListBulletWidget).
+    for (const { row, label, state } of dueDateBadges(
+      doc,
+      payload?.lists,
+      todayNumber(),
+    )) {
+      const decoration = lineDecoration(
+        `cm-due-badge cm-due-badge-${state}`,
+        `--due-label:"${label}"`,
+      );
+      for (const from of structuralLineStarts(doc, row, row, inFold)) {
+        ranges.push(decoration.range(from));
+      }
     }
     // Only an *ordered* marker row also needs the text-indent pull-back: its
     // digits are real text sharing the line's normal flow, so they have to
