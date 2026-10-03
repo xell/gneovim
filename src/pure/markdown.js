@@ -75,6 +75,21 @@ export function tableCursorCell(text, column) {
   return { cell, offset: 0 };
 }
 
+// Inverse of tableCursorCell: the source column of displayed character
+// `offset` in `cell`. Several columns map to offset 0 (the cell's padding);
+// the last of them is the first visible character. An offset past the cell's
+// text falls back to its last character.
+export function tableSourceColumn(text, cell, offset) {
+  const columns = [];
+  for (let column = 0; column <= text.length; column++) {
+    const target = tableCursorCell(text, column);
+    if (target.cell > cell) break;
+    if (target.cell === cell) columns[target.offset] = column;
+  }
+  if (columns[offset] != null) return columns[offset];
+  return columns[Math.max(0, columns.length - 2)] ?? 0;
+}
+
 export function tableAlign(cells) {
   const align = [];
   for (const cell of cells) {

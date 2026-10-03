@@ -35,6 +35,7 @@ import { screenMetrics as calculateScreenMetrics } from "./pure/layout.js";
 import { bufferLineEdit } from "./pure/buffer-line-edit.js";
 import { semanticWordTarget as findSemanticWordTarget } from "./pure/semantic-word.js";
 import { CursorScroller } from "./cursor-scroller.js";
+import { tableVerticalStep } from "./table-vertical-motion.js";
 import { GutterController } from "./gutter-controller.js";
 import { IslandInputQueue } from "./island-input-queue.js";
 import { IslandInputController } from "./island-input-controller.js";
@@ -874,6 +875,15 @@ class Island {
         : undefined;
     let stepped = false;
     for (let i = 0; i < count; i++) {
+      // In, into, or out of a rendered table: follow each cell's own wrap
+      // (see table-vertical-motion.js), which moveVertically cannot see.
+      const tableStep = tableVerticalStep(this.view, pos, forward, goal);
+      if (tableStep) {
+        pos = tableStep.pos;
+        goal = tableStep.goal;
+        stepped = true;
+        continue;
+      }
       const next = this.view.moveVertically(
         EditorSelection.cursor(pos, undefined, undefined, goal),
         forward,

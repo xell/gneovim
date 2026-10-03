@@ -7,6 +7,7 @@ import {
   tableAlign,
   tableCells,
   tableCursorCell,
+  tableSourceColumn,
   tableOverlayCells,
 } from "./markdown.js";
 
@@ -63,6 +64,20 @@ describe("Markdown tables", () => {
 
   it("maps source columns into displayed cells", () => {
     expect(tableCursorCell("| one | two\\|parts |", 10)).toEqual({ cell: 1, offset: 2 });
+  });
+
+  it("maps displayed cell characters back to source columns", () => {
+    const row = "| one | **two** |";
+    expect(tableSourceColumn(row, 0, 0)).toBe(2);
+    expect(tableSourceColumn(row, 0, 2)).toBe(4);
+    expect(tableSourceColumn(row, 1, 0)).toBe(8);
+    expect(tableSourceColumn(row, 1, 2)).toBe(10);
+    expect(tableSourceColumn(row, 1, 99)).toBe(14);
+    for (let column = 0; column < row.length; column++) {
+      if (row[column] === " " || row[column] === "|") continue;
+      const { cell, offset } = tableCursorCell(row, column);
+      expect(tableSourceColumn(row, cell, offset)).toBe(column);
+    }
   });
 
   it("maps overlay virt_text onto table cells, like tableHighlightCells", () => {
