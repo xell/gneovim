@@ -123,4 +123,8 @@ export class NvimClient {
   tabbarVisible() {
     return this.invoke("tabbar_visible");
   }
+
+  cmdlineInputSource(entering) {
+    return this.invoke("cmdline_input_source", { entering });
+  }
 }

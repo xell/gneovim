@@ -113,6 +113,40 @@ by the IME. Markdown islands additionally mark the normalized character as a
 possible mapping or operator prefix so their semantic prose `w` interception
 cannot consume a following native motion.
 
+## Input source across modes
+
+Gneovim never switches the input source on Insert entry or exit. Normal mode
+already works under a Chinese input source (the non-editable surfaces above,
+plus physical punctuation), so the source the user picked simply stays
+through `Esc` and `i`, with no switch and no macOS input indicator bubble.
+Toggling `#ime`'s `readOnly` or an island's `contenteditable` does not make
+macOS re-pick the source, even with "Automatically switch to a document's
+input source" on; this was checked in a bare WKWebView. An apparent re-pick on
+mode changes is almost certainly an im-select style Neovim plugin, such as
+im-switch.nvim, still loaded. A config cannot use `g:gneovim` to disable one
+at startup, because gneovim sets it only after `init.lua` has run. Check
+`vim.v.argv` for `--embed` instead.
+
+The one exception is a `:` command line. On its first `gnv_cmdline` event,
+after `#ime` has turned editable, the webview calls `cmdline_input_source`.
+The native `input_source` module remembers the current source and selects the
+ASCII capable keyboard layout, so `:w` is not composed by the IME.
+`gnv_cmdline_hide` restores the remembered source before `#ime` goes
+read-only again. Search (`/`, `?`) and `input()` prompts are left alone so
+Chinese text can still be searched for. Both selections are skipped when the
+source is already the target, because every switch to a CJK IME costs a
+visible delay and the indicator bubble.
+
+Both switches must go through the webview's active `NSTextInputContext`
+(`selectedKeyboardInputSource`), not `TISSelectInputSource`. With
+"Automatically switch to a document's input source" on, macOS keeps a source
+per input context and restores it whenever that context activates. A global
+select made as `#ime` turned editable was undone about 25 ms later. Setting
+the source on an inactive context changes the system source but not the
+context's memory, so the next `i` would bring ABC back. That is why the
+restore runs while `#ime` is still editable and the webview waits for it
+before applying the read-only flip.
+
 ## One coordinate contract
 
 Neovim buffer columns and CodeMirror positions are different units:

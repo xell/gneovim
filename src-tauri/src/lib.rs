@@ -721,6 +721,127 @@ mod always_on_top_hotkey {
     }
 }
 
+/// Switch to the ASCII keyboard while a `:` command line is open, and put the
+/// previous input source back when it closes, so `:w` is never composed by a
+/// CJK IME. Outside the command line nothing here runs: the input source the
+/// user picked simply stays, since Normal mode already works under a CJK IME
+/// (see `normalModePunctuation` and `block_ime_in_normal_mode`).
+///
+/// Both switches go through the webview's active `NSTextInputContext`, not
+/// `TISSelectInputSource`: with "Automatically switch to a document's input
+/// source" on, macOS keeps a source per input context and restores it when the
+/// context activates, which undid a global select within ~25ms (confirmed live
+/// 2026-10-03). An inactive context does not take the change either, so the
+/// webview restores before making `#ime` read-only again.
+#[cfg(target_os = "macos")]
+mod input_source {
+    use std::cell::RefCell;
+    use std::ffi::c_void;
+    use std::time::Duration;
+
+    use objc2::rc::Retained;
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSTextInputContext;
+    use objc2_foundation::NSString;
+    use tauri::AppHandle;
+
+    type CFTypeRef = *const c_void;
+
+    /// `#ime` turns editable in the same tick as the `:` notification, but
+    /// its input context may activate a little after this call arrives.
+    const RETRIES: u32 = 10;
+    const RETRY_DELAY: Duration = Duration::from_millis(20);
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        static kTISPropertyInputSourceID: CFTypeRef;
+        fn TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -> CFTypeRef;
+        fn TISGetInputSourceProperty(source: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(cf: CFTypeRef);
+    }
+
+    fn ascii_id() -> Option<Retained<NSString>> {
+        unsafe {
+            let source = TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
+            if source.is_null() {
+                return None;
+            }
+            // A CFString is toll-free bridged to NSString; retain it before
+            // the source that owns it is released.
+            let id = TISGetInputSourceProperty(source, kTISPropertyInputSourceID);
+            let id = Retained::retain(id as *mut NSString);
+            CFRelease(source);
+            id
+        }
+    }
+
+    /// Select `id` on the context unless already selected: every switch to a
+    /// CJK IME costs a visible delay and macOS's input indicator bubble.
+    fn select(context: &NSTextInputContext, id: &NSString) {
+        let current = context.selectedKeyboardInputSource();
+        if current.is_none_or(|current| current.to_string() != id.to_string()) {
+            context.setSelectedKeyboardInputSource(Some(id));
+        }
+    }
+
+    #[derive(Default)]
+    struct State {
+        open: bool,
+        saved: Option<Retained<NSString>>,
+    }
+
+    // Main thread only: `NSTextInputContext` is main-thread bound.
+    thread_local! {
+        static STATE: RefCell<State> = RefCell::new(State::default());
+    }
+
+    pub fn enter(app: AppHandle) {
+        STATE.with_borrow_mut(|s| s.open = true);
+        try_enter(app, RETRIES);
+    }
+
+    fn try_enter(app: AppHandle, retries: u32) {
+        let mtm = MainThreadMarker::new().expect("input source off the main thread");
+        if !STATE.with_borrow(|s| s.open) {
+            return; // the command line closed before its context activated
+        }
+        let Some(context) = NSTextInputContext::currentInputContext(mtm) else {
+            if retries > 0 {
+                std::thread::spawn(move || {
+                    std::thread::sleep(RETRY_DELAY);
+                    let main = app.clone();
+                    let _ = app.run_on_main_thread(move || try_enter(main, retries - 1));
+                });
+            }
+            return;
+        };
+        let Some(ascii) = ascii_id() else { return };
+        STATE.with_borrow_mut(|s| {
+            if s.saved.is_none() {
+                s.saved = context.selectedKeyboardInputSource();
+            }
+        });
+        select(&context, &ascii);
+    }
+
+    pub fn leave() {
+        let mtm = MainThreadMarker::new().expect("input source off the main thread");
+        let saved = STATE.with_borrow_mut(|s| {
+            s.open = false;
+            s.saved.take()
+        });
+        let Some(saved) = saved else { return };
+        match NSTextInputContext::currentInputContext(mtm) {
+            Some(context) => select(&context, &saved),
+            None => log::warn!("input source: no active context to restore {saved}"),
+        }
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Unsaved-changes guard for Cmd+W / Cmd+Q
@@ -1513,6 +1634,37 @@ fn set_accessibility_hidden(window: tauri::WebviewWindow, hidden: bool) -> Resul
     }
 }
 
+/// A `:` command line opened or closed: switch to the ASCII keyboard and back
+/// (see `input_source`). Synchronous, so it runs on the main thread and the
+/// webview's promise resolves only after a restore has landed.
+#[tauri::command]
+fn cmdline_input_source(app: AppHandle, entering: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        let main = app.clone();
+        let run = move || {
+            if entering {
+                input_source::enter(main);
+            } else {
+                input_source::leave();
+            }
+        };
+        if objc2::MainThreadMarker::new().is_some() {
+            run();
+        } else {
+            let (done, wait) = std::sync::mpsc::channel();
+            if app.run_on_main_thread(move || {
+                run();
+                let _ = done.send(());
+            }).is_ok() {
+                let _ = wait.recv();
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, entering);
+}
+
 #[tauri::command]
 async fn nvim_wingrammarly(
     app: AppHandle,
@@ -1941,7 +2093,8 @@ pub fn run() {
             nvim_clip_yank,
             new_window,
             new_tab,
-            tabbar_visible
+            tabbar_visible,
+            cmdline_input_source
         ])
         .menu(|handle| build_menu(handle))
         .on_menu_event(|app, event| match event.id().as_ref() {

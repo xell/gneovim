@@ -420,6 +420,15 @@ function gridInsertActive() {
 function gridTextInputActive() {
   return session.cmdlineActive || gridInsertActive();
 }
+// A `:` command line switches to the ASCII keyboard so `:w` is not composed
+// by a CJK IME; closing it restores the previous source. Everywhere else the
+// user's source just stays: Normal mode already works under a CJK IME.
+let cmdlineAscii = false;
+function cmdlineInputSource(entering) {
+  return nvim
+    .cmdlineInputSource(entering)
+    .catch((e) => jlog("cmdline_input_source failed: " + e));
+}
 // #ime stays FOCUSED whenever a grid window holds the cursor, in every mode, so
 // macOS keeps the user's chosen input source. It is only contenteditable in
 // insert/replace mode or while Neovim owns a command line; outside either, a
@@ -1256,15 +1265,26 @@ addEventListener("error", (e) => {
         if (isl.bufnr === buf) isl.applyBufLines(firstline, lastline, linedata);
     }),
     nvim.on("cursor", (e) => applyCursorEcho(e.payload)),
-    nvim.on("cmdline", () => {
+    nvim.on("cmdline", (e) => {
+      // Fires on every keystroke too; only the first `:` switches, once #ime
+      // is editable so its input context can take the change.
+      const opening = !session.cmdlineActive;
       session.setCmdlineActive(true);
       updateImeFocus();
       syncGrammarlyAccessibility();
+      if (opening && e.payload.ctype === ":") {
+        cmdlineAscii = true;
+        cmdlineInputSource(true);
+      }
     }),
     nvim.on("cmdline_hide", () => {
       session.setCmdlineActive(false);
-      updateImeFocus();
       syncGrammarlyAccessibility();
+      if (!cmdlineAscii) return updateImeFocus();
+      // Restore while #ime is still editable: an inactive input context
+      // does not take the change (see input_source in lib.rs).
+      cmdlineAscii = false;
+      cmdlineInputSource(false).then(updateImeFocus);
     }),
     nvim.on("focus", () => repaintNow()),
     nvim.on("look_up", () => islandLookup()),
