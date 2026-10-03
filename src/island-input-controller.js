@@ -76,6 +76,12 @@ export class IslandInputController {
     this.view = null;
     this.composition = null;
     this.compositionSettling = false;
+    // CodeMirror's document holds IME preedit text Neovim does not have, so
+    // its positions do not map to Neovim's buffer. Set only by a compose
+    // transaction that changed the document, cleared at commit and by any
+    // Neovim line echo, so unlike the flags 54d7411 stopped trusting it
+    // cannot outlive the next echo.
+    this.preedit = false;
     // The cursor most recently requested from Neovim and not yet confirmed by
     // its gnv_cursor echo. Between the request and the echo the DOM selection
     // already sits there while getCursor() still reports the old position, so
@@ -149,6 +155,7 @@ export class IslandInputController {
   finishComposition(committed) {
     const snapshot = this.composition;
     this.composition = null;
+    this.preedit = false;
     if (!snapshot) return;
     const current = this.view.state.doc.toString();
     const text = committed || diffInserted(snapshot.text, current);
@@ -171,12 +178,14 @@ export class IslandInputController {
     // Forwarding a composition before completion, then applying the buffer
     // echo, aborts the browser's active composition.
     if (
-      this.composition ||
       update.transactions.some((transaction) =>
         transaction.isUserEvent("input.type.compose"),
       )
-    )
+    ) {
+      this.preedit = true;
       return;
+    }
+    if (this.composition) return;
     const buffer = this.getBuffer();
     if (buffer == null) return;
     const regions = externalEditRegions(update.startState.doc, update.changes);
@@ -190,9 +199,15 @@ export class IslandInputController {
     // desktop editors using AXSelectedTextRange. Deliberately decide from the
     // transaction itself, as in the verified a42cda1 fix: persistent browser
     // composition flags can be stale and must not veto an external placement.
+    // The exception is live preedit text (see `preedit`): the caret moving
+    // through it is the IME's own, and its position counts characters Neovim
+    // does not have. Forwarding it seated Neovim's cursor inside a multibyte
+    // character, and the commit then wiped the whole line (confirmed live
+    // 2026-10-03, Shuangpin on a long CJK line).
     // A ranged selection is left in place: it only gains a meaning when a key
     // arrives while it is still selected (see syncSelectionBeforeInput).
     if (
+      this.preedit ||
       update.docChanged ||
       !update.selectionSet ||
       update.transactions.some(
@@ -397,5 +412,6 @@ export class IslandInputController {
 
   settleComposition() {
     this.compositionSettling = false;
+    this.preedit = false;
   }
 }

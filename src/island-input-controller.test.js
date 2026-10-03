@@ -246,6 +246,41 @@ describe("IslandInputController", () => {
     expect(inputQueue.cursor).toHaveBeenCalledWith(0, 4);
   });
 
+  it("does not forward the caret moving through live IME preedit text", () => {
+    const { controller, frames, fromNvim, inputQueue, view } = fixture();
+    const selectionUpdate = {
+      docChanged: false,
+      selectionSet: true,
+      state: { doc: view.state.doc, selection: EditorSelection.single(2) },
+      transactions: [transaction(fromNvim)],
+    };
+    controller.onCompositionStart();
+    controller.onDocumentUpdate({
+      docChanged: true,
+      transactions: [transaction(fromNvim, { userEvent: true })],
+    });
+    controller.onSelectionUpdate(selectionUpdate);
+    expect(inputQueue.cursor).not.toHaveBeenCalled();
+
+    // Committing ends the preedit: an external placement counts again.
+    controller.onCompositionEnd("看");
+    frames.forEach((frame) => frame());
+    controller.onSelectionUpdate(selectionUpdate);
+    expect(inputQueue.cursor).toHaveBeenCalledWith(0, 4);
+
+    // A Neovim echo also ends it, even if the commit event never arrived.
+    controller.onNvimCursor(0, 4);
+    inputQueue.cursor.mockClear();
+    controller.onCompositionStart();
+    controller.onDocumentUpdate({
+      docChanged: true,
+      transactions: [transaction(fromNvim, { userEvent: true })],
+    });
+    controller.settleComposition();
+    controller.onSelectionUpdate(selectionUpdate);
+    expect(inputQueue.cursor).toHaveBeenCalledWith(0, 4);
+  });
+
   it("orders a Grammarly AX selection before its posted key", async () => {
     const cursorRequest = deferred();
     const client = {
