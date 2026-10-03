@@ -205,7 +205,16 @@ export class IslandInputController {
     const selection = update.state.selection.main;
     if (!selection.empty) return;
     const target = this.cursorAt(update.state.doc, selection.head);
-    if (!this.cursorMatches(target)) this.requestCursor(target);
+    // The DOM caret cannot enter a rendered table or image, so while Neovim's
+    // cursor is behind one the native selection sits outside it, and
+    // CodeMirror re-reads it on window refocus. Same guard as
+    // syncSelectionBeforeInput: never honour that as an external placement.
+    if (
+      !this.cursorMatches(target) &&
+      !this.isCursorHidden(this.getCursor()) &&
+      !this.isCursorHidden(target)
+    )
+      this.requestCursor(target);
   }
 
   onMousedown(event, view) {
