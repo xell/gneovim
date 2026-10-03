@@ -297,6 +297,13 @@ export function createMarkdownPresentation({
     appendElements(container, elements, 0, text.length);
   }
 
+  // Last rendered height per table content (cursor excluded). Every cursor
+  // move inside a table builds a new widget, and with no estimate CodeMirror
+  // first sizes the block from its few source lines, then measures the real
+  // table and "restores" its scroll anchor over the difference, undoing the
+  // cursor scroller's move.
+  const tableHeights = new Map();
+
   class MarkdownTableWidget extends WidgetType {
     constructor(
       header,
@@ -324,14 +331,26 @@ export function createMarkdownPresentation({
         cellOverlays,
         bufferName,
       ]);
+      this.heightKey = JSON.stringify([header, align, rows, bufferName]);
     }
 
     eq(other) {
       return other.key === this.key;
     }
 
+    get estimatedHeight() {
+      return tableHeights.get(this.heightKey) ?? -1;
+    }
+
     toDOM() {
       const table = document.createElement("table");
+      globalThis.requestAnimationFrame?.(() => {
+        if (!table.offsetHeight) return;
+        tableHeights.delete(this.heightKey);
+        tableHeights.set(this.heightKey, table.offsetHeight);
+        if (tableHeights.size > 64)
+          tableHeights.delete(tableHeights.keys().next().value);
+      });
       table.className = "cm-markdown-table";
       table.setAttribute("contenteditable", "false");
       table.setAttribute("aria-label", "Markdown table");
