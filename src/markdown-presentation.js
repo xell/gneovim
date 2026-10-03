@@ -420,6 +420,25 @@ export function createMarkdownPresentation({
       offset -= candidate.length;
     }
     offset = Math.min(offset, textNode.length);
+    // A cursor on hidden markup (the `**` of bold text) would put the caret
+    // inside a display:none source shadow, invisible and with no geometry for
+    // the cursor scroller to measure; show it on the nearest visible text.
+    const isShadow = (node) =>
+      node.parentElement?.closest(".cm-markdown-source-shadow");
+    if (isShadow(textNode)) {
+      const index = textNodes.indexOf(textNode);
+      const next = textNodes.slice(index + 1).find((node) => !isShadow(node));
+      const previous = textNodes
+        .slice(0, index)
+        .findLast((node) => !isShadow(node));
+      if (next) {
+        textNode = next;
+        offset = 0;
+      } else if (previous) {
+        textNode = previous;
+        offset = previous.length;
+      }
+    }
     const range = document.createRange();
     if (cursor.mode[0] !== "i" && offset < textNode.length) {
       range.setStart(textNode, offset);
