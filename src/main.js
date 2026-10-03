@@ -162,16 +162,30 @@ function measureCell() {
   viewportEl.style.setProperty("--cell-h", cellH + "px");
 }
 
-function applyGuiOptRaw(name, value) {
+// guifontwide's family goes right after guifont's in the stack: CSS can't
+// scope a font to double-width cells, so wide glyphs reach it only by falling
+// through a guifont family that lacks them (true of most Latin coding fonts).
+let guiFontFamily = "";
+let guiFontWideFamily = "";
+const cssFamily = (family) => (/[^\w-]/.test(family) ? `"${family}"` : family);
+function applyGridFontFamily() {
   const root = document.documentElement.style;
+  const fams = [guiFontFamily, guiFontWideFamily].filter(Boolean).map(cssFamily);
+  if (fams.length)
+    root.setProperty("--grid-font-family", `${fams.join(", ")}, ${GRID_FONT_FALLBACK}`);
+  else root.removeProperty("--grid-font-family");
+}
+
+function applyGuiOptRaw(name, value) {
   if (name === "guifont") {
     const f = parseGuifont(value);
-    if (f && f.family) {
-      const fam = /[^\w-]/.test(f.family) ? `"${f.family}"` : f.family;
-      root.setProperty("--grid-font-family", `${fam}, ${GRID_FONT_FALLBACK}`);
-    } else root.removeProperty("--grid-font-family");
+    guiFontFamily = f?.family || "";
+    applyGridFontFamily();
     guiFontBaseSize = f?.size || GUI_FONT_DEFAULT;
     applyFontZoom();
+  } else if (name === "guifontwide") {
+    guiFontWideFamily = parseGuifont(value)?.family || "";
+    applyGridFontFamily();
   } else if (name === "linespace") {
     gridLinespace = Math.max(0, parseInt(value, 10) || 0);
   }

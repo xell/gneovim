@@ -111,10 +111,14 @@ body {
    :terminal TUI paints a background on every cell, and the seams then read as
    light horizontal lines across the buffer. inline-block plus the cell height
    makes each run's background box exactly one cell tall, the same trick
-   .wide below already uses for its own reason. */
+   .wide below already uses for its own reason. vertical-align: top because
+   .wide's overflow: hidden moves its baseline to its bottom edge, which on
+   the shared text baseline lifts the CJK glyph and pushes the row's other
+   runs down a descent's worth, into the next row. */
 .grid-row > span {
   display: inline-block;
   height: var(--cell-h, 17px);
+  vertical-align: top;
 }
 /* a double-width glyph pinned to exactly two cells */
 .grid-row .wide {

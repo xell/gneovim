@@ -183,7 +183,8 @@ font-family notation (`"serif"`, `"system-ui"`). Each is unset by default:
 - `font_sans_serif` unset leaves headings inheriting the body serif font;
   gneovim does not otherwise give headings a font of their own.
 - `font_mono` unset keeps the built-in monospace stack, which itself already
-  tracks Neovim's own `guifont` when one is set.
+  tracks Neovim's own `guifont` (and `guifontwide`, as the next
+  family in the stack) when one is set.
 
 A configured value is prepended in front of the built-in stack for its role,
 never replacing it, so a misspelled or uninstalled font name is harmless: CSS
