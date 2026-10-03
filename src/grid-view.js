@@ -1,5 +1,7 @@
 import { GridStore } from "./grid-store.js";
 
+const PLAIN_ASCII = /^[\x20-\x7e]$/;
+
 // A Neovim grid rendered as reusable DOM rows. Browser and highlight
 // dependencies are injected so this module has no import-time DOM side effects.
 export class GridView {
@@ -90,12 +92,16 @@ export class GridView {
         flush();
         runHighlight = highlight;
       }
-      if (col + 1 < this.cols && row[col + 1][0] === "") {
+      const wide = col + 1 < this.cols && row[col + 1][0] === "";
+      // A non-ASCII cell is pinned too: its glyph often comes from a fallback
+      // font wider than one cell (⚠, …, ✻), which in a flowing text run
+      // shifts the rest of the row right. Pinned, it can only overlap.
+      if (wide || !PLAIN_ASCII.test(character)) {
         flush();
         const span = this.document.createElement("span");
-        span.className = "wide";
+        span.className = wide ? "wide" : "narrow";
         span.style.cssText =
-          this.highlightCss(highlight) + `width:${2 * this.cellWidth()}px`;
+          this.highlightCss(highlight) + `width:${(wide ? 2 : 1) * this.cellWidth()}px`;
         span.textContent = character;
         fragment.append(span);
       } else {

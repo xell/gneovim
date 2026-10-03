@@ -249,3 +249,49 @@ Verify:
 9. `h` and `l` move one Chinese character at a time.
 10. Bare `w` follows Chinese semantic segments.
 11. `2w`, `dw`, `cw`, and `yw` remain native and never freeze the GUI.
+
+## Unicode characters test
+
+```
+⏺ The memory file says the ellip 2026 row that was still off was my mistake. I typed six … there and five glyphs in every other row. The prompt below has
+  that row fixed to five. The memory already covers the hotfix (63efb31), so I didn't need to save anything new.
+
+  Copy everything inside the outer fence: 
+
+  Testing session, no code changes. I'm checking how gneovim's grid renders Claude Code's TUI in a :terminal. Rows with non-ASCII symbols (⚠ etc.) used to 
+  push past a vertical separator. Fixed in 63efb31 (each non-ASCII single-width cell pinned to 1 cell in grid-view.js paintRow). See memory 
+  project-grid-cjk-baseline-guifontwide.
+  
+  Please print this alignment test exactly as written, in a code block. Don't retype it from memory: every glyph run is exactly 5 glyphs (VS16 and CJK runs 
+  are 2 glyphs + 1 space), and the left pane is 26 cells and the right pane 30 cells, assuming CJK and ⚠️ with VS16 are 2 cells and everything else is 1:
+
+  ┌──────────────────────────┬──────────────────────────────┐
+  │case        glyphs        │ diff (right pane)            │
+  ├──────────────────────────┼──────────────────────────────┤
+  │ascii       xxxxx         │ 01 + const v01 = true;       │
+  │warn 26A0   ⚠⚠⚠⚠⚠         │ 02 + const v02 = true;       │
+  │warn+VS16   ⚠️⚠️          │ 03 + const v03 = true;       │
+  │star 2605   ★★★★★         │ 04 + const v04 = true;       │
+  │circle 25CF ●●●●●         │ 05 + const v05 = true;       │
+  │record 23FA ⏺⏺⏺⏺⏺         │ 06 + const v06 = true;       │
+  │ref 203B    ※※※※※         │ 07 + const v07 = true;       │
+  │arrow 2192  →→→→→         │ 08 + const v08 = true;       │
+  │ellip 2026  ……………         │ 09 + const v09 = true;       │
+  │info 2139   ℹℹℹℹℹ         │ 10 + const v10 = true;       │
+  │check 2713  ✓✓✓✓✓         │ 11 + const v11 = true;       │
+  │spark 273B  ✻✻✻✻✻         │ 12 + const v12 = true;       │
+  │elbow 23BF  ⎿⎿⎿⎿⎿         │ 13 + const v13 = true;       │
+  │cjk 4E2D    中中          │ 14 + const v14 = true;       │
+  │ascii       xxxxx         │ 15 + const v15 = true;       │
+  └──────────────────────────┴──────────────────────────────┘
+
+  If a row looks off, read the terminal buffer text over the app nvim's socket before blaming the renderer (recipe in that memory file).
+ 
+  One catch: the ellip row in this prompt has a stray extra space, so it's off by one. That row should be │ellip 2026  ……………  followed by 9 spaces before │,
+  the same as ⚠⚠⚠⚠⚠ and the other 5-glyph rows. Fix that one line after you paste, or just tell the next session to rebuild the table with a script that
+  counts cells. The script is the more reliable option, given how this time went.
+ 
+✻ Crunched for 17s · done 11:24 AM
+```
+
+

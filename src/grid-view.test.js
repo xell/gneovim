@@ -45,6 +45,19 @@ describe("GridView", () => {
     expect(fragment.children[1].style.cssText).toBe("hl:2;width:18px");
   });
 
+  it("pins non-ASCII single-width glyphs to one cell", () => {
+    const view = new GridView(2, { document, highlightCss: () => "", cellWidth: () => 9 });
+    view.resize(5, 1);
+    view.line(0, 0, [["a", 0], ["⚠", 0], ["…", 0], ["b", 0], ["c", 0]]);
+
+    view.repaint();
+
+    const fragment = view.rowEls[0].children[0];
+    expect(fragment.children.map((span) => span.textContent)).toEqual(["a", "⚠", "…", "bc"]);
+    expect(fragment.children[1].className).toBe("narrow");
+    expect(fragment.children[2].style.cssText).toBe("width:9px");
+  });
+
   it("reuses row nodes during a full-width scroll", () => {
     const view = new GridView(2, {
       document,
