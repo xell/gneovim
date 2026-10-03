@@ -161,6 +161,13 @@ body {
   padding: 0.2em 0.55em;
   position: relative;
   vertical-align: top;
+  /* CodeMirror's line wrapping sets word-break: break-word (for Safari) and
+     overflow-wrap: anywhere. Both shrink a column's min-content to one glyph,
+     so auto table layout can crush a short-text column to a letter per line.
+     overflow-wrap: break-word still breaks words that overflow but keeps
+     whole words as the column's minimum width. */
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 .island .cm-markdown-table th {
   background: color-mix(in srgb, var(--fg) 8%, transparent);
