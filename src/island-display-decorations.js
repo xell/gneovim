@@ -192,6 +192,7 @@ export class IslandDisplayDecorations {
     this.tableInlineHighlightsKey = null;
     this.interactiveOverlaysKey = null;
     this.incsearchKey = "";
+    this.compositionRetry = 0;
   }
 
   set(payload) {
@@ -314,6 +315,17 @@ export class IslandDisplayDecorations {
   }
 
   apply() {
+    // Changing decorations around text the IME is still composing corrupts
+    // CodeMirror's DOM tile tree (it keeps the composition's DOM in place
+    // while the decorations around it are rebuilt), and the next scroll or
+    // update dies with "Cannot destructure property 'tile'". A closed fold
+    // landing over the composition is the surest trigger. Reproduced headless
+    // 2026-10-03 on @codemirror/view 6.43.11 and 6.43.13. Hold this payload
+    // until the composition is over.
+    if (this.view.compositionStarted) {
+      this.applyAfterComposition();
+      return;
+    }
     const payload = this.payload;
     const doc = this.view.state.doc;
     const {
@@ -638,5 +650,24 @@ export class IslandDisplayDecorations {
     const hadFocus = this.view.hasFocus;
     this.forceRepaint(this.element);
     if (hadFocus) this.view.focus();
+  }
+
+  // Polled per frame rather than hooked to compositionend, which Safari can
+  // omit (see onBeforeInput in island-input-controller.js).
+  applyAfterComposition() {
+    if (this.compositionRetry) return;
+    const retry = () => {
+      if (!this.element.isConnected) {
+        this.compositionRetry = 0;
+        return;
+      }
+      if (this.view.compositionStarted) {
+        this.compositionRetry = this.requestFrame(retry);
+        return;
+      }
+      this.compositionRetry = 0;
+      this.apply();
+    };
+    this.compositionRetry = this.requestFrame(retry);
   }
 }
