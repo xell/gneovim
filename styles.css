@@ -154,9 +154,15 @@ body {
 .island .cm-scroller.cm-nvim-cursor-scroll::-webkit-scrollbar {
   display: none;
 }
+/* Vertical spacing for the table and image blocks is padding, not margin:
+   CodeMirror's height map leaves a block widget's margins out, so margins
+   misplace the gutter's line numbers more with every block above. */
+.island .cm-markdown-table-block {
+  padding: 0.45em 0;
+}
 .island .cm-markdown-table {
   border-collapse: collapse;
-  margin: 0.45em 0.7em;
+  margin: 0 0.7em;
   max-width: 100%;
 }
 .island .cm-markdown-table th,
@@ -192,7 +198,8 @@ body {
   display: none;
 }
 .island .cm-markdown-image {
-  margin: 0.55em 0.7em;
+  margin: 0;
+  padding: 0.55em 0.7em;
 }
 .island .cm-markdown-image img {
   display: block;

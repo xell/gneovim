@@ -343,11 +343,18 @@ export function createMarkdownPresentation({
     }
 
     toDOM() {
+      // CodeMirror measures a block widget without its margins, so a margin
+      // here would push every line below further from where its height map
+      // (and with it the gutter and moveVertically) puts it, one table at a
+      // time. The block's vertical spacing is the wrapper's padding instead.
+      const block = document.createElement("div");
+      block.className = "cm-markdown-table-block";
       const table = document.createElement("table");
+      block.append(table);
       globalThis.requestAnimationFrame?.(() => {
-        if (!table.offsetHeight) return;
+        if (!block.offsetHeight) return;
         tableHeights.delete(this.heightKey);
-        tableHeights.set(this.heightKey, table.offsetHeight);
+        tableHeights.set(this.heightKey, block.offsetHeight);
         if (tableHeights.size > 64)
           tableHeights.delete(tableHeights.keys().next().value);
       });
@@ -393,7 +400,7 @@ export function createMarkdownPresentation({
         addRow(body, row, "td", index + 1),
       );
       table.append(body);
-      return table;
+      return block;
     }
   }
 
