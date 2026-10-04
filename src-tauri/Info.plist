@@ -2,6 +2,17 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.xell.gneovim</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>gneovim</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSRemindersFullAccessUsageDescription</key>
 	<string>gneovim needs access to Reminders so that scripts run in its terminal can create, read, and update your reminders.</string>
 	<key>NSRemindersUsageDescription</key>

@@ -60,7 +60,9 @@ confirm_close = true
 #                 reusing its Neovim (no new window or process)
 # "nvim-tab" falls back to "window" when no gui-window is ready to receive the
 # file. Multiple files open as that many windows / gui-tabs, or as that many
-# Neovim tabpages in the one window.
+# Neovim tabpages in the one window. A gneovim:// URL or the gneovim command
+# can override this per call (target= / -p / --target=); see
+# url-scheme-and-cli.md.
 open_files_in = "window"
 
 # Keyboard shortcut that opens, or brings to the front, the always-on-top

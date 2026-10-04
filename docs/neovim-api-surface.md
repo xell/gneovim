@@ -4,7 +4,7 @@ This document specifies the complete set of user commands, autocmd events, and v
 
 ## Scope
 
-Everything listed here is injected by `bridge::connect` via `exec_lua(include_str!(...))` from three files: `src-tauri/src/runtime/md_preview.lua`, `src-tauri/src/runtime/md_decor.lua`, and `src-tauri/src/runtime/open_in_new_tab.lua`. These files carry a header comment stating they are GUI protocol glue, not a user plugin, so this document draws the line explicitly: anything a user's init file, statusline, or autocmd could reasonably reference is in scope; the RPC notification channel between the embedded Neovim and the Tauri shell (`gnv_md_preview`, `gnv_cursor`, `gnv_win_gutter`, and similar `rpcnotify` payload names) is not, since it exists only between `bridge.rs` and these Lua files and is never meant to be read from Neovim configuration. `config.toml` options are enumerated below for reference, but `configuration.md` is the authoritative doc for loading and behaviour detail.
+Everything listed here is injected by `bridge::connect` via `exec_lua(include_str!(...))` from these files: `src-tauri/src/runtime/md_preview.lua`, `src-tauri/src/runtime/md_decor.lua`, `src-tauri/src/runtime/open_in_new_tab.lua`, and `src-tauri/src/runtime/open_request.lua`. These files carry a header comment stating they are GUI protocol glue, not a user plugin, so this document draws the line explicitly: anything a user's init file, statusline, or autocmd could reasonably reference is in scope; the RPC notification channel between the embedded Neovim and the Tauri shell (`gnv_md_preview`, `gnv_cursor`, `gnv_win_gutter`, and similar `rpcnotify` payload names) is not, since it exists only between `bridge.rs` and these Lua files and is never meant to be read from Neovim configuration. `config.toml` options are enumerated below for reference, but `configuration.md` is the authoritative doc for loading and behaviour detail.
 
 Each item below is a stable, intentional contract. Unlisted globals, augroup names, or buffer variables that happen to appear in the source are implementation detail and may change without notice.
 
@@ -86,6 +86,10 @@ Gneovim's own version string, for configuration that needs to branch on a minimu
 ### `g:gneovim_aot_window`
 
 `true` in the one Neovim instance embedded by the always-on-top window (`File > New Always On Top Window`, or its keyboard shortcut; see `configuration.md`), unset in every other gneovim window. Since a gui-window is one whole embedded Neovim process, this is a global rather than a window variable: it does not vary between splits or tabpages within that instance.
+
+### `g:gneovim_swap_policy`
+
+Set only for the duration of the `:edit` that opens a file from a `gneovim://` URL or the `gneovim` command, to `"readonly"` or `"takeover"`, and unset at every other time. While it is set, gneovim's own `SwapExists` handler answers the swap file question (with "Open Read-Only" for a live owner outside gneovim) and a prompting `SwapExists` handler in your config should return early, for example `if vim.g.gneovim_swap_policy then return end`. A stale swap file is left unanswered, so Neovim's own swap file prompt appears. See `url-scheme-and-cli.md`.
 
 ## `config.toml` options
 

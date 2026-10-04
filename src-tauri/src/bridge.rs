@@ -250,6 +250,25 @@ pub struct OpenSpec {
     /// buffer, from `:OpenInNewGneovimTab` with no args). Mutually exclusive
     /// with `paths` in practice.
     pub content: Option<Vec<String>>,
+    /// Working directory to start nvim in (`gneovim://...&cwd=`, the CLI
+    /// shim's `$PWD`). Ignored unless it is an existing directory.
+    pub cwd: Option<String>,
+}
+
+/// One `gneovim://file/...` open, for [`Bridge::open_request_file`] and
+/// `runtime/open_request.lua`'s `open`.
+pub struct FileOpen<'a> {
+    pub path: &'a str,
+    pub line: Option<u32>,
+    pub col: Option<u32>,
+    /// Set 'readonly' on the buffer after opening.
+    pub readonly: bool,
+    /// One-shot `g:gneovim_swap_policy` for an outside nvim's swap file.
+    pub swap: Option<&'static str>,
+    /// Shown with `vim.notify` once the file is open.
+    pub notice: Option<String>,
+    /// A new tabpage (reusing a pristine one) rather than `:edit` in place.
+    pub tab: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -861,6 +880,10 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
+fn opt_u32(n: Option<u32>) -> Value {
+    n.map_or(Value::Nil, Value::from)
+}
+
 // ---------------------------------------------------------------------------
 // System clipboard, wired to nvim's `+` / `*` registers via a g:clipboard
 // provider (set in connect). Both registers map to the macOS general pasteboard.
@@ -1059,6 +1082,9 @@ pub async fn connect(
     if !open.paths.is_empty() {
         cmd.arg("-p").args(&open.paths);
     }
+    if let Some(dir) = open.cwd.as_deref().filter(|d| std::path::Path::new(d).is_dir()) {
+        cmd.current_dir(dir);
+    }
 
     let shared = Shared {
         tx,
@@ -1250,6 +1276,16 @@ pub async fn connect(
             .await
         {
             log::warn!("open_in_new_tab.lua injection failed: {e}");
+        }
+
+        // `gneovim://file/...` / CLI shim opens: occupied-file handling and the
+        // `g:gneovim_swap_policy` SwapExists handler. Driven by the
+        // `Bridge::*_file` methods through `_G.__gneovim_open`.
+        if let Err(e) = nvim
+            .exec_lua(include_str!("runtime/open_request.lua"), vec![])
+            .await
+        {
+            log::warn!("open_request.lua injection failed: {e}");
         }
 
         // Route a session-ending `ZZ` through the same Cmd+W close guard
@@ -1723,6 +1759,65 @@ impl Bridge {
                 "vim.cmd({ cmd = 'edit', args = { (...) } })",
                 vec![Value::from(path)],
             )
+            .await
+            .map(|_| ())
+            .map_err(err)
+    }
+
+    /// Whether this nvim has `path` loaded (symlink-resolved compare).
+    pub async fn holds_file(&self, path: &str) -> Result<bool, String> {
+        self.nvim
+            .exec_lua("return __gneovim_open.holds(...)", vec![Value::from(path)])
+            .await
+            .map(|v| v.as_bool().unwrap_or(false))
+            .map_err(err)
+    }
+
+    /// Jump to the loaded `path` (its window, or a new tabpage) at line/col.
+    pub async fn reveal_file(
+        &self,
+        path: &str,
+        line: Option<u32>,
+        col: Option<u32>,
+    ) -> Result<(), String> {
+        self.nvim
+            .exec_lua(
+                "return __gneovim_open.reveal(...)",
+                vec![Value::from(path), opt_u32(line), opt_u32(col)],
+            )
+            .await
+            .map(|_| ())
+            .map_err(err)
+    }
+
+    /// Save, then unload `path` so another nvim can take it over.
+    pub async fn release_file(&self, path: &str) -> Result<(), String> {
+        let v = self
+            .nvim
+            .exec_lua("return __gneovim_open.release(...)", vec![Value::from(path)])
+            .await
+            .map_err(err)?;
+        match v.as_str() {
+            Some("OK") => Ok(()),
+            Some(e) => Err(e.trim_start_matches("ERR:").to_string()),
+            None => Err(format!("unexpected reply {v}")),
+        }
+    }
+
+    /// Open a file for a `gneovim://` request; see [`FileOpen`].
+    pub async fn open_request_file(&self, o: &FileOpen<'_>) -> Result<(), String> {
+        let opt_str = |s: Option<&str>| s.map_or(Value::Nil, Value::from);
+        let spec = Value::Map(vec![
+            ("path".into(), o.path.into()),
+            ("line".into(), opt_u32(o.line)),
+            ("col".into(), opt_u32(o.col)),
+            ("readonly".into(), o.readonly.into()),
+            ("swap".into(), opt_str(o.swap)),
+            ("notice".into(), opt_str(o.notice.as_deref())),
+            ("tab".into(), o.tab.into()),
+        ]);
+        self.nvim
+            .exec_lua("return __gneovim_open.open(...)", vec![spec])
             .await
             .map(|_| ())
             .map_err(err)

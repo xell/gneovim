@@ -1,13 +1,15 @@
 pub mod bridge;
 pub mod config;
+pub mod open_url;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use bridge::{Bridge, BridgeEvent, OpenSpec, Region, ResetPayload};
+use bridge::{Bridge, BridgeEvent, FileOpen, OpenSpec, Region, ResetPayload};
 use config::OpenTarget;
+use open_url::{OpenRequest, SwapPolicy};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::{
     async_runtime, AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
@@ -1295,7 +1297,12 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec, always_on_top: bo
                     BridgeEvent::OpenNewTab { paths, content } => {
                         let tab_app = emit_app.clone();
                         emit_app.run_on_main_thread(move || {
-                            spawn_window(&tab_app, true, OpenSpec { paths, content }, false);
+                            spawn_window(
+                                &tab_app,
+                                true,
+                                OpenSpec { paths, content, ..Default::default() },
+                                false,
+                            );
                         })
                     }
                     // `ZZ` would have ended this nvim's session; run it through
@@ -2058,6 +2065,110 @@ async fn open_paths(app: AppHandle, paths: Vec<String>) {
     }
 }
 
+fn focus_window(app: &AppHandle, label: &str) {
+    if let Some(w) = app.get_webview_window(label) {
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// The gui-window whose Neovim has `path` loaded, if any. A Neovim that does
+/// not answer promptly (stuck in a prompt, say) counts as not holding it.
+async fn find_holder(app: &AppHandle, path: &str) -> Option<(String, Bridge)> {
+    let bridges: Vec<(String, Bridge)> = app
+        .state::<AppState>()
+        .windows
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(label, w)| (label.clone(), w.bridge.clone()))
+        .collect();
+    for (label, b) in bridges {
+        if let Ok(Ok(true)) =
+            tokio::time::timeout(Duration::from_millis(500), b.holds_file(path)).await
+        {
+            return Some((label, b));
+        }
+    }
+    None
+}
+
+/// Open one `gneovim://file/...` request. The file is routed like
+/// [`open_paths`] (`target=` overriding `[window] open_files_in`), except when
+/// another gui-window's Neovim already has it loaded: then `swap=` decides
+/// (reveal there, open readonly here, or take it over). There is no conflict
+/// when the receiving Neovim is itself the holder; it just jumps there.
+async fn open_request(app: AppHandle, req: OpenRequest) {
+    let path = std::fs::canonicalize(&req.path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| req.path.clone());
+    let target = req.target.unwrap_or_else(|| crate::config::get().window.open_target());
+    let policy = req.swap_policy();
+    let receiver = (target == OpenTarget::NvimTab)
+        .then(|| recipient_window(&app))
+        .flatten();
+
+    let mut open = FileOpen {
+        path: &path,
+        line: req.line,
+        col: req.col,
+        readonly: req.readonly,
+        swap: policy.lua_name(),
+        notice: None,
+        tab: false,
+    };
+
+    if let Some((holder, b)) = find_holder(&app, &path).await {
+        if policy == SwapPolicy::Reveal || receiver.as_deref() == Some(holder.as_str()) {
+            if let Err(e) = b.reveal_file(&path, req.line, req.col).await {
+                log::warn!("gneovim://: reveal {path} in {holder}: {e}");
+            }
+            focus_window(&app, &holder);
+            return;
+        }
+        match policy {
+            SwapPolicy::Takeover => {
+                if let Err(e) = b.release_file(&path).await {
+                    log::warn!("gneovim://: takeover of {path} from {holder} failed: {e}");
+                    open.readonly = true;
+                    open.swap = SwapPolicy::Readonly.lua_name();
+                    open.notice = Some(format!("takeover failed ({e}); opened readonly"));
+                }
+            }
+            // Also covers a holder running with 'noswapfile', where no
+            // SwapExists fires to answer 'o'.
+            SwapPolicy::Readonly => open.readonly = true,
+            _ => {}
+        }
+    }
+
+    if let Some(label) = receiver {
+        if let Ok(b) = bridge_for(&app, &label).await {
+            open.tab = true;
+            if b.open_request_file(&open).await.is_ok() {
+                focus_window(&app, &label);
+                return;
+            }
+        }
+        log::warn!("gneovim://: target nvim-tab: no ready gui-window, opening a new one");
+    }
+    open.tab = false;
+
+    let spec = OpenSpec { cwd: req.cwd.clone(), ..Default::default() };
+    let as_tab = target == OpenTarget::Tab;
+    let Some(label) = spawn_window(&app, as_tab, spec, false) else {
+        return;
+    };
+    match bridge_for(&app, &label).await {
+        Ok(b) => {
+            if let Err(e) = b.open_request_file(&open).await {
+                log::warn!("gneovim://: open {path}: {e}");
+            }
+        }
+        Err(e) => log::warn!("gneovim://: {e}"),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2214,6 +2325,25 @@ pub fn run() {
                     .collect();
                 if !paths.is_empty() {
                     async_runtime::spawn(open_paths(_app.clone(), paths));
+                }
+                // `gneovim://` URLs (link templates, the `gneovim` CLI shim).
+                // Sequential, so a batch lands in a predictable order.
+                let reqs: Vec<OpenRequest> = urls
+                    .iter()
+                    .filter(|u| u.scheme() == "gneovim")
+                    .filter_map(|u| {
+                        open_url::parse(u)
+                            .map_err(|e| log::warn!("gneovim://: {e}"))
+                            .ok()
+                    })
+                    .collect();
+                if !reqs.is_empty() {
+                    let app = _app.clone();
+                    async_runtime::spawn(async move {
+                        for req in reqs {
+                            open_request(app.clone(), req).await;
+                        }
+                    });
                 }
             }
         });

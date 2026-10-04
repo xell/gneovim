@@ -1,0 +1,133 @@
+#!/bin/bash
+# gneovim: open files in gneovim from a shell, with Neovim style arguments.
+#
+# Shipped inside the app bundle (Contents/Resources/bin/gneovim); install with
+#   ln -s /Applications/gneovim.app/Contents/Resources/bin/gneovim /usr/local/bin/gneovim
+#
+# Every argument is turned into a gneovim://file/... URL (see
+# src-tauri/src/open_url.rs) and handed to the app with `open`, so the shell
+# returns at once. That URL scheme is public, any web page can fire it, so it
+# never carries Ex commands: only +N and +call cursor(N,M) are accepted here.
+
+set -u
+
+usage() {
+    cat <<'EOF'
+Usage: gneovim [options] [+N | "+call cursor(N,M)"] [file ...]
+
+Options:
+  -p                 Open the files as Neovim tabpages in the last focused
+                     gui-window (target nvim-tab).
+  -R                 Readonly: every file opens with 'readonly' set.
+  --target=T         Where files land: window, tab (a macOS gui-tab) or
+                     nvim-tab. Default: config.toml [window] open_files_in.
+  --swap=P           When the file is already open in another Neovim:
+                       reveal    jump to the gneovim window holding it (default)
+                       readonly  open it here readonly (default with -R)
+                       takeover  the holder saves and lets go, then open here
+                       ask       let Neovim's swap file handling ask
+  +N                 Put the cursor on line N of the first file.
+  +call cursor(N,M)  Line N, byte column M of the first file.
+  -h, --help         Show this help.
+  -v, --version      Show the gneovim version.
+
+Relative paths resolve against the current directory, which also becomes the
+working directory of a newly spawned Neovim. With no files, gneovim is just
+brought to the front.
+EOF
+}
+
+die() {
+    echo "gneovim: $*" >&2
+    exit 2
+}
+
+# The .app this script lives in, through the /usr/local/bin symlink.
+self=$(realpath "$0" 2>/dev/null || echo "$0")
+app=${self%/Contents/Resources/bin/*}
+[ "$app" != "$self" ] && [ -d "$app/Contents" ] || app=
+
+# Percent-encode everything but unreserved characters and '/'. Byte-wise, so a
+# ':' in a file name becomes %3A and is never read as :line.
+enc() {
+    local LC_ALL=C s=$1 out= c i
+    for ((i = 0; i < ${#s}; i++)); do
+        c=${s:i:1}
+        case $c in
+            [A-Za-z0-9._~/-]) out+=$c ;;
+            *) out+=$(printf '%%%02X' $(($(printf '%d' "'$c") & 255))) ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+target= readonly= swap= line= col=
+files=()
+opts_done=
+for arg in "$@"; do
+    if [ -n "$opts_done" ]; then
+        files+=("$arg")
+        continue
+    fi
+    case $arg in
+        --) opts_done=1 ;;
+        -h | --help) usage; exit 0 ;;
+        -v | --version)
+            [ -n "$app" ] || die "cannot find the gneovim.app this script belongs to"
+            echo "gneovim $(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist")"
+            exit 0
+            ;;
+        -p) target=nvim-tab ;;
+        -R) readonly=1 ;;
+        --target=window | --target=tab | --target=nvim-tab) target=${arg#--target=} ;;
+        --target=*) die "--target must be window, tab or nvim-tab" ;;
+        --swap=reveal | --swap=readonly | --swap=takeover | --swap=ask) swap=${arg#--swap=} ;;
+        --swap=*) die "--swap must be reveal, readonly, takeover or ask" ;;
+        +*)
+            cmd=${arg#+}
+            if [[ $cmd =~ ^[0-9]+$ ]]; then
+                line=$cmd col=
+            elif [[ $cmd =~ ^call\ +cursor\(\ *([0-9]+)\ *,\ *([0-9]+)\ *\)$ ]]; then
+                line=${BASH_REMATCH[1]} col=${BASH_REMATCH[2]}
+            else
+                die "only +N and \"+call cursor(N,M)\" are supported, not: $arg"
+            fi
+            ;;
+        -?*) die "unsupported option: $arg (see gneovim --help)" ;;
+        *) files+=("$arg") ;;
+    esac
+done
+
+open_args=()
+[ -n "$app" ] && open_args=(-a "$app")
+
+if [ ${#files[@]} -eq 0 ]; then
+    if [ -n "$app" ]; then
+        exec open "$app"
+    fi
+    exec open -b com.xell.gneovim
+fi
+
+query="cwd=$(enc "$PWD")"
+[ -n "$target" ] && query+="&target=$target"
+[ -n "$readonly" ] && query+="&readonly=1"
+[ -n "$swap" ] && query+="&swap=$swap"
+
+urls=()
+first=1
+for f in "${files[@]}"; do
+    case $f in
+        /*) abs=$f ;;
+        *) abs=$PWD/$f ;;
+    esac
+    pos=
+    # Like Neovim, +cmd applies to the first file.
+    if [ -n "$first" ] && [ -n "$line" ]; then
+        pos=":$line"
+        [ -n "$col" ] && pos+=":$col"
+    fi
+    first=
+    urls+=("gneovim://file$(enc "$abs")$pos?$query")
+done
+
+exec open ${open_args[@]+"${open_args[@]}"} "${urls[@]}"
