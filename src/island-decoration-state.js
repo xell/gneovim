@@ -1,4 +1,4 @@
-import { StateEffect, StateField } from "@codemirror/state";
+import { StateEffect, StateField, findClusterBreak } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import { byteToCol } from "./pure/text-geometry.js";
 
@@ -115,7 +115,12 @@ export function createIslandDecorationState({ document, log }) {
         }).range(from),
       ]);
     }
-    const to = Math.min(from + 1, line.to);
+    // Cover the whole grapheme cluster, not one UTF-16 unit: splitting a
+    // surrogate pair or a flag's regional-indicator pair renders tofu.
+    const to = Math.min(
+      line.from + findClusterBreak(line.text, from - line.from),
+      line.to,
+    );
     return from === to
       ? Decoration.set([
           Decoration.widget({
