@@ -87,18 +87,20 @@ function stepInTable(view, table, line, pos, forward, goal, contentLeft) {
       goal,
     };
   }
-  // Leave the table. moveVertically from the widget's edge scans past it to
-  // the adjacent line at the goal column. If that line does not exist (the
-  // table opens or closes the document), stay put: falling back to Neovim's
-  // gj would walk the hidden wrap of the source row instead.
-  const edge = doc.line(forward ? table.last : table.first);
-  const next = view.moveVertically(
-    EditorSelection.cursor(forward ? edge.to : edge.from, undefined, undefined, goal),
-    forward,
-  );
-  const landed = doc.lineAt(next.head).number;
-  if (landed !== (forward ? table.last + 1 : table.first - 1)) return { pos, goal };
-  return { pos: next.head, goal };
+  // Leave the table onto the adjacent source line: its first visual line
+  // going down, its last going up, at the goal column. moveVertically from
+  // the widget's edge is not used here: it overshoots, skipping the blank
+  // line after a table or landing in an earlier table. If the adjacent line
+  // does not exist (the table opens or closes the document), stay put:
+  // falling back to Neovim's gj would walk the hidden wrap of the source row
+  // instead.
+  const number = forward ? table.last + 1 : table.first - 1;
+  if (number < 1 || number > doc.lines) return { pos, goal };
+  const target = doc.line(number);
+  const visual = view.coordsAtPos(forward ? target.from : target.to, forward ? 1 : -1);
+  if (!visual) return { pos: forward ? target.from : target.to, goal };
+  const hit = view.posAtCoords({ x, y: (visual.top + visual.bottom) / 2 }, false);
+  return { pos: Math.min(Math.max(hit, target.from), target.to), goal };
 }
 
 // The rendered table widget covering 1-based `lineNumber`, as its element and
