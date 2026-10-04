@@ -31,6 +31,13 @@ local function find_buf(path)
   end
 end
 
+-- Rust sends an absent field as msgpack nil, which arrives as vim.NIL: a
+-- truthy userdata, not Lua nil.
+local function arg(v)
+  if v == vim.NIL then return nil end
+  return v
+end
+
 local function set_cursor(line, col)
   if line then
     pcall(vim.fn.cursor, line, col or 1)
@@ -53,6 +60,7 @@ end
 -- Jump to the loaded buffer: its window if it has one (switching tabpage),
 -- else a new tabpage showing it.
 function M.reveal(path, line, col)
+  line, col = arg(line), arg(col)
   local b = find_buf(path)
   if not b then return false end
   local wins = vim.fn.win_findbuf(b)
@@ -109,6 +117,7 @@ end
 ---   tab: open as a new tabpage, reusing a still pristine [No Name] tab
 ---   (like open_files_as_tabs); otherwise `:edit` in the current window.
 function M.open(o)
+  for k, v in pairs(o) do o[k] = arg(v) end
   local cmd = 'edit'
   if o.tab then
     local buf = vim.api.nvim_get_current_buf()
