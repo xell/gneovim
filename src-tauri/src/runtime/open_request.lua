@@ -112,24 +112,29 @@ function M.release(path)
   return res
 end
 
---- Open a file for a URL / CLI request.
---- @param o table { path, line?, col?, readonly?, swap?, notice?, tab? }
----   tab: open as a new tabpage, reusing a still pristine [No Name] tab
----   (like open_files_as_tabs); otherwise `:edit` in the current window.
+-- One tabpage, one window, an unnamed unmodified buffer: a just-launched
+-- nvim nobody has touched.
+function M.pristine()
+  local buf = vim.api.nvim_get_current_buf()
+  return vim.api.nvim_buf_get_name(buf) == ''
+    and not vim.bo[buf].modified
+    and #vim.api.nvim_list_tabpages() == 1
+    and #vim.api.nvim_tabpage_list_wins(0) == 1
+end
+
+--- Open a file for a URL / CLI / Finder request.
+--- @param o table { path, line?, col?, readonly?, swap?, notice?, tab?, tcd? }
+---   tab: open as a new tabpage, reusing a still pristine [No Name] tab;
+---   otherwise `:edit` in the current window.
+---   tcd: `:tcd` the file's tabpage to this directory once it is open.
 function M.open(o)
   for k, v in pairs(o) do o[k] = arg(v) end
-  local cmd = 'edit'
-  if o.tab then
-    local buf = vim.api.nvim_get_current_buf()
-    local pristine = vim.api.nvim_buf_get_name(buf) == ''
-      and not vim.bo[buf].modified
-      and #vim.api.nvim_list_tabpages() == 1
-      and #vim.api.nvim_tabpage_list_wins(0) == 1
-    if not pristine then cmd = 'tabedit' end
-  end
+  local cmd = (o.tab and not M.pristine()) and 'tabedit' or 'edit'
 
   vim.g.gneovim_swap_policy = o.swap
-  local ok, err = pcall(vim.cmd, { cmd = cmd, args = { o.path } })
+  -- magic.file off: a '#' or '%' in the name is literal, not the alternate /
+  -- current file name.
+  local ok, err = pcall(vim.cmd, { cmd = cmd, args = { o.path }, magic = { file = false } })
   vim.g.gneovim_swap_policy = nil
   if not ok then
     -- E325 here means the swap question was answered "quit".
@@ -137,6 +142,9 @@ function M.open(o)
     return false
   end
   if o.readonly then vim.bo.readonly = true end
+  if o.tcd then
+    pcall(vim.cmd, { cmd = 'tcd', args = { o.tcd }, magic = { file = false } })
+  end
   set_cursor(o.line, o.col)
   if o.notice then notify(o.notice) end
   return true

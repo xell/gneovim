@@ -57,7 +57,7 @@ Session restore across a full app restart in prod is a future feature. It would 
 
 ## Files opened from outside (Open with, drag to dock)
 
-Default: a new gui-window, a new nvim, launched as `nvim --headless --listen <sock> <file>`. The `[window] open_files_in` config key changes this to `"tab"` (a new gui-tab, still its own nvim) or `"nvim-tab"` (a new nvim tabpage in the last-focused gui-window, reusing its nvim; falls back to a new gui-window when none is ready). See `docs/configuration.md`.
+Default: a new gui-window, a new nvim, started in the file's folder. The `[window] open_files_in` config key changes this to `"tab"` (a new gui-tab, still its own nvim) or `"nvim-tab"` (a new nvim tabpage in the last-focused gui-window, reusing its nvim and `:tcd`'d to the file's folder; falls back to a new gui-window when none is ready). See `docs/configuration.md`. A file already loaded in some gui-window's nvim is revealed there instead of opened twice, and an untouched last-focused window (such as the initial one on a cold launch) takes the file instead of a new window opening next to it. These opens share the `gneovim://` URL path; see `docs/url-scheme-and-cli.md`.
 
 ## The always-on-top window
 

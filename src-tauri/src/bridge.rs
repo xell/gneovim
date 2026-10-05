@@ -269,6 +269,9 @@ pub struct FileOpen<'a> {
     pub notice: Option<String>,
     /// A new tabpage (reusing a pristine one) rather than `:edit` in place.
     pub tab: bool,
+    /// `:tcd` the file's tabpage here once it is open (an existing Neovim,
+    /// whose process directory is never changed).
+    pub tcd: Option<&'a str>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1752,22 +1755,21 @@ impl Bridge {
             .map_err(err)
     }
 
-    /// `:edit` a file path, splitting nothing on spaces.
-    pub async fn open_file(&self, path: &str) -> Result<(), String> {
-        self.nvim
-            .exec_lua(
-                "vim.cmd({ cmd = 'edit', args = { (...) } })",
-                vec![Value::from(path)],
-            )
-            .await
-            .map(|_| ())
-            .map_err(err)
-    }
-
     /// Whether this nvim has `path` loaded (symlink-resolved compare).
     pub async fn holds_file(&self, path: &str) -> Result<bool, String> {
         self.nvim
             .exec_lua("return __gneovim_open.holds(...)", vec![Value::from(path)])
+            .await
+            .map(|v| v.as_bool().unwrap_or(false))
+            .map_err(err)
+    }
+
+    /// Whether this nvim is untouched: one tabpage, one window, an unnamed
+    /// unmodified buffer. A just-launched gui-window, which a file can take
+    /// over instead of opening a window next to it.
+    pub async fn is_pristine(&self) -> Result<bool, String> {
+        self.nvim
+            .exec_lua("return __gneovim_open.pristine()", vec![])
             .await
             .map(|v| v.as_bool().unwrap_or(false))
             .map_err(err)
@@ -1815,34 +1817,10 @@ impl Bridge {
             ("swap".into(), opt_str(o.swap)),
             ("notice".into(), opt_str(o.notice.as_deref())),
             ("tab".into(), o.tab.into()),
+            ("tcd".into(), opt_str(o.tcd)),
         ]);
         self.nvim
             .exec_lua("return __gneovim_open.open(...)", vec![spec])
-            .await
-            .map(|_| ())
-            .map_err(err)
-    }
-
-    /// Open each path as its own Neovim tabpage (`[window] open_files_in =
-    /// "nvim-tab"`). The first path reuses the current tab when it is still a
-    /// pristine `[No Name]` scratch (a just-launched window), otherwise every
-    /// path gets a fresh `:tabedit`.
-    pub async fn open_files_as_tabs(&self, paths: &[String]) -> Result<(), String> {
-        const LUA: &str = r#"
-            local paths = ...
-            for i, p in ipairs(paths) do
-              local buf = vim.api.nvim_get_current_buf()
-              local reuse = i == 1
-                and vim.api.nvim_buf_get_name(buf) == ''
-                and not vim.bo[buf].modified
-                and #vim.api.nvim_list_tabpages() == 1
-                and #vim.api.nvim_tabpage_list_wins(0) == 1
-              vim.cmd({ cmd = reuse and 'edit' or 'tabedit', args = { p } })
-            end
-        "#;
-        let arr: Vec<Value> = paths.iter().map(|s| Value::from(s.as_str())).collect();
-        self.nvim
-            .exec_lua(LUA, vec![Value::Array(arr)])
             .await
             .map(|_| ())
             .map_err(err)

@@ -1220,8 +1220,8 @@ fn spawn_window(
     };
 
     // The macOS tab grouping / frame restore must run on the main thread;
-    // `spawn_window` is also reached from worker threads (file-association
-    // `open_paths`, the `OpenNewTab` bridge event).
+    // `spawn_window` is also reached from worker threads (`open_request` for
+    // Finder opens and `gneovim://` URLs, the `OpenNewTab` bridge event).
     #[cfg(target_os = "macos")]
     {
         let w = win.clone();
@@ -2029,42 +2029,6 @@ fn recipient_window(app: &AppHandle) -> Option<String> {
         .or_else(|| app.webview_windows().into_keys().next())
 }
 
-/// Open files from outside (Open with, drag to dock, file association), per
-/// `[window] open_files_in`.
-async fn open_paths(app: AppHandle, paths: Vec<String>) {
-    if paths.is_empty() {
-        return;
-    }
-
-    // "nvim-tab": load every file as a Neovim tabpage in an existing
-    // gui-window's Neovim. Fall through to a fresh window if none is ready.
-    if crate::config::get().window.open_target() == OpenTarget::NvimTab {
-        if let Some(label) = recipient_window(&app) {
-            if let Ok(b) = bridge_for(&app, &label).await {
-                if b.open_files_as_tabs(&paths).await.is_ok() {
-                    if let Some(w) = app.get_webview_window(&label) {
-                        let _ = w.unminimize();
-                        let _ = w.set_focus();
-                    }
-                    return;
-                }
-            }
-        }
-        log::warn!("open_files_in = nvim-tab: no ready gui-window, opening a new one");
-    }
-
-    // "tab" -> each file a new gui-tab; "window" (default) -> each a new window.
-    let as_tab = crate::config::get().window.open_target() == OpenTarget::Tab;
-    for path in paths {
-        let Some(label) = spawn_window(&app, as_tab, OpenSpec::default(), false) else {
-            continue;
-        };
-        if let Ok(b) = bridge_for(&app, &label).await {
-            let _ = b.open_file(&path).await;
-        }
-    }
-}
-
 fn focus_window(app: &AppHandle, label: &str) {
     if let Some(w) = app.get_webview_window(label) {
         let _ = w.unminimize();
@@ -2093,11 +2057,30 @@ async fn find_holder(app: &AppHandle, path: &str) -> Option<(String, Bridge)> {
     None
 }
 
-/// Open one `gneovim://file/...` request. The file is routed like
-/// [`open_paths`] (`target=` overriding `[window] open_files_in`), except when
-/// another gui-window's Neovim already has it loaded: then `swap=` decides
-/// (reveal there, open readonly here, or take it over). There is no conflict
-/// when the receiving Neovim is itself the holder; it just jumps there.
+/// An untouched gui-window a file can take over instead of opening a window
+/// next to it: the last-focused one (on a cold launch, the `main` window the
+/// app creates before the file arrives), never the always-on-top window.
+async fn pristine_window(app: &AppHandle) -> Option<(String, Bridge)> {
+    let label = recipient_window(app)?;
+    let aot = app.state::<AppState>().aot_window.lock().unwrap().clone();
+    if aot.as_deref() == Some(label.as_str()) {
+        return None;
+    }
+    let b = bridge_for(app, &label).await.ok()?;
+    match tokio::time::timeout(Duration::from_millis(500), b.is_pristine()).await {
+        Ok(Ok(true)) => Some((label, b)),
+        _ => None,
+    }
+}
+
+/// Open one file from Finder ([`OpenRequest::finder`]) or a `gneovim://file/`
+/// URL. Routed by `target=`, else `[window] open_files_in`, except when another
+/// gui-window's Neovim already has it loaded: then `swap=` decides (reveal
+/// there, open readonly here, or take it over). There is no conflict when the
+/// receiving Neovim is itself the holder; it just jumps there. A new window
+/// or gui-tab takes over an untouched window instead, if there is one. `cwd`
+/// starts a spawned Neovim there, or `:tcd`s the file's tabpage in an
+/// existing one.
 async fn open_request(app: AppHandle, req: OpenRequest) {
     let path = std::fs::canonicalize(&req.path)
         .map(|p| p.to_string_lossy().into_owned())
@@ -2116,6 +2099,7 @@ async fn open_request(app: AppHandle, req: OpenRequest) {
         swap: policy.lua_name(),
         notice: None,
         tab: false,
+        tcd: None,
     };
 
     if let Some((holder, b)) = find_holder(&app, &path).await {
@@ -2142,6 +2126,7 @@ async fn open_request(app: AppHandle, req: OpenRequest) {
         }
     }
 
+    open.tcd = req.cwd.as_deref();
     if let Some(label) = receiver {
         if let Ok(b) = bridge_for(&app, &label).await {
             open.tab = true;
@@ -2151,8 +2136,14 @@ async fn open_request(app: AppHandle, req: OpenRequest) {
             }
         }
         log::warn!("gneovim://: target nvim-tab: no ready gui-window, opening a new one");
+    } else if let Some((label, b)) = pristine_window(&app).await {
+        if b.open_request_file(&open).await.is_ok() {
+            focus_window(&app, &label);
+            return;
+        }
     }
     open.tab = false;
+    open.tcd = None;
 
     let spec = OpenSpec { cwd: req.cwd.clone(), ..Default::default() };
     let as_tab = target == OpenTarget::Tab;
@@ -2318,23 +2309,21 @@ pub fn run() {
             }
             #[cfg(any(target_os = "macos", target_os = "ios"))]
             if let tauri::RunEvent::Opened { urls } = &_event {
-                let paths: Vec<String> = urls
-                    .iter()
-                    .filter_map(|u| u.to_file_path().ok())
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .collect();
-                if !paths.is_empty() {
-                    async_runtime::spawn(open_paths(_app.clone(), paths));
-                }
-                // `gneovim://` URLs (link templates, the `gneovim` CLI shim).
-                // Sequential, so a batch lands in a predictable order.
+                // Finder opens (double-click, Open With, drag to the Dock) as
+                // `file://`, plus `gneovim://` URLs (link templates, the
+                // `gneovim` CLI shim). Sequential, so a batch lands in a
+                // predictable order.
                 let reqs: Vec<OpenRequest> = urls
                     .iter()
-                    .filter(|u| u.scheme() == "gneovim")
-                    .filter_map(|u| {
-                        open_url::parse(u)
-                            .map_err(|e| log::warn!("gneovim://: {e}"))
+                    .filter_map(|u| match u.scheme() {
+                        "file" => u
+                            .to_file_path()
                             .ok()
+                            .map(|p| OpenRequest::finder(p.to_string_lossy().into_owned())),
+                        "gneovim" => open_url::parse(u)
+                            .map_err(|e| log::warn!("gneovim://: {e}"))
+                            .ok(),
+                        _ => None,
                     })
                     .collect();
                 if !reqs.is_empty() {

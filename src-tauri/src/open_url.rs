@@ -64,7 +64,8 @@ pub struct OpenRequest {
     pub col: Option<u32>,
     /// Overrides `[window] open_files_in` for this call.
     pub target: Option<OpenTarget>,
-    /// Starting directory for a newly spawned Neovim. Ignored otherwise.
+    /// Working directory: the starting directory of a newly spawned Neovim,
+    /// or `:tcd` for the file's tabpage in an existing one.
     pub cwd: Option<String>,
     /// Neovim's `-R`: open the file readonly, occupied or not.
     pub readonly: bool,
@@ -73,6 +74,23 @@ pub struct OpenRequest {
 }
 
 impl OpenRequest {
+    /// A file opened from Finder (double-click, Open With, drag to the Dock):
+    /// no position or overrides, starting in the file's own folder.
+    pub fn finder(path: String) -> Self {
+        let cwd = std::path::Path::new(&path)
+            .parent()
+            .map(|d| d.to_string_lossy().into_owned());
+        Self {
+            path,
+            line: None,
+            col: None,
+            target: None,
+            cwd,
+            readonly: false,
+            swap: None,
+        }
+    }
+
     /// Explicit `swap=` wins; otherwise `readonly=1` (`-R`) implies readonly,
     /// since a readonly open has no reason to prompt or take over; otherwise
     /// `Reveal`.
@@ -240,6 +258,14 @@ mod tests {
         assert_eq!(r.target, Some(OpenTarget::NvimTab));
         assert!(r.readonly);
         assert_eq!(r.swap_policy(), SwapPolicy::Takeover);
+    }
+
+    #[test]
+    fn finder_open_starts_in_the_files_folder() {
+        let r = OpenRequest::finder("/Users/me/Notes/a b.md".into());
+        assert_eq!(r.cwd.as_deref(), Some("/Users/me/Notes"));
+        assert_eq!(r.swap_policy(), SwapPolicy::Reveal);
+        assert_eq!(r.target, None);
     }
 
     #[test]

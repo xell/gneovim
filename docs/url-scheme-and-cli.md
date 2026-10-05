@@ -5,7 +5,12 @@ Two ways to open a file in gneovim from outside it, both feeding the same code p
 1. `gneovim://file/...` URLs, for links in other apps, error pages, scripts and Shortcuts.
 2. A `gneovim` shell command with Neovim style arguments. It is a small script that turns its arguments into `gneovim://` URLs and hands them to the app with `open`, so the shell returns at once.
 
-Files opened from Finder, the Dock or `open -a gneovim file` keep working as before and follow only `[window] open_files_in` (see `configuration.md`).
+Files opened from Finder (double-click with gneovim as the default app, Open With, drag to the Dock, `open -a gneovim file`) take the same path, as if they were `gneovim://file/<path>?cwd=<the file's folder>`: no overrides, so they follow `[window] open_files_in` (see `configuration.md`), jump to a gneovim window that already has the file (`swap=reveal`), and work in the file's own folder.
+
+Two rules apply to every open, whatever its source:
+
+- Where the working directory goes. A newly spawned Neovim starts in `cwd`. A file that lands in an existing Neovim gets `:tcd cwd` on its own tabpage only, so that Neovim's other tabpages and its global directory are left alone.
+- No empty window left behind. When a file would get a new window or gui-tab but the last focused gui-window is untouched (one tabpage, one window, an unnamed unmodified buffer), the file takes over that window instead. This is what stops a cold launch by a double-click from leaving the app's initial window empty next to the file's own. The always-on-top window is never taken over.
 
 ## URL format
 
@@ -20,7 +25,7 @@ Parameters, all optional:
 | Parameter | Values | Meaning |
 | --- | --- | --- |
 | `target` | `window`, `tab`, `nvim-tab` | Where the file lands; overrides `[window] open_files_in` for this call. |
-| `cwd` | absolute directory | Working directory of a newly spawned Neovim. Ignored when the file goes into an existing Neovim, which is never `:cd`'d. |
+| `cwd` | absolute directory | Working directory: a newly spawned Neovim starts there; in an existing Neovim only the file's tabpage is `:tcd`'d. |
 | `readonly` | `1` | Neovim's `-R`: the file opens with `'readonly'` set, occupied or not. |
 | `swap` | `reveal`, `readonly`, `takeover`, `ask` | What to do when the file is already open in another Neovim; see below. |
 
@@ -64,7 +69,7 @@ gneovim [options] [+N | "+call cursor(N,M)"] [file ...]
   -v, --version
 ```
 
-The syntax follows Neovim's own command line (`nvim +42 file`, `-p`, `-R`), not VS Code's `-g file:line`. Relative paths resolve against the shell's current directory, which also becomes the working directory of a newly spawned Neovim. Each file becomes one URL, so several files open as several windows, gui-tabs or tabpages, just like files opened from Finder. With no files the app is just brought to the front.
+The syntax follows Neovim's own command line (`nvim +42 file`, `-p`, `-R`), not VS Code's `-g file:line`. Relative paths resolve against the shell's current directory, which also becomes the working directory of the file (see the rules above). Each file becomes one URL, so several files open as several windows, gui-tabs or tabpages, just like files opened from Finder. With no files the app is just brought to the front.
 
 Because everything travels through the public URL scheme, only `+N` and `+call cursor(N,M)` are accepted; any other `+cmd`, `-c` or Neovim flag is rejected with a message rather than silently ignored. General `+cmd` / `-c` and `--wait` (for `$EDITOR` and `git commit`) need a private channel to the app and are planned for later.
 
