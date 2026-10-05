@@ -2167,6 +2167,15 @@ pub fn run() {
             tauri_plugin_log::Builder::default()
                 .level(log::LevelFilter::Info)
                 .level_for("nvim_rs", log::LevelFilter::Warn)
+                // The plugin defaults to 40KB with RotationStrategy::KeepOne,
+                // and KeepOne *deletes* the file it rotates, so a few sessions
+                // of ordinary use wipe the history. That cost us the trace of
+                // an intermittent island bug reported hours after it happened
+                // (2026-10-05, see docs/markdown-island-visual-line-motion.md
+                // Bug 7): by then the log held one short session. Keep dated
+                // archives instead, with a ceiling of roughly 8MB total.
+                .max_file_size(2_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(3))
                 .build(),
         )
         .manage(AppState::default())
