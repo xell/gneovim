@@ -425,10 +425,13 @@ imeEl.addEventListener("input", () => {
   if (!imeComposing) imeFlush();
 });
 
+// Terminal mode types into the job just as Insert mode types into a buffer,
+// so a :terminal needs the editable #ime too, or a CJK IME has nothing to
+// compose into and the job receives the raw letters.
 function gridInsertActive() {
   return (
     !islandForGrid(session.cursorGrid) &&
-    /^(insert|replace)/.test(session.modeName)
+    /^(insert|replace|terminal)/.test(session.modeName)
   );
 }
 function gridTextInputActive() {
@@ -445,7 +448,7 @@ function cmdlineInputSource(entering) {
 }
 // #ime stays FOCUSED whenever a grid window holds the cursor, in every mode, so
 // macOS keeps the user's chosen input source. It is only contenteditable in
-// insert/replace mode or while Neovim owns a command line; outside either, a
+// insert/replace/terminal mode or while Neovim owns a command line; outside them, a
 // focused-but-non-editable element gives the OS IME nothing to compose into, so
 // normal-mode keys reach nvim untouched.
 function updateImeFocus() {

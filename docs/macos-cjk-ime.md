@@ -55,7 +55,9 @@ second listener directly to `.cm-content`: CodeMirror already owns that DOM
 event lifecycle, and listener ordering can hide or race the final event.
 
 Grid windows have no editable DOM of their own, so they use the hidden `#ime`
-textarea at the grid cursor as their macOS composition surface. Neovim's command
+textarea at the grid cursor as their macOS composition surface. It is editable
+in Insert, Replace, and Terminal mode, the last so a `:terminal` job can
+receive composed CJK text rather than the raw letters. Neovim's command
 line is also grid-rendered, but cannot be recognized as Insert mode:
 `mode_change` may still look Normal while `/`, `?`, or `:` owns the keyboard.
 The `gnv_cmdline` and `gnv_cmdline_hide` notifications therefore make command
