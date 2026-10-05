@@ -278,6 +278,75 @@ One harness artefact worth recognising if it is ever reintroduced: while the
 echo is held, the caret stays a block until the next keystroke, since the
 caret shape is drawn from the same mode feed. Leo spotted that immediately.
 
+## Bug 7: the Bug 6 fix's own veto let the same bug back in
+
+Leo, 2026-10-05: "pressing `w` in live preview mode's insert mode will move the
+cursor instead of inserting the character", with a bar caret, and no way to
+reproduce it on demand.
+
+The Bug 6 latch was intact and every gate still went through
+`islandLocalNormal`, so this was not a regression of that fix. It was a hole
+inside it. The latch line read:
+
+```js
+if (isl && isl.mode === "n" && !hadNativePendingBefore && exitsNormalMode(e))
+```
+
+`!hadNativePendingBefore` was there so that `di` and `3i` would not be read as
+Insert entries. But `islandNativeWPending` only decays on a key that is not
+itself a prefix character, so a chain of prefix characters keeps it raised long
+after Neovim has finished the command. `gg0` is the clearest case: `g` raises
+it, the second `g` extends it, `0` extends it through the leading-zero
+carve-out, and the flag is still up when the next key arrives with nothing at
+all pending in Neovim. Press `o` there and the prediction is vetoed, the echo
+is in flight, and the first `w`, `j`, `k` or `g` typed into the new line is
+answered locally: cursor moved, character gone, caret a bar as soon as the echo
+lands. `gg` then `o`, `0i`, `3o`, `}o`, `zz` then `i` all reach it the same way,
+which is why it kept recurring in ordinary prose editing.
+
+Fix: predict the Insert entry regardless of any pending prefix. A wrong
+prediction (`zo`, `[s`, `"a`, a leader mapping that stays in Normal mode) only
+suppresses the local `j`/`k`/`w`/`g` answers until Neovim echoes any
+non-Normal mode, and operator-pending counts, since `d` alone echoes `no`,
+which closes the gates and clears the latch at the same time. So a wrong
+prediction costs Neovim's own motion for a few keystrokes, while a missed
+prediction costs a typed character. The veto was trading the cheap failure for
+the expensive one.
+
+### How the reproduction was finally found, which took four bad attempts
+
+The honest part of this entry. Leo could not reproduce it, so the race was made
+deterministic again with the Bug 6 harness (hold the mode echo for exactly one
+keydown). Then four test designs failed, all mine:
+
+1. `}` then `o` then `w`, "a few lines down". With no blank-line separated
+   paragraphs, `}` jumps to the **last line of the buffer**, and
+   `semanticWordTarget` returns `null` when no word follows the cursor
+   (`src/pure/semantic-word.js`), so the gate cannot fire there. Leo pointed out
+   the paragraph assumption; I had not checked it.
+2. `-` then `o` then `w`, to avoid the paragraph geometry. He has `-` remapped.
+3. `1` then `o` then `w`, to avoid mappings entirely. Correct in principle, but
+   still run from wherever the cursor happened to be, which was again a spot
+   with no word after it.
+4. The `<Esc>` plus throwaway key dance between arms, which left him on an empty
+   line, with the same dead spot.
+
+What finally worked: a fixed file written to disk, a fixed starting position
+(`gg0` on `alpha beta gamma delta epsilon`), and the target verified first by
+running the real `semanticWordTarget` against that document in node, which says
+cursor `0:0` maps to target `0:6`, i.e. `beta` on the same line. Geometry-proof.
+
+Then the test reproduced the bug in the arm labelled **control**. `gg0` had
+raised the pending flag, so plain `o` then `w` was already the failing case, and
+the cursor jumped back up to `beta` with no `w` typed. The control arm being a
+second failing arm is what identified the real trigger, which was never the
+punctuation key I had been chasing but the prefix chain in my own setup
+instructions.
+
+Confirmed fixed live the same day: the same keystrokes now type the `w`, and
+the log shows the latch rescuing it (`mode unconfirmed 158ms`, `520ms`,
+`1731ms` with the harness on) with no veto lines left.
+
 ## Scope: Normal mode only, deliberately
 
 Every gate added for this feature (`islandVerticalGoal`'s reset,
@@ -337,6 +406,21 @@ object identity from the code alone produced two plausible-sounding wrong
 theories in a row. Adding temporary `jlog()` calls at the actual decision
 points and reading the real log should have been the first move, not the
 third.
+
+**A predicted-state guard that is itself built on another guess inherits
+every one of its errors.** The Bug 6 veto asked `islandNativeWPending`, a
+hand-rolled model of Neovim's pending state that is deliberately sticky, a
+question it cannot answer: "is Neovim mid-command right now". It answers "was a
+prefix character pressed at some point recently". When a guard like that is
+wrong, prefer the failure that degrades a feature over the one that eats a
+keystroke.
+
+**Verify the test scenario before asking a human to run it.** Four of these
+test designs could not have reproduced the bug no matter what the code did,
+because the cursor was somewhere the client-side jump has no target. Running
+the real pure function against the intended document (one node one-liner) would
+have caught every one of them. And label arms by what they test, not by what
+you expect: the arm called "control" here was the one that reproduced the bug.
 
 **To prove a fix for an intermittent race, make the race deterministic in
 the real app and A/B it with one constant.** Not reproducing it afterwards is

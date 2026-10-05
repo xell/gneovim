@@ -1688,11 +1688,24 @@ addEventListener("keydown", (e) => {
   // A key that hands Normal mode over to Insert/Replace/Select/Visual: treat
   // this island's mode as unconfirmed until Neovim echoes the new one, so the
   // keys typed inside that round trip are not mistaken for Normal-mode motions
-  // (see islandModeUnconfirmed). Runs after the snapshot above because an `i`
-  // that continues an operator or a count (`di`, `3i`) does not leave Normal
-  // mode by itself, and before every local-answer block below, which is what
-  // this protects.
-  if (isl && isl.mode === "n" && !hadNativePendingBefore && exitsNormalMode(e))
+  // (see islandModeUnconfirmed), and deliberately without asking whether a
+  // prefix is pending. It used to skip the prediction whenever
+  // `islandNativeWPending` was set, on the reasoning that `di` or `3i` is a
+  // text object or a count rather than an Insert entry. That veto is what let
+  // this bug back in (confirmed live 2026-10-05, screenshot and all): the flag
+  // only decays on a key that is not itself a prefix character, so a chain like
+  // `gg0` keeps it raised with nothing actually pending in Neovim, and the `o`
+  // after it went unpredicted. `gg` then `o`, `0i`, `3o`, `}o`, `zz` then `i`
+  // all did the same.
+  //
+  // Predicting anyway is the safe direction. A wrong prediction (`zo`, `[s`,
+  // `"a`, a leader mapping that stays in Normal mode) only suppresses local
+  // j/k/w/g answers until Neovim echoes any non-Normal mode, and
+  // operator-pending counts: `d` alone echoes "no", which both closes the
+  // gates and clears this latch. The cost is Neovim's own motion for a few
+  // keystrokes. A missed prediction costs a typed character, which is the bug
+  // Leo hit twice.
+  if (isl && isl.mode === "n" && exitsNormalMode(e))
     islandModeUnconfirmed = { island: isl, at: performance.now() };
   // Kept deliberately: this fires only inside the window the latch exists to
   // cover, on exactly the keystrokes it rescues, so it is rare in real use (a
