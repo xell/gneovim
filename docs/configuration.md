@@ -140,6 +140,10 @@ or a script. gneovim also sets `g:gneovim` and registers itself via
 `nvim_set_client_info`; check `vim.g.gneovim` from a `UIEnter` autocmd (it is
 not set yet when `init.lua` first runs).
 
+A window's `'winbar'` stays visible above its island, drawn from the grid like
+in any other window (and clickable the same way); the island takes the rest of
+the window below it.
+
 ## Grammarly in a markdown island
 
 Grammarly Desktop reads a markdown island through macOS Accessibility and

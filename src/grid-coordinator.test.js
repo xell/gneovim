@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { GridCoordinator } from "./grid-coordinator.js";
 import { SessionModel } from "./session-model.js";
 
-function fixture() {
+function fixture({ islandGrids = [] } = {}) {
   const session = new SessionModel();
   const grids = new Map();
   const gridFor = vi.fn((id) => {
@@ -14,6 +14,7 @@ function fixture() {
         line: vi.fn(),
         scroll: vi.fn(),
         repaint: vi.fn(),
+        repaintTop: vi.fn(),
         cursor: null,
       });
     }
@@ -34,13 +35,31 @@ function fixture() {
     grids,
     gridFor,
     islandForGrid: () => null,
-    isIslandGrid: () => false,
+    isIslandGrid: (id) => islandGrids.includes(id),
     ...callbacks,
   });
   return { session, grids, gridFor, callbacks, coordinator };
 }
 
 describe("GridCoordinator", () => {
+  it("paints only the winbar rows of a grid an island covers", () => {
+    const { session, grids, callbacks, coordinator } = fixture({ islandGrids: [2] });
+    coordinator.render([
+      { op: "resize", grid: 2, w: 80, h: 20 },
+      { op: "line", grid: 2, row: 0, col: 0, cells: [["W", 1]] },
+    ]);
+    expect(grids.get(2).repaintTop).not.toHaveBeenCalled();
+
+    coordinator.render([{ op: "margins", grid: 2, top: 1, bottom: 0, left: 0, right: 0 }]);
+    expect(session.topMarginForGrid(2)).toBe(1);
+    expect(callbacks.reconcileIslands).toHaveBeenCalledOnce();
+    expect(grids.get(2).repaintTop).toHaveBeenCalledWith(1);
+    expect(grids.get(2).repaint).not.toHaveBeenCalled();
+
+    coordinator.render([{ op: "margins", grid: 2, top: 1, bottom: 0, left: 0, right: 0 }]);
+    expect(callbacks.reconcileIslands).toHaveBeenCalledOnce();
+  });
+
   it("applies ordered grid mutations then repaints dirty grids once", () => {
     const { grids, callbacks, coordinator } = fixture();
     coordinator.render([

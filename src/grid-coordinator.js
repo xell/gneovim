@@ -103,6 +103,10 @@ export class GridCoordinator {
           layoutDirty = true;
           break;
         }
+        case "margins":
+          if (this.session.setGridTopMargin(op.grid, op.top ?? 0)) layoutDirty = true;
+          dirty.add(op.grid);
+          break;
         case "viewport":
           this.applyViewport(op);
           break;
@@ -133,8 +137,13 @@ export class GridCoordinator {
     if (layoutDirty) this.reconcileIslands();
     for (const id of dirty) {
       const grid = this.grids.get(id);
-      if (grid && !this.isIslandGrid(id)) {
+      if (!grid) continue;
+      if (!this.isIslandGrid(id)) {
         grid.repaint();
+        this.forceRepaint(grid.el);
+      } else if (this.session.topMarginForGrid(id)) {
+        // An island covers all of its grid but the winbar rows on top.
+        grid.repaintTop(this.session.topMarginForGrid(id));
         this.forceRepaint(grid.el);
       }
     }

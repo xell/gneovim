@@ -389,6 +389,12 @@ fn grid_op(ev: &str, a: &[Value]) -> Option<Json> {
         "win_hide" => json!({"op":"win_hide","grid":i(0)}),
         "win_close" => json!({"op":"win_close","grid":i(0)}),
         "msg_set_pos" => json!({"op":"msg_pos","grid":i(0),"row":i(1)}),
+        // Rows/cols of a window grid outside its text viewport: `top` is the
+        // 'winbar' (the window grid's own first row), which an island must
+        // leave uncovered.
+        "win_viewport_margins" => json!({"op":"margins","grid":i(0),
+            "win":a.get(1).and_then(ext_id),"top":i(2),"bottom":i(3),
+            "left":i(4),"right":i(5)}),
         "win_viewport" => json!({"op":"viewport","grid":i(0),"win":a.get(1).and_then(ext_id),
             "topline":i(2),"botline":i(3),"curline":i(4),"curcol":i(5),"linecount":i(6)}),
         "default_colors_set" => json!({"op":"colors","fg":i(0),"bg":i(1),"sp":i(2)}),

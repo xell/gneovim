@@ -4,6 +4,7 @@
 export class SessionModel {
   constructor() {
     this.windowPositions = new Map();
+    this.gridTopMargins = new Map();
     this.gridWindows = new Map();
     this.windowFiletypes = new Map();
     this.windowBuffers = new Map();
@@ -21,6 +22,19 @@ export class SessionModel {
 
   positionForGrid(grid) {
     return this.windowPositions.get(grid);
+  }
+
+  // Rows at the top of a window grid that are not buffer text: its 'winbar'.
+  topMarginForGrid(grid) {
+    return this.gridTopMargins.get(grid) || 0;
+  }
+
+  // Returns whether the value changed.
+  setGridTopMargin(grid, rows) {
+    const previous = this.topMarginForGrid(grid);
+    if (rows) this.gridTopMargins.set(grid, rows);
+    else this.gridTopMargins.delete(grid);
+    return previous !== (rows || 0);
   }
 
   windowForGrid(grid) {
@@ -146,6 +160,7 @@ export class SessionModel {
 
   destroyGrid(grid) {
     this.windowPositions.delete(grid);
+    this.gridTopMargins.delete(grid);
     const goneWindow = this.gridWindows.get(grid);
     this.gridWindows.delete(grid);
     if (goneWindow != null && ![...this.gridWindows.values()].includes(goneWindow)) {

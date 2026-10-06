@@ -342,9 +342,21 @@ function layout() {
     const p = session.positionForGrid(gid);
     const isl = islandForGrid(gid);
     if (isl) {
-      g.el.hidden = true;
+      // The window's 'winbar' rows stay the grid's own; the island takes
+      // the rest of the window below them.
+      const top = p ? Math.min(session.topMarginForGrid(gid), p.h) : 0;
+      if (top) {
+        g.el.hidden = false;
+        g.el.style.position = "absolute";
+        place(g.el, { ...p, h: top });
+        g.el.style.overflow = "hidden";
+        g.el.style.zIndex = 5;
+        g.repaintTop(top);
+      } else {
+        g.el.hidden = true;
+      }
       if (p) {
-        place(isl.el, p);
+        place(isl.el, top ? { ...p, srow: p.srow + top, h: p.h - top } : p);
         isl.el.style.zIndex = 5;
         const wasHidden = isl.el.hidden;
         isl.el.hidden = false;
@@ -360,6 +372,7 @@ function layout() {
     }
     g.el.hidden = false;
     g.el.style.position = "absolute";
+    g.el.style.overflow = ""; // set while it was a winbar band over an island
     place(g.el, p);
     // normal split grids sit at the base layer; a grid with an explicit zindex
     // (the message / cmdline grid) keeps the value place() just set.

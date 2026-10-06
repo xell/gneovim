@@ -31,6 +31,21 @@ const document = {
 };
 
 describe("GridView", () => {
+  it("repaintTop paints only the first rows and keeps the rest pending", () => {
+    const view = new GridView(2, { document, highlightCss: () => "", cellWidth: () => 9 });
+    view.resize(2, 3);
+    view.line(0, 0, [["w", 1], ["b", 1]]);
+    view.line(2, 0, [["x", 1], ["y", 1]]);
+
+    view.repaintTop(1);
+    expect(view.rowEls).toHaveLength(3);
+    expect(view.rowEls[0].children[0].children[0].textContent).toBe("wb");
+    expect(view.rowEls[2].children).toHaveLength(0);
+
+    view.repaint();
+    expect(view.rowEls[2].children[0].children[0].textContent).toBe("xy");
+  });
+
   it("paints highlight runs and pins wide glyphs to two cells", () => {
     const highlightCss = vi.fn((id) => `hl:${id};`);
     const view = new GridView(2, { document, highlightCss, cellWidth: () => 9 });

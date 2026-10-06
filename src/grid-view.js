@@ -112,6 +112,26 @@ export class GridView {
     rowElement.replaceChildren(fragment);
   }
 
+  // Paint just the first `count` rows, for a grid an island covers below
+  // them (its winbar). The rest stays as it is; whatever releases the grid
+  // back to the renderer forces a full repaint anyway.
+  repaintTop(count) {
+    let rebuilt = false;
+    if (this.rowEls.length !== this.rows) {
+      this.rowEls = Array.from({ length: this.rows }, () => {
+        const row = this.document.createElement("div");
+        row.className = "grid-row";
+        return row;
+      });
+      this.el.replaceChildren(...this.rowEls);
+      rebuilt = true;
+    }
+    for (let row = 0; row < Math.min(count, this.rows); row++) {
+      if (rebuilt || this.fullDirty || this.dirtyRows.has(row)) this.paintRow(row);
+      this.dirtyRows.delete(row);
+    }
+  }
+
   repaint() {
     if (this.fullDirty || this.rowEls.length !== this.rows) {
       this.rowEls = Array.from({ length: this.rows }, () => {
