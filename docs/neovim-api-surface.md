@@ -47,9 +47,11 @@ The same as View > Zen Mode (see `configuration.md`): hides or restores this gui
 Fired after this gui-window actually entered or left zen mode, whichever way it was triggered (the menu item, its keyboard shortcut, or a `:GneovimZen*` command). Not fired for a request that repeats the state already in effect. Neovim-side changes that should go with zen mode (hiding the statusline, a larger `scrolloff`, ...) belong in a handler for these:
 
 ```lua
-vim.api.nvim_create_autocmd("User", { pattern = "GneovimZenEnter", callback = function() --[[ ... ]] end })
-vim.api.nvim_create_autocmd("User", { pattern = "GneovimZenLeave", callback = function() --[[ ... ]] end })
+vim.api.nvim_create_autocmd("User", { pattern = "GneovimZenEnter", nested = true, callback = function() --[[ ... ]] end })
+vim.api.nvim_create_autocmd("User", { pattern = "GneovimZenLeave", nested = true, callback = function() --[[ ... ]] end })
 ```
+
+Use `nested = true` if the handler opens, closes or switches windows, tabpages or buffers (a `:tab split`, say). Neovim does not run autocmds triggered inside another autocmd's callback unless it is nested, and gneovim learns about a new window through its `WinNew` / `WinEnter` / `BufWinEnter` autocmds: without it, a new markdown window opened by the handler renders as a plain grid instead of a live preview island.
 
 ### `User GneovimMarkdownPreviewChanged`
 
