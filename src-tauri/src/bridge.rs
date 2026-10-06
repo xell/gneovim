@@ -1927,4 +1927,34 @@ impl Bridge {
         let n = |i: usize| a.get(i).and_then(Value::as_i64).unwrap_or(0);
         Ok((n(0), n(1), n(2)))
     }
+
+    /// The window title Neovim would show if 'title' were on, for naming this
+    /// gui-window in a dialog while it is off (then the real title is empty).
+    /// 'titlestring' if set, else Neovim's default format, matched against
+    /// its actual `set_title` output: `name [+-] (dir) - Nvim`, with the cwd
+    /// as `dir` for an unnamed buffer. (`:help 'title'` also lists `=` for
+    /// a readonly buffer; Neovim 0.12 does not show it, probed 2026-10-06.)
+    pub async fn display_title(&self) -> Result<String, String> {
+        let v = self
+            .nvim
+            .exec_lua(
+                r#"
+                local ts = vim.o.titlestring
+                if ts ~= '' then
+                  local ok, r = pcall(vim.api.nvim_eval_statusline, ts, {})
+                  return ok and r.str or ''
+                end
+                local name, dir = vim.fn.expand('%:t'), vim.fn.expand('%:p:~:h')
+                if name == '' then
+                  name, dir = '[No Name]', vim.fn.fnamemodify(vim.fn.getcwd(), ':~')
+                end
+                local flags = (vim.bo.modified and '+' or '') .. (vim.bo.modifiable and '' or '-')
+                return name .. (flags ~= '' and ' ' .. flags or '') .. ' (' .. dir .. ') - Nvim'
+                "#,
+                vec![],
+            )
+            .await
+            .map_err(err)?;
+        Ok(v.as_str().unwrap_or_default().to_string())
+    }
 }

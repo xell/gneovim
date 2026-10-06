@@ -1113,7 +1113,9 @@ fn guard_close(window: &tauri::Window) {
                 return;
             }
         };
-        let title = window.title().unwrap_or_else(|_| "This window".into());
+        let title = dialog_title(window.title().ok(), &bridge)
+            .await
+            .unwrap_or_else(|| "This window".into());
         if blockers.is_empty() {
             // Nothing unsaved. Still confirm unless the user opted out: closing
             // destroys this whole Neovim (every tab and split it holds).
@@ -1151,6 +1153,17 @@ fn guard_close(window: &tauri::Window) {
             let _ = window.destroy();
         }
     });
+}
+
+/// A gui-window's name for a close / quit dialog: its title, or, while
+/// Neovim's 'title' is off (the title is then empty, see `onTitle` in
+/// main.js), the title Neovim would show if it were on.
+#[cfg(target_os = "macos")]
+async fn dialog_title(title: Option<String>, bridge: &Bridge) -> Option<String> {
+    match title.filter(|t| !t.is_empty()) {
+        Some(t) => Some(t),
+        None => bridge.display_title().await.ok().filter(|t| !t.is_empty()),
+    }
 }
 
 /// Set once we have decided to quit, so our own `app.exit(0)` does not re-enter
@@ -1238,10 +1251,12 @@ fn guard_exit(app: &AppHandle) {
         }
         let mut info = String::new();
         for (label, v) in &offenders {
-            let title = app
-                .get_webview_window(label)
-                .and_then(|w| w.title().ok())
-                .unwrap_or_else(|| label.clone());
+            let window_title = app.get_webview_window(label).and_then(|w| w.title().ok());
+            let title = match entries.iter().find(|(l, _)| l == label) {
+                Some((_, b)) => dialog_title(window_title, b).await,
+                None => window_title,
+            }
+            .unwrap_or_else(|| label.clone());
             info.push_str(&format!("\u{2022} {title}: {}\n", summarize(v)));
         }
         let plural = offenders.len() != 1;
