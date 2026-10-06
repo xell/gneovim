@@ -86,13 +86,13 @@ describe("routeIslandKey, local answers", () => {
   it("releases a held g when the next key is not j/k", () => {
     const { types, verdicts } = route(["g", "g"]);
     expect(types).toEqual(["holdG", "forward"]);
-    expect(verdicts[1].releaseG).toBe("event:g");
+    expect(verdicts[1].releaseG).toEqual({ island: ISLAND, event: "event:g" });
   });
 
   it("releases the held g when gj has nowhere to go", () => {
     const { types, verdicts } = route(["g", "j"], { vertical: () => null });
     expect(types).toEqual(["holdG", "forward"]);
-    expect(verdicts[1].releaseG).toBe("event:g");
+    expect(verdicts[1].releaseG).toEqual({ island: ISLAND, event: "event:g" });
   });
 
   it("centres the island on the second z of zz, and still forwards both", () => {
@@ -195,7 +195,10 @@ describe("routeIslandKey, no island owns the cursor", () => {
 
   it("still releases a g held by an island when focus has moved away", () => {
     const { verdicts } = route(["g", { key: "j", island: null }]);
-    expect(verdicts[1]).toMatchObject({ type: "forward", releaseG: "event:g" });
+    expect(verdicts[1]).toMatchObject({
+      type: "forward",
+      releaseG: { island: ISLAND, event: "event:g" },
+    });
   });
 });
 

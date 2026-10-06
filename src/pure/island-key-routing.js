@@ -106,7 +106,8 @@ function localNormal(island, mode, state) {
  *     forwardKeys     send exactly these keys (the punctuation carve-out)
  *     holdG           keep this `g` back until the next key resolves it
  *     centerAndForward  `zz`: centre the island's scroll, Neovim still gets it
- *   releaseG is the held `g`'s original event when one must be sent first.
+ *   releaseG is `{ island, event }` for a held `g` that must be sent first,
+ *   carrying its own island because focus may have moved on since.
  *   clearVerticalGoal asks the caller to drop its cached gj/gk goal column,
  *   which lives with the geometry code because it is a pixel measurement.
  */
@@ -156,10 +157,10 @@ export function routeIslandKey(input, state) {
       }
       // Already at the first/last display line: let Neovim's own gj/gk answer
       // this edge case.
-      releaseG = heldEvent;
+      releaseG = { island: pendingIsland, event: heldEvent };
       clearVerticalGoal = true;
     } else {
-      releaseG = heldEvent;
+      releaseG = { island: pendingIsland, event: heldEvent };
       clearVerticalGoal = true;
       skipGEntry = key === "g";
     }
