@@ -1,6 +1,8 @@
 # Testing the island keydown decision (proposed 2026-10-05)
 
-Status: proposed, not started. Written after Bug 7 (`b6488c0`). Revisit once the fix has had enough real world use to be trusted on its own, so that a refactor landing on top of it cannot be confused with it.
+Status: done 2026-10-06, `ebd4df2` (router plus tests, wired to nothing) and `7d2187e` (main.js delegating to it). Written after Bug 7 (`b6488c0`), and deliberately held until that fix had real use, so a refactor landing on top of it could not be confused with it.
+
+How it actually went: the router is `src/pure/island-key-routing.js`, the tests are 23 cases in the file beside it, and `main.js` lost about 290 lines. The geometry is injected rather than mocked, so the two CodeMirror questions ("where is one display line down", "where does the next prose word start") stay with the view. The goal column stayed in `main.js` for the same reason, with the router asking for it to be cleared instead of owning it. Before committing, each of the four historical bugs was reintroduced into the router one at a time to confirm the matching test fails; all four were caught, which is the only evidence that a green suite is worth anything.
 
 ## The problem
 
@@ -67,3 +69,9 @@ The likely mechanism is the Bug 6 race running the other way. `:` is forwarded, 
 Cost: no lost keys, but plain `j`/`k`/`w`/`g` go to Neovim instead of being answered locally for that whole stretch, so on soft wrapped prose `j`/`k` follow Neovim's own fixed width wrap rather than the island's visual lines. Any `:` command whose second character is in `EXITS_NORMAL_MODE` (`:s`, `:set`, `:sort`, `:vsplit`, `:Obsession`) can trigger it when typed fast.
 
 Proposed fix, not yet made: also clear the latch when a command line opens. An open command line is Neovim saying the key went somewhere other than Insert, which fits the latch's own rule of being cleared by any echo that is not plain Normal. Test sequence for the router: `:` `s` `e` `t` `<CR>` then `j` must be `answer-locally`, not `forward`.
+
+Checked 2026-10-06, and the command line is not the mechanism. A headless probe shows that entering a command line fires `ModeChanged(n:c)` with `mode()` reporting `c`, so the echo for it already clears the latch under the existing rule. The log around `08:43` shows something more general: repeated `grammarly: web content hidden/exposed` toggling and `nvim detached buffer 1/4/20`, that is moving between windows and buffers, with the latch sitting at 10s, then 12s, then 46s.
+
+So the real defect is wider than `:`. The latch is cleared only by a non-Normal echo **for that same island**, so it outlives the sequence it was created for in every case where Neovim never leaves Normal mode: `zo`, `[s`, a leader mapping, a `:` typed while another window holds the cursor, or simply switching windows and coming back. Your `:` case is one instance of that class.
+
+Better fix, using the timestamp the latch already carries: a non-Normal echo clears it immediately as now, and a plain `n` echo also clears it once the latch is older than a round trip (a few hundred ms). The stale-echo problem the rule was written for only exists inside one round trip, so bounding it is principled rather than a hack, and it would have capped this at half a second instead of 46. Now that the router exists this is a small change with a test: set the latch, feed an `n` echo 1000ms later, and `j` must be answered locally again.
