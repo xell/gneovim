@@ -36,7 +36,20 @@ With no arguments, moves the current buffer into a fresh gui tab: writes it firs
 
 The same operation is available to scripts as `_G.OpenInNewGneovimTab(files)`, called with a path, a list of paths, or `nil` for the move the current buffer behavior. It returns `false` only when a required write failed, in which case nothing was moved.
 
+### `:GneovimZenOn`, `:GneovimZenOff`, `:GneovimZenToggle`
+
+The same as View > Zen Mode (see `configuration.md`): hides or restores this gui-window's native tab bar and traffic lights. `:GneovimZenOn` and `:GneovimZenOff` do nothing when zen mode is already in that state, so a `User GneovimZenEnter` / `GneovimZenLeave` handler can call them without looping. The request is asynchronous; the events below mark when it has taken effect. macOS only.
+
 ## Autocmd events
+
+### `User GneovimZenEnter`, `User GneovimZenLeave`
+
+Fired after this gui-window actually entered or left zen mode, whichever way it was triggered (the menu item, its keyboard shortcut, or a `:GneovimZen*` command). Not fired for a request that repeats the state already in effect. Neovim-side changes that should go with zen mode (hiding the statusline, a larger `scrolloff`, ...) belong in a handler for these:
+
+```lua
+vim.api.nvim_create_autocmd("User", { pattern = "GneovimZenEnter", callback = function() --[[ ... ]] end })
+vim.api.nvim_create_autocmd("User", { pattern = "GneovimZenLeave", callback = function() --[[ ... ]] end })
+```
 
 ### `User GneovimMarkdownPreviewChanged`
 
@@ -87,6 +100,10 @@ Gneovim's own version string, for configuration that needs to branch on a minimu
 
 `true` in the one Neovim instance embedded by the always-on-top window (`File > New Always On Top Window`, or its keyboard shortcut; see `configuration.md`), unset in every other gneovim window. Since a gui-window is one whole embedded Neovim process, this is a global rather than a window variable: it does not vary between splits or tabpages within that instance.
 
+### `g:gneovim_zen`
+
+`true` while this gui-window is in zen mode, `false` otherwise (macOS only; unset elsewhere). Updated just before `User GneovimZenEnter` / `GneovimZenLeave` fires. A global for the same reason as `g:gneovim_aot_window`.
+
 ### `g:gneovim_swap_policy`
 
 Set only for the duration of the `:edit` that opens a file from a `gneovim://` URL or the `gneovim` command, to `"readonly"` or `"takeover"`, and unset at every other time. While it is set, gneovim's own `SwapExists` handler answers the swap file question (with "Open Read-Only" for a live owner outside gneovim) and a prompting `SwapExists` handler in your config should return early, for example `if vim.g.gneovim_swap_policy then return end`. A stale swap file is left unanswered, so Neovim's own swap file prompt appears. See `url-scheme-and-cli.md`.
@@ -114,6 +131,7 @@ Every key is optional; see `configuration.md` for the file's location, reload po
 - `open_files_in` (string, `"window"`) — where an externally opened file lands: `"window"`, `"tab"`, or `"nvim-tab"`.
 - `always_on_top_shortcut` (string, `"cmd+ctrl+space"`) — global keyboard shortcut that opens, or brings to the front, the always-on-top window (`File > New Always On Top Window`); see `g:gneovim_aot_window` above.
 - `focus_normal_window_shortcut` (string, `"cmd+shift+j"`) — local (app-focus-only) keyboard shortcut that focuses the frontmost normal (non-always-on-top) gui-window; the way back out when the always-on-top window has focus and `Cmd+\`` has nothing to cycle to.
+- `zen_mode_shortcut` (string, `"cmd+alt+z"`) — local keyboard shortcut for View > Zen Mode, which hides the focused gui-window's native tab bar and traffic lights; see `:GneovimZenOn` and `User GneovimZenEnter` above.
 
 ### `[markdown]`
 

@@ -119,6 +119,14 @@ pub struct Window {
     /// `always_on_top_shortcut`. Default "cmd+shift+j". An unrecognised value
     /// logs a warning and falls back to the default.
     pub focus_normal_window_shortcut: Option<String>,
+
+    /// Keyboard shortcut for View > Zen Mode, which hides the focused
+    /// gui-window's native tab bar and traffic lights (see
+    /// `docs/configuration.md`). Local, a plain menu accelerator like
+    /// `focus_normal_window_shortcut`. Same format as
+    /// `always_on_top_shortcut`. Default "cmd+alt+z". An unrecognised value
+    /// logs a warning and falls back to the default.
+    pub zen_mode_shortcut: Option<String>,
 }
 
 impl Default for Window {
@@ -129,6 +137,7 @@ impl Default for Window {
             open_files_in: None,
             always_on_top_shortcut: None,
             focus_normal_window_shortcut: None,
+            zen_mode_shortcut: None,
         }
     }
 }
@@ -147,6 +156,7 @@ pub struct Shortcut {
 
 const DEFAULT_AOT_SHORTCUT: &str = "cmd+ctrl+space";
 const DEFAULT_FOCUS_NORMAL_WINDOW_SHORTCUT: &str = "cmd+shift+j";
+const DEFAULT_ZEN_MODE_SHORTCUT: &str = "cmd+alt+z";
 
 /// Parses "cmd+ctrl+space" style strings: modifier names (cmd/command,
 /// ctrl/control, alt/option, shift), '+'-joined, ending in exactly one key
@@ -213,6 +223,16 @@ impl Window {
             self.focus_normal_window_shortcut.as_deref(),
             "focus_normal_window_shortcut",
             DEFAULT_FOCUS_NORMAL_WINDOW_SHORTCUT,
+        )
+    }
+
+    /// Resolved `zen_mode_shortcut`, defaulting to "cmd+alt+z" when unset,
+    /// empty, or unparsable (a bad value logs a warning first).
+    pub fn zen_mode_shortcut(&self) -> Shortcut {
+        resolve_shortcut(
+            self.zen_mode_shortcut.as_deref(),
+            "zen_mode_shortcut",
+            DEFAULT_ZEN_MODE_SHORTCUT,
         )
     }
 }
@@ -496,6 +516,13 @@ mod tests {
         let sc = w.focus_normal_window_shortcut();
         assert!(sc.cmd && sc.shift && !sc.ctrl && !sc.alt);
         assert_eq!(sc.key, "j");
+    }
+
+    #[test]
+    fn zen_mode_shortcut_defaults() {
+        let sc = Window::default().zen_mode_shortcut();
+        assert!(sc.cmd && sc.alt && !sc.shift && !sc.ctrl);
+        assert_eq!(sc.key, "z");
     }
 
     #[test]

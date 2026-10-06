@@ -10,7 +10,7 @@ use std::time::Duration;
 use bridge::{Bridge, BridgeEvent, FileOpen, OpenSpec, Region, ResetPayload};
 use config::OpenTarget;
 use open_url::{OpenRequest, SwapPolicy};
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::{
     async_runtime, AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
@@ -34,11 +34,29 @@ struct AppState {
     /// Label of the one always-on-top window, while it exists. `None` means
     /// the shortcut / menu item should create one instead of focusing it.
     aot_window: Mutex<Option<String>>,
+    /// Label -> how to undo View > Zen Mode, for every gui-window in it.
+    zen: Mutex<HashMap<String, ZenRecord>>,
+}
+
+/// What `enter_zen` changed, so `exit_zen` can put it back.
+struct ZenRecord {
+    /// Labels of the other tabs of the group the window was detached from,
+    /// in tab order; empty if it was not detached (a lone window).
+    group: Vec<String>,
+    /// The window's own index in that group.
+    index: usize,
+    /// A lone window's tab bar was showing (View > Show Tab Bar) and got
+    /// hidden; a detached one never needs this, rejoining shows it again.
+    hid_tab_bar: bool,
 }
 
 /// The File menu's "New Always On Top Window" item, greyed out while
 /// `AppState::aot_window` is occupied. Set once in `build_menu`.
 static AOT_MENU_ITEM: std::sync::OnceLock<MenuItem<tauri::Wry>> = std::sync::OnceLock::new();
+
+/// The View menu's "Zen Mode" item. The menu bar is shared by every window, so
+/// its checkmark is re-synced to the focused window on every focus change.
+static ZEN_MENU_ITEM: std::sync::OnceLock<CheckMenuItem<tauri::Wry>> = std::sync::OnceLock::new();
 
 struct WindowBridge {
     bridge: Bridge,
@@ -94,6 +112,138 @@ fn sync_tab_bars(app: &AppHandle) {
         let visible = unsafe { &*(ptr as *const NSWindow) }.tabbedWindows().is_some();
         log::info!("tabbar: {label} visible={visible}");
         let _ = app.emit(&format!("gnv://{label}/tabbar"), visible);
+    }
+}
+
+/// View > Zen Mode: turn `label`'s native chrome off (`want` true), back on
+/// (false), or flip it (`None`); a request for the current state is a no-op.
+/// After a real change its Neovim gets `User GneovimZenEnter` / `Leave`
+/// (`runtime/zen.lua`). AppKit
+/// refuses to hide the tab bar of a window with 2+ tabs (`toggleTabBar:` is
+/// a no-op then), so a tabbed window is taken out of its group instead, at
+/// the same frame, and put back at the same index on exit. Only that one
+/// window is ever moved: `mergeAllWindows:` would also collect every other
+/// window, from every Space. Must run on the main thread.
+#[cfg(target_os = "macos")]
+fn set_zen(app: &AppHandle, label: &str, want: Option<bool>) {
+    let Some(win) = app.get_webview_window(label) else { return };
+    let state = app.state::<AppState>();
+    let is_on = state.zen.lock().unwrap().contains_key(label);
+    // Clicking the CheckMenuItem flips its checkmark by itself, so re-sync it
+    // on every way out, even a no-op.
+    sync_zen_menu_item(app, label);
+    if want == Some(is_on) {
+        return;
+    }
+    if is_on {
+        let record = state.zen.lock().unwrap().remove(label);
+        if let Some(record) = record {
+            exit_zen(app, &win, record);
+        }
+    } else if let Some(record) = enter_zen(app, &win) {
+        state.zen.lock().unwrap().insert(label.to_string(), record);
+    } else {
+        return;
+    }
+    sync_zen_menu_item(app, label);
+    sync_tab_bars(app);
+    let bridge = state.windows.lock().unwrap().get(label).map(|w| w.bridge.clone());
+    if let Some(bridge) = bridge {
+        async_runtime::spawn(async move {
+            if let Err(e) = bridge.zen_changed(!is_on).await {
+                log::warn!("zen: notifying nvim failed: {e}");
+            }
+        });
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ns_window_of(win: &tauri::WebviewWindow) -> Option<&objc2_app_kit::NSWindow> {
+    let ptr = win.ns_window().ok().filter(|p| !p.is_null())?;
+    Some(unsafe { &*(ptr as *const objc2_app_kit::NSWindow) })
+}
+
+#[cfg(target_os = "macos")]
+fn set_traffic_lights_hidden(ns: &objc2_app_kit::NSWindow, hidden: bool) {
+    use objc2_app_kit::NSWindowButton;
+
+    for b in [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ] {
+        if let Some(button) = ns.standardWindowButton(b) {
+            button.setHidden(hidden);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn enter_zen(app: &AppHandle, win: &tauri::WebviewWindow) -> Option<ZenRecord> {
+    let ns = ns_window_of(win)?;
+    let mut record = ZenRecord { group: Vec::new(), index: 0, hid_tab_bar: false };
+    let group = ns.tabGroup()?;
+    let members = group.windows();
+    if members.count() >= 2 {
+        let labels: HashMap<usize, String> = app
+            .webview_windows()
+            .into_iter()
+            .filter_map(|(l, w)| Some((ns_window_of(&w)? as *const _ as usize, l)))
+            .collect();
+        for (i, m) in members.iter().enumerate() {
+            let ptr = &*m as *const _ as usize;
+            if ptr == ns as *const _ as usize {
+                record.index = i;
+            } else if let Some(l) = labels.get(&ptr) {
+                record.group.push(l.clone());
+            }
+        }
+        // Keeps the window's frame and visibility, but AppKit then brings
+        // the rest of the group (now showing its next tab, at the same
+        // frame) to the front as key, so take that back.
+        group.removeWindow(ns);
+        let _ = win.set_focus();
+    } else if group.isTabBarVisible() {
+        ns.toggleTabBar(None);
+        record.hid_tab_bar = true;
+    }
+    set_traffic_lights_hidden(ns, true);
+    log::info!(
+        "zen: {} on (detached from {:?} at {}, hid lone tab bar {})",
+        win.label(),
+        record.group,
+        record.index,
+        record.hid_tab_bar
+    );
+    Some(record)
+}
+
+#[cfg(target_os = "macos")]
+fn exit_zen(app: &AppHandle, win: &tauri::WebviewWindow, record: ZenRecord) {
+    let Some(ns) = ns_window_of(win) else { return };
+    set_traffic_lights_hidden(ns, false);
+    // Rejoin through any tab of the old group that is still open; with none
+    // left the window simply stays a lone window.
+    let target = record
+        .group
+        .iter()
+        .filter_map(|l| app.get_webview_window(l))
+        .find_map(|w| ns_window_of(&w)?.tabGroup());
+    if let Some(group) = target {
+        let index = record.index.min(group.windows().count());
+        group.insertWindow_atIndex(ns, index as isize);
+        let _ = win.set_focus();
+    } else if record.hid_tab_bar && ns.tabGroup().is_some_and(|g| !g.isTabBarVisible()) {
+        ns.toggleTabBar(None);
+    }
+    log::info!("zen: {} off", win.label());
+}
+
+/// Point the shared View > Zen Mode checkmark at `label`'s state.
+fn sync_zen_menu_item(app: &AppHandle, label: &str) {
+    let on = app.state::<AppState>().zen.lock().unwrap().contains_key(label);
+    if let Some(item) = ZEN_MENU_ITEM.get() {
+        let _ = item.set_checked(on);
     }
 }
 
@@ -1308,6 +1458,20 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec, always_on_top: bo
                     // `ZZ` would have ended this nvim's session; run it through
                     // the exact guard Cmd+W's `CloseRequested` uses instead of
                     // letting nvim quit unguarded (see `runtime/quit_guard.lua`).
+                    // :GneovimZenOn / Off / Toggle; AppKit, so main thread.
+                    BridgeEvent::Zen(want) => {
+                        #[cfg(target_os = "macos")]
+                        {
+                            let zen_app = emit_app.clone();
+                            let zen_label = emit_label.clone();
+                            let _ = emit_app.run_on_main_thread(move || {
+                                set_zen(&zen_app, &zen_label, want);
+                            });
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = want;
+                        Ok(())
+                    }
                     BridgeEvent::QuitRequest => {
                         #[cfg(target_os = "macos")]
                         if let Some(w) = emit_app.get_webview_window(&emit_label) {
@@ -1834,6 +1998,16 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         )),
     )?;
 
+    let zen_mode = CheckMenuItem::with_id(
+        app,
+        "gnv:zen_mode",
+        "Zen Mode",
+        true,
+        false,
+        Some(accelerator_string(&crate::config::get().window.zen_mode_shortcut())),
+    )?;
+    let _ = ZEN_MENU_ITEM.set(zen_mode.clone());
+
     // Edit submenu: the predefined Cut/Copy/Paste/Select All target the webview,
     // which is useless for a grid window. Replace them with items that route to
     // nvim.
@@ -1895,6 +2069,9 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
                     &select_all,
                     &look_up,
                 ])?;
+            }
+            Ok("View") => {
+                sub.append_items(&[&PredefinedMenuItem::separator(app)?, &zen_mode])?;
             }
             Ok("Window") => {
                 sub.append_items(&[&PredefinedMenuItem::separator(app)?, &focus_normal_window])?;
@@ -2221,6 +2398,14 @@ pub fn run() {
             "gnv:new_tab" => {
                 spawn_window(app, true, OpenSpec::default(), false);
             }
+            "gnv:zen_mode" => {
+                #[cfg(target_os = "macos")]
+                if let Some(label) = recipient_window(app) {
+                    set_zen(app, &label, None);
+                } else if let Some(item) = ZEN_MENU_ITEM.get() {
+                    let _ = item.set_checked(false);
+                }
+            }
             "gnv:copy" => focused_bridge(app, |b| async move { b.clip_yank(false).await }),
             "gnv:cut" => focused_bridge(app, |b| async move { b.clip_yank(true).await }),
             "gnv:paste" => focused_bridge(app, |b| async move {
@@ -2259,6 +2444,7 @@ pub fn run() {
                     state.windows.lock().unwrap().remove(window.label());
                     state.readiness.lock().unwrap().remove(window.label());
                     state.failed.lock().unwrap().remove(window.label());
+                    state.zen.lock().unwrap().remove(window.label());
                     let mut aot = state.aot_window.lock().unwrap();
                     if aot.as_deref() == Some(window.label()) {
                         *aot = None;
@@ -2277,6 +2463,7 @@ pub fn run() {
                 if let Some(state) = window.try_state::<AppState>() {
                     *state.last_focused.lock().unwrap() = Some(window.label().to_string());
                 }
+                sync_zen_menu_item(window.app_handle(), window.label());
                 #[cfg(target_os = "macos")]
                 lookup_hotkey::set_active(true);
                 // Poke the webview over the same IPC path that gnv://.../grid

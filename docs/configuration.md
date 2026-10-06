@@ -81,6 +81,12 @@ always_on_top_shortcut = "cmd+ctrl+space"
 # unrecognised value logs a warning and falls back to the default.
 focus_normal_window_shortcut = "cmd+shift+j"
 
+# Keyboard shortcut for View > Zen Mode (see "Zen mode" below). Local, a plain
+# menu accelerator like focus_normal_window_shortcut. Same format as
+# always_on_top_shortcut. An unrecognised value logs a warning and falls back
+# to the default.
+zen_mode_shortcut = "cmd+alt+z"
+
 [markdown]
 # Whether a filetype=markdown window renders as a CodeMirror live-preview
 # island by default. Overridable per window at runtime (see below). Default
@@ -256,6 +262,27 @@ format is modifier names joined by `+`, ending in one key name:
 `cmd`/`command`, `ctrl`/`control`, `alt`/`option`, `shift`, e.g. `cmd+ctrl+space`
 or `cmd+alt+shift+a`. macOS only; an unrecognised value logs a warning and
 falls back to the default.
+
+## Zen mode
+
+View > Zen Mode (`[window] zen_mode_shortcut`, default `cmd+alt+z`) hides the
+focused gui-window's native tab bar and traffic lights; choosing it again
+brings them back. The overlay title bar's empty strip stays, so the window can
+still be dragged by its top edge. The checkmark follows whichever window is
+in front. macOS only.
+
+macOS will not hide the tab bar of a window that has 2+ tabs, so a gui-tab is
+taken out of its group instead, at the same position and size, with the rest
+of the group right behind it. Leaving zen mode puts it back at its old place
+among the tabs; if those tabs were all closed meanwhile it stays a lone
+window. No other window is touched (unlike Window > Merge All Windows, which
+collects every window from every Space).
+
+Zen mode does nothing to Neovim itself. Your config can follow it through
+`User GneovimZenEnter` / `GneovimZenLeave` (fired after every real change,
+however it was triggered) and `g:gneovim_zen`, and can drive it with
+`:GneovimZenOn` / `Off` / `Toggle`, the same as the menu item; see
+`neovim-api-surface.md`.
 
 ## Closing and quitting
 

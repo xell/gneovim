@@ -226,6 +226,9 @@ pub enum BridgeEvent {
     /// `WindowEvent::CloseRequested` uses instead. From
     /// `runtime/quit_guard.lua`.
     QuitRequest,
+    /// `:GneovimZenOn` / `Off` / `Toggle`: `Some(true)` / `Some(false)` /
+    /// `None`. The same as View > Zen Mode. From `runtime/zen.lua`.
+    Zen(Option<bool>),
     /// nvim's stdio closed (it exited or the connection dropped).
     Gone(String),
 }
@@ -805,6 +808,15 @@ impl Handler for NvHandler {
             "gnv_quit_request" => {
                 self.shared.send(BridgeEvent::QuitRequest);
             }
+            // ["on" | "off" | "toggle"]
+            "gnv_zen" => {
+                let want = match args.first().and_then(Value::as_str) {
+                    Some("on") => Some(true),
+                    Some("off") => Some(false),
+                    _ => None,
+                };
+                self.shared.send(BridgeEvent::Zen(want));
+            }
             "redraw" => {
                 let mut batch = lock_recover(&self.shared.grid_batch, "grid batch");
                 for group in &args {
@@ -1302,6 +1314,19 @@ pub async fn connect(
                 .await
             {
                 log::warn!("quit_guard.lua injection failed: {e}");
+            }
+        }
+
+        // View > Zen Mode's Neovim side: :GneovimZenOn / Off / Toggle,
+        // `User GneovimZenEnter` / `Leave` and `g:gneovim_zen`. macOS only,
+        // like zen mode itself. Its `gnv_zen` rpcnotify must match
+        // `handle_notify`'s arm and `BridgeEvent::Zen`.
+        if cfg!(target_os = "macos") {
+            if let Err(e) = nvim
+                .exec_lua(include_str!("runtime/zen.lua"), vec![chan.into()])
+                .await
+            {
+                log::warn!("zen.lua injection failed: {e}");
             }
         }
 
@@ -1862,6 +1887,19 @@ impl Bridge {
 
     /// `:qall` (`force` false) or `:qall!` (`force` true). On a clean quit nvim
     /// exits and the io task emits `BridgeEvent::Gone`, which closes the window.
+    /// Tell `runtime/zen.lua` that View > Zen Mode actually changed: sets
+    /// `g:gneovim_zen` and fires `User GneovimZenEnter` / `Leave`.
+    pub async fn zen_changed(&self, on: bool) -> Result<(), String> {
+        self.nvim
+            .exec_lua(
+                "if _G.__gnv_zen_changed then _G.__gnv_zen_changed(...) end",
+                vec![Value::from(on)],
+            )
+            .await
+            .map(|_| ())
+            .map_err(err)
+    }
+
     pub async fn quit_all(&self, force: bool) -> Result<(), String> {
         let cmd = if force { "qall!" } else { "qall" };
         self.nvim.command(cmd).await.map_err(err)

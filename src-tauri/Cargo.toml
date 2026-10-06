@@ -52,6 +52,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSTextInputContext",
     "NSView",
     "NSWindow",
+    "NSWindowTabGroup",
     "block2",
 ] }
 block2 = "0.6"
