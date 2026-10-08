@@ -32,6 +32,7 @@ import {
   normalModePunctuation,
 } from "./pure/keymap.js";
 import {
+  confirmIslandMode,
   initialRoutingState,
   routeIslandKey,
 } from "./pure/island-key-routing.js";
@@ -996,7 +997,7 @@ class Island {
   }
   applyCursor(row, col, mode, scrolloff = this.scrolloff) {
     this.mode = mode;
-    confirmIslandMode(this, mode);
+    confirmMode(this, mode, false);
     const nextScrolloff = Math.max(0, scrolloff);
     const scrolloffChanged = this.scrolloff !== nextScrolloff;
     // EasyMotion's marker prompt temporarily sets its window's 'scrolloff' to
@@ -1550,9 +1551,9 @@ function keyToNvim(e) {
 // window's row to the island and scrolled it to that clamped position.
 function applyCursorEcho(payload) {
   session.setCursor(payload);
-  islands
-    .get(payload.win)
-    ?.applyCursor(payload.row, payload.col, payload.mode, payload.scrolloff);
+  const island = islands.get(payload.win);
+  if (island) confirmMode(island, payload.mode, true);
+  island?.applyCursor(payload.row, payload.col, payload.mode, payload.scrolloff);
   syncGrammarlyAccessibility();
 }
 
@@ -1622,11 +1623,17 @@ let routingState = initialRoutingState();
 // pixel column that only verticalMotionTarget can produce, and both it and
 // applyReset own it.
 let islandVerticalGoal = null; // { island, column }
-// Neovim has spoken: any mode that is not Normal confirms the prediction made
-// when a mode-leaving key was forwarded.
-function confirmIslandMode(island, mode) {
-  if (routingState.modeUnconfirmed?.island === island && mode !== "n")
-    routingState = { ...routingState, modeUnconfirmed: null };
+// Neovim has spoken about this island's mode; see confirmIslandMode in
+// src/pure/island-key-routing.js for which reports clear the latch. `fresh` is
+// true only for Neovim's own cursor notification, not a cached replay.
+function confirmMode(island, mode, fresh) {
+  routingState = confirmIslandMode(
+    routingState,
+    island,
+    mode,
+    performance.now(),
+    fresh,
+  );
 }
 
 addEventListener("keydown", (e) => {

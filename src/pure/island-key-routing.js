@@ -256,6 +256,28 @@ export function routeIslandKey(input, state) {
   return result(next, { type: "forward" }, releaseG, clearVerticalGoal);
 }
 
+// How long a Normal-mode echo is distrusted after a mode-leaving key. The
+// stale echo the latch guards against (Bug 6) is one Neovim already sent before
+// it read that key, so it only exists within one round trip. Past that, a fresh
+// "n" means Neovim never left Normal mode at all (`zo`, `[s`, a leader mapping,
+// a window switch) and the latch is just stale: seen stuck for 46s on
+// 2026-10-06, forwarding every j/k instead of answering it. See
+// docs/island-key-routing-2026-10-05.md.
+export const MODE_LATCH_MAX_MS = 500;
+
+// Neovim reported `mode` for `island`. Any mode that is not Normal confirms the
+// prediction made when the mode-leaving key was forwarded, whatever the source.
+// A Normal mode only clears it from a `fresh` echo (Neovim's own cursor
+// notification, not a replay of the cached cursor) once the latch has outlived
+// a round trip.
+export function confirmIslandMode(state, island, mode, now, fresh) {
+  const latch = state.modeUnconfirmed;
+  if (latch?.island !== island) return state;
+  if (mode !== "n" || (fresh && now - latch.at >= MODE_LATCH_MAX_MS))
+    return { ...state, modeUnconfirmed: null };
+  return state;
+}
+
 function result(state, verdict, releaseG, clearVerticalGoal) {
   return { state, verdict, releaseG, clearVerticalGoal };
 }

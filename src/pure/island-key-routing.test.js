@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  MODE_LATCH_MAX_MS,
+  confirmIslandMode,
   extendsNativePending,
   initialRoutingState,
   routeIslandKey,
@@ -177,6 +179,49 @@ describe("routeIslandKey, mode is not confirmed yet", () => {
   it("keeps the latch to one island, not all of them", () => {
     const { state } = route(["i"]);
     expect(route([{ key: "w", island: "island-2" }], { state }).types).toEqual(["cursor"]);
+  });
+});
+
+// The latch used to be cleared only by a non-Normal echo, so it outlived its
+// sequence whenever Neovim never left Normal mode (seen stuck for 46s,
+// 2026-10-06), and every j/k went to Neovim instead of being answered.
+describe("confirmIslandMode", () => {
+  // `i` is routed at t=2000 (route() starts at 1000 and spaces keys 1000 apart).
+  const latched = () => route(["i"]).state;
+  const at = (ms) => 2000 + ms;
+
+  it("keeps the latch through a Normal echo inside one round trip", () => {
+    const state = confirmIslandMode(latched(), ISLAND, "n", at(100), true);
+    expect(state.modeUnconfirmed).not.toBeNull();
+    expect(route(["j"], { state, now: at(100) }).types).toEqual(["forward"]);
+  });
+
+  it("clears it on a fresh Normal echo once the round trip is long over", () => {
+    const state = confirmIslandMode(latched(), ISLAND, "n", at(1000), true);
+    expect(state.modeUnconfirmed).toBeNull();
+    expect(route(["j"], { state, now: at(1000) }).types).toEqual(["cursor"]);
+  });
+
+  it("starts the bound at the latch, inclusive", () => {
+    const edge = at(MODE_LATCH_MAX_MS);
+    expect(confirmIslandMode(latched(), ISLAND, "n", edge - 1, true).modeUnconfirmed).not.toBeNull();
+    expect(confirmIslandMode(latched(), ISLAND, "n", edge, true).modeUnconfirmed).toBeNull();
+  });
+
+  it("never trusts a replayed Normal, however old the latch", () => {
+    const state = confirmIslandMode(latched(), ISLAND, "n", at(60000), false);
+    expect(state.modeUnconfirmed).not.toBeNull();
+  });
+
+  it("clears it on any non-Normal mode, replayed or not, at once", () => {
+    for (const fresh of [true, false]) {
+      expect(confirmIslandMode(latched(), ISLAND, "i", at(1), fresh).modeUnconfirmed).toBeNull();
+    }
+  });
+
+  it("ignores reports about another island", () => {
+    const state = latched();
+    expect(confirmIslandMode(state, "island-2", "i", at(1000), true)).toBe(state);
   });
 });
 
