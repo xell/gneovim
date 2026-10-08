@@ -858,6 +858,11 @@ class Island {
   queueNvimKey(keys, event) {
     if (this.inputController.syncSelectionBeforeInput(event, keys))
       this.inputQueue.input(keys);
+    // The fourth place a key can vanish (see the diagnostics above the keydown
+    // listener): the accessibility boundary swallows the key because a ranged
+    // DOM selection stood for it. Expected for Backspace over a selection, so
+    // it is logged rather than counted as a run.
+    else jlog(`island: key ${keys} not sent, consumed by a selection replacement`);
   }
   // True when `cursor` sits behind a rendered table, a concealed image
   // source line, a closed fold's hidden body, or a conceal-hidden marker:
@@ -1597,8 +1602,77 @@ function confirmIslandMode(island, mode) {
     routingState = { ...routingState, modeUnconfirmed: null };
 }
 
+// ---------------------------------------------------------------------------
+// Diagnostics for the island going deaf (2026-10-08). Reported shape: `w` keeps
+// performing its Normal-mode motion while Insert mode is believed to be on,
+// Escape and `:` do not get out of it, and only toggling live preview restores
+// input. A local `w` answer travels by nvim_win_set_cursor while every key
+// travels by nvim_input, so a state where cursor placement works and keys do
+// not means keys are being dropped somewhere between the keydown and the queue.
+// There are exactly three such places; each is logged below, with the run
+// length, because one dropped key is ordinary (a real composition does that)
+// and a run of them is the bug. Remove once the cause is known.
+let keyDropRun = 0;
+function islandStateLine(isl) {
+  const controller = isl?.inputController;
+  const active = document.activeElement;
+  return [
+    `island=${isl ? isl.winId : "none"}`,
+    `buf=${isl?.bufnr ?? "-"}`,
+    `mode=${isl?.mode ?? "-"}`,
+    `editable=${isl?.editable ?? "-"}`,
+    `composing=${Boolean(controller?.composition)}`,
+    `preedit=${Boolean(controller?.preedit)}`,
+    `settling=${Boolean(controller?.compositionSettling)}`,
+    `pendingCursor=${controller?.pendingCursor ? "yes" : "no"}`,
+    `queue=${isl?.inputQueue?.outstanding ?? "-"}`,
+    `cmFocus=${isl?.view?.hasFocus ?? "-"}`,
+    `activeEl=${active?.id || active?.className || active?.tagName || "-"}`,
+    `imeComposing=${imeComposing}`,
+    `sessionMode=${session.modeName}`,
+    `cmdline=${session.cmdlineActive}`,
+  ].join(" ");
+}
+function noteKeyDropped(reason, e, isl) {
+  keyDropRun += 1;
+  if (keyDropRun <= 3 || keyDropRun % 10 === 0)
+    jlog(
+      `island: key dropped (${reason}) run=${keyDropRun} ` +
+        `key=${e.key} code=${e.code} keyCode=${e.keyCode} composing=${e.isComposing} | ` +
+        islandStateLine(isl),
+    );
+}
+function noteKeyDelivered() {
+  if (keyDropRun >= 3) jlog(`island: key flow resumed after ${keyDropRun} dropped keys`);
+  keyDropRun = 0;
+}
+// Client-side escape hatch, deliberately not a Neovim command: when the island
+// stops accepting keys, a Neovim command cannot be typed either. Cmd+Ctrl+Shift+D
+// (Cmd+Ctrl+D is already the dictionary lookup) dumps the state to the log.
+function handleStateDump(e) {
+  if (!(e.metaKey && e.ctrlKey && e.shiftKey && e.code === "KeyD")) return false;
+  e.preventDefault();
+  const isl = islandForGrid(session.cursorGrid);
+  jlog("island state dump: " + islandStateLine(isl));
+  jlog(
+    `island state dump: latch=${
+      routingState.modeUnconfirmed
+        ? Math.round(performance.now() - routingState.modeUnconfirmed.at) + "ms"
+        : "none"
+    } nativePending=${routingState.nativePending} pendingG=${Boolean(routingState.pendingG)} ` +
+      `goal=${islandVerticalGoal ? "set" : "none"} islands=${islands.size} ` +
+      `cursorGrid=${session.cursorGrid} dropRun=${keyDropRun}`,
+  );
+  return true;
+}
+
 addEventListener("keydown", (e) => {
-  if (imeComposing) return; // IME is mid-composition; let #ime + the OS handle it
+  if (handleStateDump(e)) return;
+  if (imeComposing) {
+    // IME is mid-composition; let #ime + the OS handle it.
+    noteKeyDropped("grid IME composing", e, null);
+    return;
+  }
   if (handleFontZoom(e)) return;
   // A command line temporarily belongs to Neovim, even when the underlying
   // cursor grid is a Markdown island. Do not apply island Normal-mode physical
@@ -1656,6 +1730,7 @@ addEventListener("keydown", (e) => {
       return;
     case "forwardKeys":
       e.preventDefault();
+      noteKeyDelivered();
       if (isl) isl.queueNvimKey(routed.verdict.keys, e);
       else
         nvim.input(routed.verdict.keys).catch((error) =>
@@ -1672,7 +1747,13 @@ addEventListener("keydown", (e) => {
       break; // forward
   }
   const keys = keyToNvim(e);
-  if (keys === null) return; // mid-composition / lone modifier
+  if (keys === null) {
+    // Mid-composition, a lone modifier, or a key the OS input method claimed
+    // (keyCode 229). The last of those is the one that can go wrong silently.
+    if (!/^(Shift|Control|Alt|Meta|CapsLock|Fn|FnLock|AltGraph)$/.test(e.key))
+      noteKeyDropped("not encodable", e, isl);
+    return;
+  }
   // Editable grid context (insert/replace or command line): plain text goes into
   // the #ime textarea for the OS IME; input/compositionend forward it to nvim.
   // Named and modified keys, including Enter and Backspace, still pass here.
@@ -1680,9 +1761,14 @@ addEventListener("keydown", (e) => {
     gridTextInputActive() &&
     document.activeElement === imeEl &&
     !keys.startsWith("<")
-  )
+  ) {
+    // Expected for a grid window; for an island it means the hidden textarea
+    // has the keyboard when it should not.
+    if (isl) noteKeyDropped("taken by the #ime textarea", e, isl);
     return;
+  }
   e.preventDefault();
+  noteKeyDelivered();
   if (isl) isl.queueNvimKey(keys, e);
   else nvim.input(keys).catch((error) => jlog("grid input failed: " + error));
 });

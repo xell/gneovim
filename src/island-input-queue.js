@@ -9,6 +9,11 @@ export class IslandInputQueue {
     this.winId = winId;
     this.log = log;
     this.pending = Promise.resolve();
+    // Diagnostics only: how many requests are in flight and when the last one
+    // settled, so a wedged queue (every key waiting behind a request that
+    // never resolves) is visible in a state dump rather than inferred.
+    this.outstanding = 0;
+    this.lastSettledAt = 0;
   }
 
   cursor(row, col) {
@@ -33,8 +38,13 @@ export class IslandInputQueue {
   }
 
   enqueue(request, failurePrefix) {
+    this.outstanding += 1;
     this.pending = this.pending
       .then(request)
-      .catch((error) => this.log(failurePrefix + error));
+      .catch((error) => this.log(failurePrefix + error))
+      .finally(() => {
+        this.outstanding -= 1;
+        this.lastSettledAt = performance.now();
+      });
   }
 }
