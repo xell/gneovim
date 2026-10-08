@@ -641,6 +641,7 @@ class Island {
     // editors may move it through macOS Accessibility before posting their
     // correction keys, so serialize island cursor and key requests.
     this._nvimCursor = null; // { row, col }
+    this._lastCursorEffect = null; // last { row, col, mode } actually dispatched
     this.inputQueue = new IslandInputQueue({
       client: nvim,
       winId,
@@ -1033,10 +1034,31 @@ class Island {
       this._nvimCursor.col !== col;
     this._nvimCursor = { row, col };
     this.inputController.onNvimCursor(row, col);
-    this.tx({
-      ...(cursorChanged ? { selection: { anchor: pos } } : {}),
-      effects: setNvimCursor.of({ row, col, mode }),
-    });
+    // Dispatch only when this transaction would say something new. Neovim
+    // replays the same cursor on every `win_viewport` op (see
+    // GridCoordinator.applyViewport), so during a scroll most calls land here
+    // with an identical row, col and mode, and a CodeMirror transaction is not
+    // free: it re-runs every decoration field, syncs the DOM and measures.
+    // Profiled on the real app 2026-10-09 while holding j/k: applyCursor was
+    // 48.8% of all JavaScript CPU, essentially all of it this dispatch, and
+    // 22.4% came in through applyViewport alone, i.e. cursor positions that had
+    // not changed at all.
+    //
+    // The cursor decoration still recomputes on fold changes, because those
+    // arrive as their own transaction (setIslandFolds) and the field recomputes
+    // on every transaction regardless of who dispatched it.
+    const effectChanged =
+      this._lastCursorEffect == null ||
+      this._lastCursorEffect.row !== row ||
+      this._lastCursorEffect.col !== col ||
+      this._lastCursorEffect.mode !== mode;
+    if (cursorChanged || effectChanged) {
+      this._lastCursorEffect = { row, col, mode };
+      this.tx({
+        ...(cursorChanged ? { selection: { anchor: pos } } : {}),
+        effects: setNvimCursor.of({ row, col, mode }),
+      });
+    }
     if (cursorChanged || scrolloffChanged) this.keepCursorInView();
     this.el.dataset.mode = mode;
   }
@@ -1065,6 +1087,7 @@ class Island {
     this.cursorScroller.center(this._nvimCursor, this.scrolloff);
   }
   clearCursor() {
+    this._lastCursorEffect = null;
     this.tx({ effects: setNvimCursor.of(null) });
     // cursor left this island; drop focus so keys go to the global path
     if (this.view.hasFocus) this.view.contentDOM.blur();
@@ -1077,6 +1100,7 @@ class Island {
     // match whatever the old buffer last scrolled to.
     this._lastViewport = null;
     this._nvimCursor = null;
+    this._lastCursorEffect = null;
     this.inputController.reset();
     // A stale gj/gk goal column from before this reset (e.g.
     // :MarkdownLivePreviewOff then On reusing this same Island, see the
