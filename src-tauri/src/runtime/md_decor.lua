@@ -1066,8 +1066,36 @@ local function push(win)
 end
 
 local pending = false
+local last_flush = 0
+local burst = 0
+-- Debounce, adaptive. A single event settles fast; a held key does not need to.
+-- Holding `j` fires CursorMoved about thirty times a second, and at the flat
+-- 20ms this used to use that rebuilt the whole visible viewport up to fifty
+-- times a second, measured at 4.1ms a scan on a 74-line file, so about a fifth
+-- of a core doing it (profile of the real app, 2026-10-08: 54% of that Lua
+-- callback is `vim.fn.synconcealed()` once per byte of every visible line,
+-- plus the LuaJIT allocation and GC the boundary crossings create). Nothing in
+-- the answer changes while a motion key is held: the text is identical, and
+-- with `concealcursor` naming the current mode even the guard row contributes
+-- nothing. Stretching the interval during a burst cuts the rate roughly
+-- threefold; the trailing flush still runs, so the settled state is the same,
+-- only reached up to SLOW_MS later. CursorHold remains the backstop.
+local FAST_MS = 20
+local SLOW_MS = 70
+-- A schedule() this soon after the last flush means the events are still
+-- arriving, i.e. a key is down rather than a one-off edit.
+local BURST_GAP_MS = 120
+-- Flushes in a row before stretching, so an ordinary pair of events (a motion
+-- that also scrolls, say) still settles at FAST_MS.
+local BURST_LIMIT = 2
+
+local function now_ms()
+  return vim.uv.hrtime() / 1e6
+end
+
 local function flush()
   pending = false
+  last_flush = now_ms()
   for _, win in ipairs(vim.api.nvim_list_wins()) do
     if preview_on(win) then
       pcall(push, win)
@@ -1075,13 +1103,13 @@ local function flush()
   end
 end
 
--- Debounced: many of the trigger events fire in bursts (holding `j`, a paste).
 schedule = function()
   if pending then
     return
   end
   pending = true
-  vim.defer_fn(flush, 20)
+  burst = (now_ms() - last_flush <= BURST_GAP_MS) and burst + 1 or 0
+  vim.defer_fn(flush, burst >= BURST_LIMIT and SLOW_MS or FAST_MS)
 end
 
 -- Escape hatch for `:GneovimResyncIsland` (runtime/md_preview.lua). `push`
