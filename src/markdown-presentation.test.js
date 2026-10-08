@@ -179,6 +179,60 @@ describe("createMarkdownPresentation", () => {
     expect(findClass(findTag(table, "code"), "hl-Special")).not.toBeNull();
   });
 
+  // Rebuilding either field rescans every line of the document, so a change
+  // that cannot touch a table or image must keep the same decoration set.
+  it("keeps table and image widgets when the cursor or a highlight moves elsewhere", () => {
+    const { effects, presentation, state } = fixture(
+      "prose\n| A |\n| --- |\n| 1 |\nmore prose\n![c](./i.png)",
+    );
+    const base = state.update({
+      effects: effects.setImageBase.of("/tmp/note.md"),
+    }).state;
+    const table = base.field(presentation.markdownTableField).deco;
+    const image = base.field(presentation.markdownImageField).deco;
+
+    const away = base.update({
+      effects: [
+        effects.setCursor.of({ row: 4, col: 2, mode: "n" }),
+        effects.setTableConcealGuard.of(4),
+        effects.setTableInlineHighlights.of([[0, 0, 5, "Special"]]),
+        effects.setInteractiveHighlights.of([[4, 0, 4, "Search"]]),
+      ],
+    }).state;
+    expect(away.field(presentation.markdownTableField).deco).toBe(table);
+    expect(away.field(presentation.markdownImageField).deco).toBe(image);
+
+    const intoTable = away.update({
+      effects: effects.setCursor.of({ row: 3, col: 2, mode: "n" }),
+    }).state;
+    expect(intoTable.field(presentation.markdownTableField).deco).not.toBe(
+      table,
+    );
+    // The guard row names the cursor's table line, so the table reveals.
+    expect(
+      intoTable
+        .update({ effects: effects.setTableConcealGuard.of(3) })
+        .state.field(presentation.markdownTableField).deco.size,
+    ).toBe(0);
+
+    const highlighted = away.update({
+      effects: effects.setInteractiveHighlights.of([[3, 2, 3, "Search"]]),
+    }).state;
+    expect(highlighted.field(presentation.markdownTableField).deco).not.toBe(
+      table,
+    );
+    expect(highlighted.field(presentation.markdownImageField).deco).toBe(
+      image,
+    );
+
+    const onImage = away.update({
+      effects: effects.setCursor.of({ row: 5, col: 0, mode: "n" }),
+    }).state;
+    expect(
+      ranges(onImage.field(presentation.markdownImageField).deco),
+    ).toHaveLength(1);
+  });
+
   it("reveals a table when the conceal guard names its cursor line", () => {
     const { effects, presentation, state } = fixture(
       "| A |\n| --- |\n| 1 |",

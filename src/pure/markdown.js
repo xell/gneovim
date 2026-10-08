@@ -106,6 +106,20 @@ export function tableAlign(cells) {
   return align;
 }
 
+// The table and image widgets only ever read the cursor, highlights and
+// overlays on their own rows, and rebuilding them means rescanning the whole
+// document, so their fields key a rebuild on just that slice. `spans` are
+// [firstRow, lastRow] pairs; entries are [row, ...] like the payload's.
+export function rowInSpans(spans, row) {
+  return spans.some(([first, last]) => row >= first && row <= last);
+}
+
+export function entriesInSpans(spans, entries) {
+  return spans.length
+    ? entries.filter(([row]) => rowInSpans(spans, row))
+    : [];
+}
+
 export function tableHighlightCells(doc, firstRow, lastRow, highlights) {
   const out = [];
   for (const [row, startColumn, endColumn, group] of highlights) {

@@ -2,9 +2,11 @@ import { StateField } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import { markdownLanguage } from "@codemirror/lang-markdown";
 import {
+  entriesInSpans,
   imageCaptionHighlights,
   imageCaptionOverlays,
   imageLabel,
+  rowInSpans,
   tableAlign,
   tableCells,
   tableCursorCell,
@@ -548,6 +550,7 @@ export function createMarkdownPresentation({
     interactiveOverlays = [],
   ) {
     const ranges = [];
+    const rows = [];
     for (let number = 1; number <= doc.lines; number++) {
       const line = doc.line(number);
       const match =
@@ -561,6 +564,7 @@ export function createMarkdownPresentation({
         convertFileSrc,
       );
       if (!src) continue;
+      rows.push([number - 1, number - 1]);
       const label = imageLabel(match[1]);
       if (cursor?.row !== number - 1) {
         // The alt text is copied verbatim into the caption (see imageLabel),
@@ -604,12 +608,22 @@ export function createMarkdownPresentation({
         }).range(line.to),
       );
     }
-    return Decoration.set(ranges, true);
+    return { deco: Decoration.set(ranges, true), rows };
   }
+
+  // What imageDecorations reads beyond the document itself, narrowed to the
+  // image rows: the cursor only matters on an image's own line.
+  const imageInputKey = (rows, cursor, highlights, overlays) =>
+    JSON.stringify([
+      rowInSpans(rows, cursor?.row) ? cursor.row : null,
+      entriesInSpans(rows, highlights),
+      entriesInSpans(rows, overlays),
+    ]);
 
   const markdownImageField = StateField.define({
     create: (state) => ({
-      deco: imageDecorations(state.doc, "", null),
+      ...imageDecorations(state.doc, "", null),
+      key: imageInputKey([], null, [], []),
       bufferName: "",
       cursor: null,
       highlights: [],
@@ -630,25 +644,49 @@ export function createMarkdownPresentation({
           interactiveOverlays = effect.value;
         }
       }
-      return transaction.docChanged ||
-        bufferName !== value.bufferName ||
-        cursor !== value.cursor ||
-        interactiveHighlights !== value.highlights ||
-        interactiveOverlays !== value.overlays
-        ? {
-            deco: imageDecorations(
-              transaction.state.doc,
-              bufferName,
-              cursor,
-              interactiveHighlights,
-              interactiveOverlays,
-            ),
-            bufferName,
-            highlights: interactiveHighlights,
-            overlays: interactiveOverlays,
-            cursor,
-          }
-        : value;
+      if (
+        !transaction.docChanged &&
+        bufferName === value.bufferName &&
+        cursor === value.cursor &&
+        interactiveHighlights === value.highlights &&
+        interactiveOverlays === value.overlays
+      ) {
+        return value;
+      }
+      const inputs = {
+        bufferName,
+        highlights: interactiveHighlights,
+        overlays: interactiveOverlays,
+        cursor,
+      };
+      // A cursor move or a highlight change away from every image leaves the
+      // widgets as they are, without rescanning the document.
+      if (!transaction.docChanged && bufferName === value.bufferName) {
+        const key = imageInputKey(
+          value.rows,
+          cursor,
+          interactiveHighlights,
+          interactiveOverlays,
+        );
+        if (key === value.key) return { ...value, ...inputs };
+      }
+      const built = imageDecorations(
+        transaction.state.doc,
+        bufferName,
+        cursor,
+        interactiveHighlights,
+        interactiveOverlays,
+      );
+      return {
+        ...built,
+        key: imageInputKey(
+          built.rows,
+          cursor,
+          interactiveHighlights,
+          interactiveOverlays,
+        ),
+        ...inputs,
+      };
     },
     provide: (field) =>
       EditorView.decorations.from(field, (value) => value.deco),
@@ -663,6 +701,7 @@ export function createMarkdownPresentation({
     bufferName = "",
   ) {
     const ranges = [];
+    const tables = [];
     let fence = null;
     for (let number = 1; number < doc.lines; number++) {
       const line = doc.line(number);
@@ -691,6 +730,7 @@ export function createMarkdownPresentation({
         end++;
       }
       const last = doc.line(end);
+      tables.push([number - 1, end - 1]);
       const cursorOffset =
         cursor && cursor.row >= 0 && cursor.row < doc.lines
           ? (() => {
@@ -755,12 +795,25 @@ export function createMarkdownPresentation({
       }
       number = end;
     }
-    return Decoration.set(ranges, true);
+    return { deco: Decoration.set(ranges, true), rows: tables };
   }
+
+  // What tableDecorations reads beyond the document itself, narrowed to the
+  // table rows: the cursor (and with it the guard row, which only reveals a
+  // table the cursor is in) matters only inside a table.
+  const tableInputKey = (rows, cursor, guardRow, highlights, overlays) =>
+    JSON.stringify([
+      rowInSpans(rows, cursor?.row)
+        ? [cursor.row, cursor.col, cursor.mode, guardRow]
+        : null,
+      entriesInSpans(rows, highlights),
+      entriesInSpans(rows, overlays),
+    ]);
 
   const markdownTableField = StateField.define({
     create: (state) => ({
-      deco: tableDecorations(state.doc, null, null, [], [], ""),
+      ...tableDecorations(state.doc, null, null, [], [], ""),
+      key: tableInputKey([], null, null, [], []),
       bufferName: "",
       cursor: null,
       guardRow: null,
@@ -791,30 +844,58 @@ export function createMarkdownPresentation({
           tableOverlays = effect.value;
         }
       }
-      return transaction.docChanged ||
-        bufferName !== value.bufferName ||
-        cursor !== value.cursor ||
-        guardRow !== value.guardRow ||
-        tableHighlights !== value.highlights ||
-        inlineHighlights !== value.inlineHighlights ||
-        tableOverlays !== value.overlays
-        ? {
-            deco: tableDecorations(
-              transaction.state.doc,
-              cursor,
-              guardRow,
-              [...inlineHighlights, ...tableHighlights],
-              tableOverlays,
-              bufferName,
-            ),
-            bufferName,
-            cursor,
-            guardRow,
-            highlights: tableHighlights,
-            inlineHighlights,
-            overlays: tableOverlays,
-          }
-        : value;
+      if (
+        !transaction.docChanged &&
+        bufferName === value.bufferName &&
+        cursor === value.cursor &&
+        guardRow === value.guardRow &&
+        tableHighlights === value.highlights &&
+        inlineHighlights === value.inlineHighlights &&
+        tableOverlays === value.overlays
+      ) {
+        return value;
+      }
+      const inputs = {
+        bufferName,
+        cursor,
+        guardRow,
+        highlights: tableHighlights,
+        inlineHighlights,
+        overlays: tableOverlays,
+      };
+      const highlights = [...inlineHighlights, ...tableHighlights];
+      // Profiled on the real app 2026-10-09 while holding j/k: this rescan
+      // was 22% of all renderer CPU, nearly all of it from cursor moves
+      // nowhere near a table. Those now keep the widgets as they are.
+      if (!transaction.docChanged && bufferName === value.bufferName) {
+        const key = tableInputKey(
+          value.rows,
+          cursor,
+          guardRow,
+          highlights,
+          tableOverlays,
+        );
+        if (key === value.key) return { ...value, ...inputs };
+      }
+      const built = tableDecorations(
+        transaction.state.doc,
+        cursor,
+        guardRow,
+        highlights,
+        tableOverlays,
+        bufferName,
+      );
+      return {
+        ...built,
+        key: tableInputKey(
+          built.rows,
+          cursor,
+          guardRow,
+          highlights,
+          tableOverlays,
+        ),
+        ...inputs,
+      };
     },
     provide: (field) =>
       EditorView.decorations.from(field, (value) => value.deco),
