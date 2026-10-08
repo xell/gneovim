@@ -114,6 +114,26 @@ end
 -- 'concealcursor', so the cursor-line guard is applied here to every source.
 -- The client sorts and drops overlaps, so duplicate runs across sources are
 -- harmless.
+-- Per-window cache of the `:syntax` conceal scan, which is the single most
+-- expensive part of a push: profiled on the real app 2026-10-09 while holding
+-- j/k, it was 47% of Neovim's main thread, nearly all of it `synconcealed()`
+-- once per byte of every visible line plus the LuaJIT allocation and GC those
+-- boundary crossings create.
+--
+-- Holding a motion key cannot change what `:syntax` conceals. The text is the
+-- same, and `synconcealed()` does not honour 'concealcursor' (the cursor-line
+-- guard is applied below when emitting, not when scanning), so a row's runs are
+-- a pure function of the buffer text, the syntax state and 'conceallevel'. They
+-- are therefore cached per row, and a scroll only pays for the rows it newly
+-- reveals.
+--
+-- Keyed on the window, its buffer, b:changedtick and 'conceallevel', so any of
+-- those changing drops the cache; ColorScheme drops it too, since that reloads
+-- syntax. Known gap, the same one already documented for the payload
+-- fingerprint: a plugin that changes `:syntax` conceal rules at runtime without
+-- touching the text is not noticed until the next edit, colorscheme or reload.
+local conceal_scan = {}
+
 local function collect_conceal(win, buf, first, last)
   local cl = vim.wo[win].conceallevel
   if cl == 0 then
@@ -144,32 +164,69 @@ local function collect_conceal(win, buf, first, last)
     end
   end
 
-  -- 1. :syntax conceal, via synconcealed() over the viewport.
-  local lines = vim.api.nvim_buf_get_lines(buf, first, last + 1, false)
-  vim.api.nvim_win_call(win, function()
-    for i, line in ipairs(lines) do
-      local row = first + i - 1
-      local lnum = row + 1
-      local rs, rid, rtext -- open run: start byte (0-based), region id, text
-      for col = 1, #line do
-        local r = vim.fn.synconcealed(lnum, col)
-        if r[1] == 1 then
-          if rs == nil then
-            rs, rid, rtext = col - 1, r[3], r[2]
-          elseif r[3] ~= rid then
-            add(row, rs, col - 1, rtext)
-            rs, rid, rtext = col - 1, r[3], r[2]
-          end
-        elseif rs ~= nil then
-          add(row, rs, col - 1, rtext)
-          rs = nil
-        end
-      end
-      if rs ~= nil then
-        add(row, rs, #line, rtext)
-      end
+  -- 1. :syntax conceal, via synconcealed(), scanned once per row and cached.
+  local tick = vim.api.nvim_buf_get_changedtick(buf)
+  local cache = conceal_scan[win]
+  if not cache or cache.buf ~= buf or cache.tick ~= tick or cache.cl ~= cl then
+    cache = { buf = buf, tick = tick, cl = cl, rows = {} }
+    conceal_scan[win] = cache
+  end
+  local missing = {}
+  for row = first, last do
+    if cache.rows[row] == nil then
+      missing[#missing + 1] = row
     end
-  end)
+  end
+  if #missing > 0 then
+    local lines = vim.api.nvim_buf_get_lines(buf, first, last + 1, false)
+    vim.api.nvim_win_call(win, function()
+      for _, row in ipairs(missing) do
+        local line = lines[row - first + 1] or ''
+        local lnum = row + 1
+        local runs = {}
+        -- `guard_row` is deliberately not applied here: it decides what is
+        -- emitted, not what the scan finds, and keeping it out is what makes
+        -- these runs reusable while the cursor moves.
+        local function close(sc, ec, text)
+          if ec > sc then
+            runs[#runs + 1] = { sc, ec, text }
+          end
+        end
+        local rs, rid, rtext -- open run: start byte (0-based), region id, text
+        for col = 1, #line do
+          local r = vim.fn.synconcealed(lnum, col)
+          if r[1] == 1 then
+            if rs == nil then
+              rs, rid, rtext = col - 1, r[3], r[2]
+            elseif r[3] ~= rid then
+              close(rs, col - 1, rtext)
+              rs, rid, rtext = col - 1, r[3], r[2]
+            end
+          elseif rs ~= nil then
+            close(rs, col - 1, rtext)
+            rs = nil
+          end
+        end
+        if rs ~= nil then
+          close(rs, #line, rtext)
+        end
+        cache.rows[row] = runs
+      end
+    end)
+  end
+  for row = first, last do
+    for _, run in ipairs(cache.rows[row]) do
+      add(row, run[1], run[2], run[3])
+    end
+  end
+  -- Keep the cache near the viewport so a long scroll cannot accumulate a row
+  -- per line of the file.
+  local keep_from, keep_to = first - 500, last + 500
+  for row in pairs(cache.rows) do
+    if row < keep_from or row > keep_to then
+      cache.rows[row] = nil
+    end
+  end
 
   -- 2. treesitter conceal, from the `conceal` metadata on the highlights query
   -- (the same query the treesitter highlighter reads). Walk the base language
@@ -1210,6 +1267,7 @@ vim.api.nvim_create_autocmd('ColorScheme', {
   callback = function()
     hl_cache = {}
     hl_by_win = {}
+    conceal_scan = {}
     schedule()
   end,
 })
