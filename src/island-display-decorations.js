@@ -378,6 +378,8 @@ export class IslandDisplayDecorations {
       headingGuardRow,
       inFold,
     )) {
+      // `from` is the line start, so the byte column compares directly
+      // against the run's length: anywhere on "## " lights the icon.
       spans.push({
         from,
         to,
@@ -386,13 +388,14 @@ export class IslandDisplayDecorations {
             this.document,
             doc.sliceString(from, to),
           ),
+          drawsCursor: level <= 3,
         }),
       });
       if (level <= 3) {
         headingIconLines.push({
           from,
           level,
-          cursorHere: cursor?.row === row && cursor.col === 0,
+          cursorHere: cursor?.row === row && cursor.col < to - from,
         });
       }
     }
@@ -436,6 +439,7 @@ export class IslandDisplayDecorations {
                 doc.sliceString(from, to),
                 cursorHere,
               ),
+              drawsCursor: true,
             }),
       });
     }

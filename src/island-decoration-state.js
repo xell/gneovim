@@ -26,6 +26,14 @@ export function createIslandDecorationState({ document, log }) {
     }
   }
 
+  class HiddenCursor extends WidgetType {
+    toDOM() {
+      const span = document.createElement("span");
+      span.className = "nvim-cursor nvim-cursor-hidden";
+      return span;
+    }
+  }
+
   const islandDecorField = StateField.define({
     create: () => Decoration.none,
     update(value, transaction) {
@@ -105,6 +113,32 @@ export function createIslandDecorationState({ document, log }) {
           widget: new BlockCursor(),
           side: -1,
         }).range(from),
+      ]);
+    }
+    // A cursor inside conceal-hidden text (a link's `(url)`, `**`, a quote
+    // marker) has no visible character to sit on, so it is drawn at the
+    // hidden run's left edge: a slim hollow outline, distinct from the
+    // Insert-mode bar, whatever the run's length. Markers that already draw
+    // their own cursor (heading icon, list bullet) opt out via drawsCursor.
+    let concealRun = null;
+    state.field(islandDecorField, false)?.between(
+      from,
+      from,
+      (runFrom, runTo, decoration) => {
+        if (runFrom <= from && from < runTo && decoration.spec.widget) {
+          concealRun = { from: runFrom, drawn: decoration.spec.drawsCursor };
+          return false;
+        }
+      },
+    );
+    if (concealRun) {
+      if (concealRun.drawn) return Decoration.none;
+      return Decoration.set([
+        Decoration.widget({
+          widget:
+            position.mode[0] === "i" ? new BarCursor() : new HiddenCursor(),
+          side: -1,
+        }).range(concealRun.from),
       ]);
     }
     if (position.mode[0] === "i") {
