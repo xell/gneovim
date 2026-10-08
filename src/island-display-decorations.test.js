@@ -376,7 +376,7 @@ describe("IslandDisplayDecorations", () => {
   });
 
   // Most pushes while holding j/k change little or nothing; each kind of
-  // decoration is only sent, and the island only repainted, when it changed.
+  // decoration is only sent when it changed.
   it("dispatches only the decoration kinds a push actually changed", () => {
     let cursor = { row: 1, col: 0 };
     const { controller, decorationState, forceRepaint, view } = fixture(
@@ -400,10 +400,12 @@ describe("IslandDisplayDecorations", () => {
     view.dispatch.mockClear();
     forceRepaint.mockClear();
 
-    // The same payload again: no transaction at all.
+    // The same payload again: no transaction, but still a repaint (WKWebView
+    // can leave the previous update unpainted without one).
     controller.set(payload());
     expect(view.dispatch).not.toHaveBeenCalled();
-    expect(forceRepaint).not.toHaveBeenCalled();
+    expect(forceRepaint).toHaveBeenCalledOnce();
+    forceRepaint.mockClear();
 
     // The cursor lands on the bullet: only the replace widgets change.
     cursor = { row: 0, col: 0 };
@@ -415,12 +417,38 @@ describe("IslandDisplayDecorations", () => {
     expect(after[2]).toBe(before[2]);
     expect(forceRepaint).toHaveBeenCalledOnce();
 
-    // A guard row change alone is one transaction and no repaint.
+    // A guard row change alone is one transaction.
     view.dispatch.mockClear();
-    forceRepaint.mockClear();
     controller.set({ ...payload(), guard_row: 1 });
     expect(view.dispatch).toHaveBeenCalledOnce();
-    expect(forceRepaint).not.toHaveBeenCalled();
+  });
+
+  // Regression 2026-10-09: the change check used RangeSet.eq, which ignores
+  // marks, so once any highlight was applied no later one ever replaced it
+  // (EasyMotion's shade stayed up under hop's hints, scrolled-in rows kept
+  // no syntax colour).
+  it("replaces applied highlights when the next push brings different ones", () => {
+    const { controller, decorationState, view } = fixture("alpha beta");
+    const classes = () => {
+      const found = [];
+      view.state
+        .field(decorationState.islandMarkField)
+        .between(0, view.state.doc.length, (from, to, deco) => {
+          found.push([from, to, deco.spec.class]);
+        });
+      return found;
+    };
+    const push = (runs) =>
+      controller.set({ guard_row: -1, hl: { runs, codespans: [], virt: [] } });
+
+    push([[0, 0, 10, "EasyMotionShade"]]);
+    expect(classes()).toEqual([[0, 10, "hl-EasyMotionShade"]]);
+    push([[0, 0, 10, "HopUnmatched"]]);
+    expect(classes()).toEqual([[0, 10, "hl-HopUnmatched"]]);
+    push([[0, 6, 10, "HopUnmatched"]]);
+    expect(classes()).toEqual([[6, 10, "hl-HopUnmatched"]]);
+    push([]);
+    expect(classes()).toEqual([]);
   });
 
   it("coordinates EasyMotion, table highlights, and incremental search", () => {

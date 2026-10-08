@@ -1,4 +1,3 @@
-import { RangeSet } from "@codemirror/state";
 import { Decoration, WidgetType } from "@codemirror/view";
 import { byteRange } from "./pure/text-geometry.js";
 import { visualRanges } from "./pure/visual-ranges.js";
@@ -146,6 +145,28 @@ class OverlayWidget extends WidgetType {
     }
     return span;
   }
+}
+
+// Same ranges with equal decorations, in the same order. Not RangeSet.eq:
+// that ignores mark decorations entirely (checked 2026-10-09: two sets
+// whose only mark differs in class, or in range, compare equal), which
+// froze every highlight after the first push. Two equal sets that merely
+// order ties differently compare unequal here; that only costs a dispatch.
+function sameDecorations(a, b) {
+  if (a.size !== b.size) return false;
+  const left = a.iter();
+  const right = b.iter();
+  for (; left.value; left.next(), right.next()) {
+    if (
+      !right.value ||
+      left.from !== right.from ||
+      left.to !== right.to ||
+      (left.value !== right.value && !left.value.eq(right.value))
+    ) {
+      return false;
+    }
+  }
+  return !right.value;
 }
 
 // Owns the parsed runtime/md_decor.lua payload and all CodeMirror decorations
@@ -648,7 +669,6 @@ export class IslandDisplayDecorations {
     // A kind whose ranges come out equal to what is already applied is left
     // alone entirely: no effect, so CodeMirror has nothing to diff for it.
     const state = this.view.state;
-    let decorChanged = false;
     const offer = (field, setField, ranges) => {
       let set;
       try {
@@ -657,22 +677,32 @@ export class IslandDisplayDecorations {
         this.log("island decor build failed: " + error);
         return;
       }
-      if (RangeSet.eq([state.field(field)], [set])) return;
+      if (sameDecorations(state.field(field), set)) return;
       effects.push(setField.of(set));
-      decorChanged = true;
     };
     offer(islandDecorField, setIslandDecor, hidden);
     offer(islandLineField, setIslandLines, lines);
     offer(islandMarkField, setIslandMarks, marks);
-    if (!RangeSet.eq([state.field(islandFoldField)], [foldSet])) {
+    if (!sameDecorations(state.field(islandFoldField), foldSet)) {
       effects.push(setIslandFolds.of(foldSet));
-      decorChanged = true;
     }
-    if (!effects.length) return;
-
-    this.view.dispatch({ effects });
-    if (!decorChanged) return;
-    // WKWebView can leave an idle absolute subtree applied but unpainted.
+    if (effects.length) this.view.dispatch({ effects });
+    // WKWebView can leave a decoration update applied but unpainted (hop's
+    // hint letters after <CR>, docs/multigrid-renderer.md). Repaint on every
+    // push that carries decorations, changed or not, as before the per-kind
+    // split: a later identical push repainting is what makes an earlier
+    // update show up, so skipping it for "nothing changed" left hop and
+    // EasyMotion letters invisible (2026-10-09).
+    const anyDecor =
+      hidden.length ||
+      lines.length ||
+      marks.length ||
+      foldSpans.length ||
+      state.field(islandDecorField).size ||
+      state.field(islandLineField).size ||
+      state.field(islandMarkField).size ||
+      state.field(islandFoldField).size;
+    if (!anyDecor) return;
     const hadFocus = this.view.hasFocus;
     this.forceRepaint(this.element);
     if (hadFocus) this.view.focus();
