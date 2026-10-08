@@ -19,6 +19,8 @@ function fixture(
     doc,
     extensions: [
       decorationState.islandDecorField,
+      decorationState.islandLineField,
+      decorationState.islandMarkField,
       decorationState.islandFoldField,
       decorationState.nvimCursorField,
     ],
@@ -121,7 +123,7 @@ describe("IslandDisplayDecorations", () => {
       "#889900",
     );
     expect(
-      view.state.field(decorationState.islandDecorField).size,
+      view.state.field(decorationState.islandLineField).size,
     ).toBeGreaterThan(0);
   });
 
@@ -156,7 +158,7 @@ describe("IslandDisplayDecorations", () => {
       hl: { runs: [], codespans: [], virt: [] },
     });
 
-    const decor = view.state.field(decorationState.islandDecorField);
+    const decor = view.state.field(decorationState.islandLineField);
     expect(decor.size).toBeGreaterThan(0);
 
     const classes = [];
@@ -241,7 +243,7 @@ describe("IslandDisplayDecorations", () => {
     const iconClasses = (view, decorationState) => {
       const found = [];
       view.state
-        .field(decorationState.islandDecorField)
+        .field(decorationState.islandLineField)
         .between(0, view.state.doc.length, (from, to, deco) => {
           const cls = deco.spec?.attributes?.class;
           if (cls?.includes("cm-heading-icon-line")) found.push(cls);
@@ -371,6 +373,54 @@ describe("IslandDisplayDecorations", () => {
       });
       expect(bulletWidget(view, decorationState)).toBeNull();
     }
+  });
+
+  // Most pushes while holding j/k change little or nothing; each kind of
+  // decoration is only sent, and the island only repainted, when it changed.
+  it("dispatches only the decoration kinds a push actually changed", () => {
+    let cursor = { row: 1, col: 0 };
+    const { controller, decorationState, forceRepaint, view } = fixture(
+      "- item\nbody `code`",
+      { getCursor: () => cursor, getMode: () => "n" },
+    );
+    const payload = () => ({
+      guard_row: -1,
+      lists: [[0, 0, true]],
+      folds: [],
+      hl: { runs: [[1, 5, 11, "Special"]], codespans: [[1, 5, 11]], virt: [] },
+    });
+    controller.set(payload());
+    const fields = () =>
+      [
+        decorationState.islandDecorField,
+        decorationState.islandLineField,
+        decorationState.islandMarkField,
+      ].map((field) => view.state.field(field));
+    const before = fields();
+    view.dispatch.mockClear();
+    forceRepaint.mockClear();
+
+    // The same payload again: no transaction at all.
+    controller.set(payload());
+    expect(view.dispatch).not.toHaveBeenCalled();
+    expect(forceRepaint).not.toHaveBeenCalled();
+
+    // The cursor lands on the bullet: only the replace widgets change.
+    cursor = { row: 0, col: 0 };
+    controller.set(payload());
+    expect(view.dispatch).toHaveBeenCalledOnce();
+    const after = fields();
+    expect(after[0]).not.toBe(before[0]);
+    expect(after[1]).toBe(before[1]);
+    expect(after[2]).toBe(before[2]);
+    expect(forceRepaint).toHaveBeenCalledOnce();
+
+    // A guard row change alone is one transaction and no repaint.
+    view.dispatch.mockClear();
+    forceRepaint.mockClear();
+    controller.set({ ...payload(), guard_row: 1 });
+    expect(view.dispatch).toHaveBeenCalledOnce();
+    expect(forceRepaint).not.toHaveBeenCalled();
   });
 
   it("coordinates EasyMotion, table highlights, and incremental search", () => {

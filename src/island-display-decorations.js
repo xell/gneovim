@@ -1,3 +1,4 @@
+import { RangeSet } from "@codemirror/state";
 import { Decoration, WidgetType } from "@codemirror/view";
 import { byteRange } from "./pure/text-geometry.js";
 import { visualRanges } from "./pure/visual-ranges.js";
@@ -192,6 +193,7 @@ export class IslandDisplayDecorations {
     this.tableInlineHighlightsKey = null;
     this.interactiveOverlaysKey = null;
     this.incsearchKey = "";
+    this.guardRow = undefined;
     this.compositionRetry = 0;
   }
 
@@ -255,9 +257,14 @@ export class IslandDisplayDecorations {
         group === "HopPreview",
     );
     const interactiveHighlightsKey = JSON.stringify(interactiveHighlights);
-    const interactiveEffects = [
-      this.setTableConcealGuard.of(payload?.guard_row ?? null),
-    ];
+    // Only what changed: each of these makes the table (and image) field
+    // reconsider its widgets, and every dispatched effect costs a transaction.
+    const interactiveEffects = [];
+    const guardRow = payload?.guard_row ?? null;
+    if (this.guardRow !== guardRow) {
+      this.guardRow = guardRow;
+      interactiveEffects.push(this.setTableConcealGuard.of(guardRow));
+    }
     const codeSpans = payload?.hl?.codespans ?? [];
     const tableInlineHighlights = (payload?.hl?.runs ?? []).filter(
       ([row, start, end, group]) =>
@@ -292,8 +299,7 @@ export class IslandDisplayDecorations {
         this.setInteractiveOverlays.of(interactiveOverlays),
       );
     }
-    this.view.dispatch({ effects: interactiveEffects });
-    this.apply();
+    this.apply(interactiveEffects);
 
     const incsearch = payload?.incsearch ?? null;
     const incsearchKey = incsearch
@@ -314,7 +320,10 @@ export class IslandDisplayDecorations {
     }
   }
 
-  apply() {
+  // `effects` are the interactive-highlight effects set() decided to send;
+  // they ride in the same transaction as the decorations rather than costing
+  // a second one.
+  apply(effects = []) {
     // Changing decorations around text the IME is still composing corrupts
     // CodeMirror's DOM tile tree (it keeps the composition's DOM in place
     // while the decorations around it are rebuilt), and the next scroll or
@@ -323,6 +332,7 @@ export class IslandDisplayDecorations {
     // 2026-10-03 on @codemirror/view 6.43.11 and 6.43.13. Hold this payload
     // until the composition is over.
     if (this.view.compositionStarted) {
+      if (effects.length) this.view.dispatch({ effects });
       this.applyAfterComposition();
       return;
     }
@@ -332,9 +342,13 @@ export class IslandDisplayDecorations {
       concealHide,
       islandDecorField,
       islandFoldField,
+      islandLineField,
+      islandMarkField,
       lineDecoration,
       setIslandDecor,
       setIslandFolds,
+      setIslandLines,
+      setIslandMarks,
       visualMark,
     } = this.decorationState;
 
@@ -478,10 +492,12 @@ export class IslandDisplayDecorations {
       }
     }
 
-    const ranges = [];
+    const hidden = [];
     for (const span of nonOverlappingSpans(spans)) {
-      ranges.push(span.deco.range(span.from, span.to));
+      hidden.push(span.deco.range(span.from, span.to));
     }
+    const lines = [];
+    const marks = [];
     // The heading icon: a pure CSS line decoration (see .cm-heading-icon-*
     // in styles.css), not a widget standing in for any text -- see the
     // comment above headingIconLines. It never disappears on its own (the
@@ -490,7 +506,7 @@ export class IslandDisplayDecorations {
     // nothing left to hide here); a Normal-mode cursor sitting on the line
     // instead gets a reversed-video cursor block drawn behind the glyph.
     for (const { from, level, cursorHere } of headingIconLines) {
-      ranges.push(
+      lines.push(
         lineDecoration(
           `cm-heading-icon-line cm-heading-icon-line-${level}${
             cursorHere ? " cm-heading-icon-cursor" : ""
@@ -503,14 +519,14 @@ export class IslandDisplayDecorations {
       payload?.heads,
       inFold,
     )) {
-      ranges.push(
+      marks.push(
         Decoration.mark({ class: "cm-heading-suffix" }).range(from, to),
       );
     }
     for (const [row, startCol, endCol] of payload?.hl?.codespans ?? []) {
       const range = byteRange(doc, row, startCol, endCol);
       if (range && !inFold(range.from, range.to)) {
-        ranges.push(
+        marks.push(
           Decoration.mark({ class: "cm-inline-code" }).range(
             range.from,
             range.to,
@@ -521,7 +537,7 @@ export class IslandDisplayDecorations {
     for (const [row, startCol, endCol, group] of payload?.hl?.runs ?? []) {
       const range = byteRange(doc, row, startCol, endCol);
       if (range && !inFold(range.from, range.to)) {
-        ranges.push(
+        marks.push(
           Decoration.mark({
             class: this.highlights.islandClass(group),
           }).range(range.from, range.to),
@@ -529,10 +545,10 @@ export class IslandDisplayDecorations {
       }
     }
     for (const range of visualRanges(doc, payload?.visual, inFold)) {
-      ranges.push(visualMark.range(range.from, range.to));
+      marks.push(visualMark.range(range.from, range.to));
     }
     for (const foldLine of foldLines) {
-      ranges.push(
+      marks.push(
         Decoration.mark({ class: "cm-fold-closed" }).range(
           foldLine.from,
           foldLine.to,
@@ -548,7 +564,7 @@ export class IslandDisplayDecorations {
         endRow,
         inFold,
       )) {
-        ranges.push(decoration.range(from));
+        lines.push(decoration.range(from));
       }
     };
     for (const [startRow, endRow, level] of payload?.heads ?? []) {
@@ -599,7 +615,7 @@ export class IslandDisplayDecorations {
         `--due-label:"${label}"`,
       );
       for (const from of structuralLineStarts(doc, row, row, inFold)) {
-        ranges.push(decoration.range(from));
+        lines.push(decoration.range(from));
       }
     }
     // Only an *ordered* marker row also needs the text-indent pull-back: its
@@ -629,27 +645,33 @@ export class IslandDisplayDecorations {
     const foldSet = Decoration.set(
       foldSpans.map((fold) => concealHide.range(fold.from, fold.to)),
     );
+    // A kind whose ranges come out equal to what is already applied is left
+    // alone entirely: no effect, so CodeMirror has nothing to diff for it.
     const state = this.view.state;
-    const noDecorationChange =
-      !ranges.length && !state.field(islandDecorField).size;
-    const noFoldChange =
-      !foldSpans.length && !state.field(islandFoldField).size;
-    if (noDecorationChange && noFoldChange) return;
-
-    const effects = [];
-    if (!noDecorationChange) {
+    let decorChanged = false;
+    const offer = (field, setField, ranges) => {
+      let set;
       try {
-        effects.push(
-          setIslandDecor.of(Decoration.set(ranges, true)),
-        );
+        set = Decoration.set(ranges, true);
       } catch (error) {
         this.log("island decor build failed: " + error);
+        return;
       }
+      if (RangeSet.eq([state.field(field)], [set])) return;
+      effects.push(setField.of(set));
+      decorChanged = true;
+    };
+    offer(islandDecorField, setIslandDecor, hidden);
+    offer(islandLineField, setIslandLines, lines);
+    offer(islandMarkField, setIslandMarks, marks);
+    if (!RangeSet.eq([state.field(islandFoldField)], [foldSet])) {
+      effects.push(setIslandFolds.of(foldSet));
+      decorChanged = true;
     }
-    if (!noFoldChange) effects.push(setIslandFolds.of(foldSet));
     if (!effects.length) return;
 
     this.view.dispatch({ effects });
+    if (!decorChanged) return;
     // WKWebView can leave an idle absolute subtree applied but unpainted.
     const hadFocus = this.view.hasFocus;
     this.forceRepaint(this.element);

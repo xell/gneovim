@@ -1,4 +1,4 @@
-import { RangeSet } from "@codemirror/state";
+import { RangeSet, StateEffect, StateField } from "@codemirror/state";
 import { GutterMarker, gutterLineClass, lineNumbers } from "@codemirror/view";
 
 // Singleton marker, like CodeMirror's own activeLineGutterMarker: GutterMarker.compare
@@ -22,6 +22,20 @@ class FoldFirstLineMarker extends GutterMarker {
 }
 const openFoldFirstLineMarker = new FoldFirstLineMarker(false);
 const closedFoldFirstLineMarker = new FoldFirstLineMarker(true);
+
+// The fold regions arrive with nearly every decoration push and change on most
+// scrolls. Held in a field of their own so a change is one small effect, not
+// a reconfigure that rebuilds the whole number column.
+const setFoldRegionsEffect = StateEffect.define();
+const foldRegionsField = StateField.define({
+  create: () => [],
+  update(value, transaction) {
+    for (const effect of transaction.effects) {
+      if (effect.is(setFoldRegionsEffect)) value = effect.value;
+    }
+    return value;
+  },
+});
 
 export function formatGutterNumber(gutter, cursor, lineNumber, lineCount) {
   if (!gutter.relativenumber) return String(lineNumber);
@@ -51,13 +65,12 @@ export class GutterController {
     this.cancelFrame = cancelFrame;
     this.view = null;
     this.gutter = null;
-    this.foldRegions = [];
     this.foldRegionsKey = "";
     this.frame = 0;
   }
 
   extension() {
-    return this.compartment.of([]);
+    return [this.compartment.of([]), foldRegionsField];
   }
 
   attach(view) {
@@ -72,10 +85,9 @@ export class GutterController {
   setFoldRegions(regions) {
     const next = regions || [];
     const key = JSON.stringify(next);
-    if (key === this.foldRegionsKey) return;
-    this.foldRegions = next;
+    if (key === this.foldRegionsKey || !this.view) return;
     this.foldRegionsKey = key;
-    if (this.view && this.gutter) this.apply();
+    this.view.dispatch({ effects: setFoldRegionsEffect.of(next) });
   }
 
   onUpdate(update) {
@@ -115,9 +127,11 @@ export class GutterController {
           );
           return RangeSet.of([activeLineNumberMarker.range(line.from)]);
         }),
-        gutterLineClass.compute([], (state) => {
+        gutterLineClass.compute([foldRegionsField], (state) => {
           const markers = [];
-          for (const [startRow, , closed = true] of this.foldRegions) {
+          for (const [startRow, , closed = true] of state.field(
+            foldRegionsField,
+          )) {
             if (startRow < 0 || startRow >= state.doc.lines) continue;
             const line = state.doc.line(startRow + 1);
             markers.push(

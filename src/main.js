@@ -561,9 +561,13 @@ const islandDecorationState = createIslandDecorationState({
 const {
   islandDecorField,
   islandFoldField,
+  islandLineField,
+  islandMarkField,
   nvimCursorField,
   setIslandDecor,
   setIslandFolds,
+  setIslandLines,
+  setIslandMarks,
   setNvimCursor,
 } = islandDecorationState;
 // `guard_row` is supplied by md_decor.lua after applying Neovim's
@@ -703,6 +707,8 @@ class Island {
         EditorView.lineWrapping,
         nvimCursorField,
         islandDecorField,
+        islandLineField,
+        islandMarkField,
         islandFoldField,
         this.gutterController.extension(),
         this.editableComp.of(EDITABLE_ON),
@@ -1116,6 +1122,8 @@ class Island {
     this.view.dispatch({
       effects: [
         setIslandDecor.of(Decoration.none),
+        setIslandLines.of(Decoration.none),
+        setIslandMarks.of(Decoration.none),
         setIslandFolds.of(Decoration.none),
         setIslandImageBase.of(m.name || ""),
       ],

@@ -63,7 +63,7 @@ describe("formatGutterNumber", () => {
 describe("GutterController", () => {
   it("reconfigures the gutter and mirrors numberwidth", () => {
     const { compartment, controller, style, view } = fixture();
-    expect(controller.extension()).toEqual({ initial: [] });
+    expect(controller.extension()[0]).toEqual({ initial: [] });
 
     controller.set({ number: true, relativenumber: false, numberwidth: 6 });
     expect(style.setProperty).toHaveBeenCalledWith("--gutter-numw", "6");
@@ -72,6 +72,24 @@ describe("GutterController", () => {
 
     controller.set({ number: false, relativenumber: false });
     expect(style.removeProperty).toHaveBeenCalledWith("--gutter-numw");
+  });
+
+  it("sends changed fold regions as one effect, without reconfiguring", () => {
+    const { compartment, controller, view } = fixture();
+    controller.set({ number: true, relativenumber: false });
+    compartment.reconfigure.mockClear();
+    view.dispatch.mockClear();
+
+    controller.setFoldRegions([[2, 5, true]]);
+    controller.setFoldRegions([[2, 5, true]]);
+    expect(view.dispatch).toHaveBeenCalledOnce();
+    expect(view.dispatch.mock.calls[0][0].effects.value).toEqual([
+      [2, 5, true],
+    ]);
+
+    controller.setFoldRegions([[3, 5, false]]);
+    expect(view.dispatch).toHaveBeenCalledTimes(2);
+    expect(compartment.reconfigure).not.toHaveBeenCalled();
   });
 
   it("coalesces relative-number refreshes and cancels them on destroy", () => {

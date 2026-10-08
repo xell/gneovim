@@ -5,6 +5,8 @@ import { byteToCol } from "./pure/text-geometry.js";
 export function createIslandDecorationState({ document, log }) {
   const setNvimCursor = StateEffect.define();
   const setIslandDecor = StateEffect.define();
+  const setIslandLines = StateEffect.define();
+  const setIslandMarks = StateEffect.define();
   const setIslandFolds = StateEffect.define();
 
   class BlockCursor extends WidgetType {
@@ -34,24 +36,35 @@ export function createIslandDecorationState({ document, log }) {
     }
   }
 
-  const islandDecorField = StateField.define({
-    create: () => Decoration.none,
-    update(value, transaction) {
-      if (transaction.docChanged) {
-        try {
-          value = value.map(transaction.changes);
-        } catch (error) {
-          log("island decor map failed, dropping: " + error);
-          value = Decoration.none;
+  // The payload's decorations are split by kind into separate fields, each
+  // with its own effect, so a push that leaves one kind unchanged (the
+  // common case: a j/k that does not scroll changes almost nothing) neither
+  // dispatches it nor makes CodeMirror diff it. islandDecorField is the
+  // replace widgets (markers, conceal, overlays): the only kind the cursor
+  // and isCursorHidden look into. All replace widgets share one field so
+  // nonOverlappingSpans can keep them from overlapping each other.
+  const mappedDecorField = (setDecor) =>
+    StateField.define({
+      create: () => Decoration.none,
+      update(value, transaction) {
+        if (transaction.docChanged) {
+          try {
+            value = value.map(transaction.changes);
+          } catch (error) {
+            log("island decor map failed, dropping: " + error);
+            value = Decoration.none;
+          }
         }
-      }
-      for (const effect of transaction.effects) {
-        if (effect.is(setIslandDecor)) value = effect.value;
-      }
-      return value;
-    },
-    provide: (field) => EditorView.decorations.from(field),
-  });
+        for (const effect of transaction.effects) {
+          if (effect.is(setDecor)) value = effect.value;
+        }
+        return value;
+      },
+      provide: (field) => EditorView.decorations.from(field),
+    });
+  const islandDecorField = mappedDecorField(setIslandDecor);
+  const islandLineField = mappedDecorField(setIslandLines);
+  const islandMarkField = mappedDecorField(setIslandMarks);
 
   const islandFoldField = StateField.define({
     create: () => Decoration.none,
@@ -211,10 +224,14 @@ export function createIslandDecorationState({ document, log }) {
     concealHide,
     islandDecorField,
     islandFoldField,
+    islandLineField,
+    islandMarkField,
     lineDecoration,
     nvimCursorField,
     setIslandDecor,
     setIslandFolds,
+    setIslandLines,
+    setIslandMarks,
     setNvimCursor,
     visualMark,
   };
