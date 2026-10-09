@@ -1,4 +1,11 @@
+import { EditorView } from "@codemirror/view";
 import { byteToCol } from "./pure/text-geometry.js";
+
+// How long after a far jump (see below) a decoration change still carries the
+// same scroll request. md_decor's payload for the new viewport lands about
+// 100-250ms after the cursor echo, and it changes line heights: headings grow,
+// conceal shortens lines, and CodeMirror re-estimates every undrawn line.
+const FAR_JUMP_WINDOW_MS = 1000;
 
 // Owns measured CodeMirror cursor scrolling and its browser scheduling state.
 export class CursorScroller {
@@ -21,6 +28,16 @@ export class CursorScroller {
     this.frame = 0;
     this.hideTimer = 0;
     this.padding = null;
+    // The target of the last far jump, until `until`. A wheel scroll is the
+    // reader moving away on purpose: drop it.
+    this.farJump = null;
+    view.scrollDOM?.addEventListener?.(
+      "wheel",
+      () => {
+        this.farJump = null;
+      },
+      { passive: true },
+    );
   }
 
   keepInView(position, scrolloff) {
@@ -36,7 +53,17 @@ export class CursorScroller {
     this.scrollToPosition(position, scrolloff, true);
   }
 
+  // For a decoration transaction: while a far jump is recent, the same scroll
+  // request rides along, so CodeMirror applies the new line heights and the
+  // scroll in one measure cycle instead of painting the drifted view first.
+  scrollEffectForRelayout() {
+    const jump = this.farJump;
+    if (!jump || Date.now() > jump.until) return null;
+    return jump.effect;
+  }
+
   scrollToPosition(position, scrolloff, force) {
+    this.farJump = null;
     if (this.frame) this.cancelFrame(this.frame);
     this.frame = this.requestFrame(() => {
       this.frame = 0;
@@ -59,6 +86,29 @@ export class CursorScroller {
         line.from + byteToCol(line.text, position.col),
         line.to,
       );
+      const centre = force || margin === height / 2;
+
+      // A target outside what CodeMirror has drawn (`G` in a long note) can
+      // only be placed from estimated line heights, and headings and rendered
+      // tables are taller than the estimate: measuring it here and scrolling
+      // once landed about 300 lines above the end of a 3375-line note, and
+      // correcting on the next frames showed as a shake (2026-10-09).
+      // CodeMirror's own scrollIntoView draws the target, measures and
+      // re-aims within one measure cycle, before anything is painted. Only
+      // for these jumps: inside the drawn region the measured path below is
+      // exact, and it is the one that knows a rendered table's own caret.
+      const { from, to } = this.view.viewport;
+      if (offset < from || offset > to) {
+        const effect = EditorView.scrollIntoView(offset, {
+          y: centre ? "center" : "nearest",
+          yMargin: margin,
+        });
+        this.hideScrollbarBriefly(scroller);
+        this.view.dispatch({ effects: effect });
+        this.farJump = { effect, until: Date.now() + FAR_JUMP_WINDOW_MS };
+        return;
+      }
+
       // A cursor behind a rendered table measures as the whole table block,
       // so prefer the caret the table draws into its own cursor cell (only
       // the table holding Neovim's cursor renders one).
@@ -71,7 +121,7 @@ export class CursorScroller {
       const top = rect.top - bounds.top;
       const bottom = rect.bottom - bounds.top;
       let delta = 0;
-      if (force || margin === height / 2) delta = (top + bottom) / 2 - height / 2;
+      if (centre) delta = (top + bottom) / 2 - height / 2;
       // A rect taller than the scrolloff band (e.g. a tall image) can never
       // satisfy both margins; once it spans the band, leave it, or each
       // keystroke would flip between aligning its top and its bottom.
@@ -80,17 +130,22 @@ export class CursorScroller {
       else if (bottom > height - margin) delta = bottom - (height - margin);
       if (!delta) return;
 
-      scroller.classList.add("cm-nvim-cursor-scroll");
-      if (this.hideTimer) this.clearTimer(this.hideTimer);
-      this.hideTimer = this.setTimer(() => {
-        scroller.classList.remove("cm-nvim-cursor-scroll");
-        this.hideTimer = 0;
-      }, 180);
+      this.hideScrollbarBriefly(scroller);
       scroller.scrollTop += delta;
     });
   }
 
+  hideScrollbarBriefly(scroller) {
+    scroller.classList.add("cm-nvim-cursor-scroll");
+    if (this.hideTimer) this.clearTimer(this.hideTimer);
+    this.hideTimer = this.setTimer(() => {
+      scroller.classList.remove("cm-nvim-cursor-scroll");
+      this.hideTimer = 0;
+    }, 180);
+  }
+
   destroy() {
+    this.farJump = null;
     if (this.frame) this.cancelFrame(this.frame);
     if (this.hideTimer) this.clearTimer(this.hideTimer);
     this.frame = 0;

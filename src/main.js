@@ -770,6 +770,8 @@ class Island {
       keepPositionInView: (position) =>
         this.keepPositionInView(position),
       keepCursorInView: () => this.keepCursorInView(),
+      cursorScrollEffect: () =>
+        this.cursorScroller.scrollEffectForRelayout(),
       requestFrame: (callback) => requestAnimationFrame(callback),
       forceRepaint,
       log: jlog,

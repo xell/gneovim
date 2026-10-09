@@ -44,6 +44,8 @@ function fixture(
   const keepPositionInView = vi.fn();
   const keepCursorInView = vi.fn();
   const forceRepaint = vi.fn();
+  const scrollEffect = StateEffect.define().of(null);
+  const cursorScrollEffect = vi.fn(() => scrollEffect);
   const controller = new IslandDisplayDecorations({
     document: {},
     highlights: { islandClass: (group) => `hl-${group}` },
@@ -60,6 +62,7 @@ function fixture(
     cancelPendingZeroScrolloff: vi.fn(),
     keepPositionInView,
     keepCursorInView,
+    cursorScrollEffect,
     requestFrame: (callback) => frames.push(callback),
     forceRepaint,
     log: vi.fn(),
@@ -67,6 +70,8 @@ function fixture(
   return {
     controller,
     decorationState,
+    cursorScrollEffect,
+    scrollEffect,
     setTableInlineHighlights,
     setTableInlineOverlays,
     forceRepaint,
@@ -426,6 +431,29 @@ describe("IslandDisplayDecorations", () => {
     view.dispatch.mockClear();
     controller.set({ ...payload(), guard_row: 1 });
     expect(view.dispatch).toHaveBeenCalledOnce();
+  });
+
+  // New decorations change line heights, which can move the cursor off the
+  // screen right after a far jump (G in a long note); unchanged ones cannot.
+  // The scroller's request rides in the same transaction as the change.
+  it("sends the scroller's far-jump request with decorations that changed", () => {
+    const { controller, cursorScrollEffect, scrollEffect, view } = fixture("alpha beta");
+    const push = (group) =>
+      controller.set({
+        guard_row: -1,
+        hl: { runs: [[0, 0, 5, group]], codespans: [], virt: [] },
+      });
+    const sent = () =>
+      view.dispatch.mock.calls.filter(([spec]) =>
+        (spec.effects ?? []).includes(scrollEffect),
+      ).length;
+    push("A");
+    expect(sent()).toBe(1);
+    push("A"); // nothing changed: no transaction, no scroll request
+    expect(sent()).toBe(1);
+    cursorScrollEffect.mockReturnValue(null); // no recent far jump
+    push("B");
+    expect(sent()).toBe(1);
   });
 
   // A held j/k pushes about every 70ms; the WKWebView repaint (a full island

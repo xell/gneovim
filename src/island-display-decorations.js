@@ -198,6 +198,7 @@ export class IslandDisplayDecorations {
     cancelPendingZeroScrolloff,
     keepPositionInView,
     keepCursorInView,
+    cursorScrollEffect = () => null,
     requestFrame,
     forceRepaint,
     log,
@@ -217,6 +218,7 @@ export class IslandDisplayDecorations {
     this.cancelPendingZeroScrolloff = cancelPendingZeroScrolloff;
     this.keepPositionInView = keepPositionInView;
     this.keepCursorInView = keepCursorInView;
+    this.cursorScrollEffect = cursorScrollEffect;
     this.requestFrame = requestFrame;
     this.forceRepaint = forceRepaint;
     this.log = log;
@@ -708,6 +710,7 @@ export class IslandDisplayDecorations {
     // A kind whose ranges come out equal to what is already applied is left
     // alone entirely: no effect, so CodeMirror has nothing to diff for it.
     const state = this.view.state;
+    let layoutChanged = false;
     const offer = (field, setField, ranges) => {
       let set;
       try {
@@ -718,12 +721,22 @@ export class IslandDisplayDecorations {
       }
       if (sameDecorations(state.field(field), set)) return;
       effects.push(setField.of(set));
+      layoutChanged = true;
     };
     offer(islandDecorField, setIslandDecor, hidden);
     offer(islandLineField, setIslandLines, lines);
     offer(islandMarkField, setIslandMarks, marks);
     if (!sameDecorations(state.field(islandFoldField), foldSet)) {
       effects.push(setIslandFolds.of(foldSet));
+      layoutChanged = true;
+    }
+    // Changed decorations change line heights. Right after a far jump, the
+    // scroll that aimed at the cursor used the old ones; sending the same
+    // scroll request in this transaction lets CodeMirror apply both in one
+    // measure cycle (see CursorScroller.scrollEffectForRelayout).
+    if (layoutChanged) {
+      const scroll = this.cursorScrollEffect();
+      if (scroll) effects.push(scroll);
     }
     if (effects.length) this.view.dispatch({ effects });
     // WKWebView can leave a decoration update applied but unpainted (hop's
