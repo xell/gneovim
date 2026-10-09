@@ -1,5 +1,5 @@
 import { EditorState, StateEffect } from "@codemirror/state";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createIslandDecorationState } from "./island-decoration-state.js";
 import { IslandDisplayDecorations } from "./island-display-decorations.js";
 
@@ -47,7 +47,7 @@ function fixture(
     document: {},
     highlights: { islandClass: (group) => `hl-${group}` },
     view,
-    element: { style },
+    element: { style, isConnected: true },
     decorationState,
     setTableConcealGuard,
     setInteractiveHighlights,
@@ -75,6 +75,9 @@ function fixture(
 }
 
 describe("IslandDisplayDecorations", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
   it("applies structural, highlight, conceal, visual, and fold ranges", () => {
     const {
       controller,
@@ -104,6 +107,8 @@ describe("IslandDisplayDecorations", () => {
     expect(
       view.state.field(decorationState.islandFoldField).size,
     ).toBe(1);
+    expect(forceRepaint).not.toHaveBeenCalled();
+    vi.runAllTimers();
     expect(forceRepaint).toHaveBeenCalledOnce();
   });
 
@@ -400,12 +405,9 @@ describe("IslandDisplayDecorations", () => {
     view.dispatch.mockClear();
     forceRepaint.mockClear();
 
-    // The same payload again: no transaction, but still a repaint (WKWebView
-    // can leave the previous update unpainted without one).
+    // The same payload again: no transaction.
     controller.set(payload());
     expect(view.dispatch).not.toHaveBeenCalled();
-    expect(forceRepaint).toHaveBeenCalledOnce();
-    forceRepaint.mockClear();
 
     // The cursor lands on the bullet: only the replace widgets change.
     cursor = { row: 0, col: 0 };
@@ -415,12 +417,40 @@ describe("IslandDisplayDecorations", () => {
     expect(after[0]).not.toBe(before[0]);
     expect(after[1]).toBe(before[1]);
     expect(after[2]).toBe(before[2]);
-    expect(forceRepaint).toHaveBeenCalledOnce();
 
     // A guard row change alone is one transaction.
     view.dispatch.mockClear();
     controller.set({ ...payload(), guard_row: 1 });
     expect(view.dispatch).toHaveBeenCalledOnce();
+  });
+
+  // A held j/k pushes about every 70ms; the WKWebView repaint (a full island
+  // relayout) runs once when the pushes stop, not after each one. Even a push
+  // that changed nothing still schedules it, since an earlier update may be
+  // the one left unpainted.
+  it("repaints once, after a burst of pushes has settled", () => {
+    const { controller, forceRepaint } = fixture("alpha beta");
+    const push = (group) =>
+      controller.set({
+        guard_row: -1,
+        hl: { runs: [[0, 0, 5, group]], codespans: [], virt: [] },
+      });
+    for (const group of ["A", "B", "B", "C"]) {
+      push(group);
+      vi.advanceTimersByTime(70);
+    }
+    expect(forceRepaint).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(80);
+    expect(forceRepaint).toHaveBeenCalledOnce();
+
+    push("C"); // nothing changed, still repainted
+    vi.advanceTimersByTime(150);
+    expect(forceRepaint).toHaveBeenCalledTimes(2);
+
+    push("D");
+    controller.destroy();
+    vi.runAllTimers();
+    expect(forceRepaint).toHaveBeenCalledTimes(2);
   });
 
   // Regression 2026-10-09: the change check used RangeSet.eq, which ignores

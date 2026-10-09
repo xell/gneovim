@@ -852,6 +852,7 @@ class Island {
   }
   destroy() {
     this.gutterController.destroy();
+    this.displayDecorations.destroy();
     clearTimeout(this._decorViewTimer);
     this.cursorScroller.destroy();
     this.view.destroy();

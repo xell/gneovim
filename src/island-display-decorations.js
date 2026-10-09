@@ -14,6 +14,10 @@ import {
   todayNumber,
 } from "./pure/markdown-decoration-plan.js";
 
+// Longer than the gap between md_decor pushes during a held key (its debounce
+// stretches to 70ms), so a hold ends in one repaint.
+const REPAINT_SETTLE_MS = 150;
+
 // Depth-cycled glyphs for unordered bullets, repeating every 3 levels
 // (Bear-style: solid dot, hollow ring, diamond).
 const LIST_BULLET_GLYPHS = ["●", "○", "◆"];
@@ -216,6 +220,7 @@ export class IslandDisplayDecorations {
     this.incsearchKey = "";
     this.guardRow = undefined;
     this.compositionRetry = 0;
+    this.repaintTimer = 0;
   }
 
   set(payload) {
@@ -688,11 +693,9 @@ export class IslandDisplayDecorations {
     }
     if (effects.length) this.view.dispatch({ effects });
     // WKWebView can leave a decoration update applied but unpainted (hop's
-    // hint letters after <CR>, docs/multigrid-renderer.md). Repaint on every
-    // push that carries decorations, changed or not, as before the per-kind
-    // split: a later identical push repainting is what makes an earlier
-    // update show up, so skipping it for "nothing changed" left hop and
-    // EasyMotion letters invisible (2026-10-09).
+    // hint letters after <CR>, docs/multigrid-renderer.md). Repaint after
+    // every push that carries decorations, changed or not: a later identical
+    // push repainting is what makes an earlier update show up.
     const anyDecor =
       hidden.length ||
       lines.length ||
@@ -703,9 +706,30 @@ export class IslandDisplayDecorations {
       state.field(islandMarkField).size ||
       state.field(islandFoldField).size;
     if (!anyDecor) return;
-    const hadFocus = this.view.hasFocus;
-    this.forceRepaint(this.element);
-    if (hadFocus) this.view.focus();
+    this.scheduleRepaint();
+  }
+
+  // The bug only bites a push that lands once the page has gone idle (67b0412):
+  // while pushes keep coming the compositor is busy and paints anyway. So the
+  // same repaint runs once, REPAINT_SETTLE_MS after the last push, instead of
+  // after each one. Holding j/k pushed ~14 a second, and each repaint
+  // (display:none, which rebuilds the whole island's layout) was about a
+  // third of the renderer's work, measured 2026-10-09.
+  scheduleRepaint() {
+    clearTimeout(this.repaintTimer);
+    this.repaintTimer = setTimeout(() => {
+      this.repaintTimer = 0;
+      if (!this.element.isConnected) return;
+      // display:none blurs a focused .cm-content; give focus back.
+      const hadFocus = this.view.hasFocus;
+      this.forceRepaint(this.element);
+      if (hadFocus) this.view.focus();
+    }, REPAINT_SETTLE_MS);
+  }
+
+  destroy() {
+    clearTimeout(this.repaintTimer);
+    this.repaintTimer = 0;
   }
 
   // Polled per frame rather than hooked to compositionend, which Safari can
