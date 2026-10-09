@@ -104,6 +104,17 @@ local function conceal_guard_row(win)
   return nil
 end
 
+-- Whether a parsed tree reaches rows first..last at all. Markdown parses every
+-- inline region as its own small markdown_inline tree, and only once a redraw
+-- or a parse({ first, last }) has needed it, so the tree list grows with how
+-- far the window has scrolled. Querying every one of them on each push made a
+-- held j stall for 100-250ms by line 2000 of a 3375-line note (2026-10-09);
+-- checking the root's rows first skips them for the price of a range read.
+local function tree_in_rows(tstree, first, last)
+  local sr, _, er = tstree:root():range()
+  return sr <= last and er >= first
+end
+
 -- Inline conceal runs for `win` over the padded viewport, as
 -- { {row, start_byte, end_byte, text}, ... } in absolute buffer coordinates
 -- (byte columns; the client converts to UTF-16 against its own copy).
@@ -241,12 +252,14 @@ local function collect_conceal(win, buf, first, last)
       local q = vim.treesitter.query.get(ltree:lang(), 'highlights')
       if q then
         for _, tstree in pairs(ltree:trees()) do
-          for id, node, meta in q:iter_captures(tstree:root(), buf, first, last + 1) do
-            local cc = (meta[id] and meta[id].conceal) or meta.conceal
-            if cc ~= nil then
-              local sr, sc, er, ec = node:range()
-              if sr == er then
-                add(sr, sc, ec, text_for(cc))
+          if tree_in_rows(tstree, first, last) then
+            for id, node, meta in q:iter_captures(tstree:root(), buf, first, last + 1) do
+              local cc = (meta[id] and meta[id].conceal) or meta.conceal
+              if cc ~= nil then
+                local sr, sc, er, ec = node:range()
+                if sr == er then
+                  add(sr, sc, ec, text_for(cc))
+                end
               end
             end
           end
@@ -722,17 +735,19 @@ local function collect_highlights(win, buf, first, last, marks, search_pattern, 
       local q = vim.treesitter.query.get(ltree:lang(), 'highlights')
       if q then
         for _, tstree in pairs(ltree:trees()) do
-          for id, node in q:iter_captures(tstree:root(), buf, first, last + 1) do
-            local name = q.captures[id]
-            if name and name:sub(1, 1) ~= '_' and not HL_SKIP[name] then
-              local sr, sc, er, ec = node:range()
-              if sr == er then
-                add(sr, sc, ec, '@' .. name, PRIO_TREESITTER)
-                -- inline code span: flagged separately so the client can give
-                -- it a monospace face, which no highlight group attribute
-                -- carries.
-                if node:type() == 'code_span' then
-                  codespans[#codespans + 1] = { sr, sc, ec }
+          if tree_in_rows(tstree, first, last) then
+            for id, node in q:iter_captures(tstree:root(), buf, first, last + 1) do
+              local name = q.captures[id]
+              if name and name:sub(1, 1) ~= '_' and not HL_SKIP[name] then
+                local sr, sc, er, ec = node:range()
+                if sr == er then
+                  add(sr, sc, ec, '@' .. name, PRIO_TREESITTER)
+                  -- inline code span: flagged separately so the client can give
+                  -- it a monospace face, which no highlight group attribute
+                  -- carries.
+                  if node:type() == 'code_span' then
+                    codespans[#codespans + 1] = { sr, sc, ec }
+                  end
                 end
               end
             end
