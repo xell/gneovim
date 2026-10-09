@@ -43,6 +43,7 @@ function fixture(doc, convertFileSrc = vi.fn((path) => `asset:${path}`)) {
     setTableConcealGuard: StateEffect.define(),
     setInteractiveHighlights: StateEffect.define(),
     setTableInlineHighlights: StateEffect.define(),
+    setTableInlineOverlays: StateEffect.define(),
     setInteractiveOverlays: StateEffect.define(),
   };
   const presentation = createMarkdownPresentation({
@@ -177,6 +178,29 @@ describe("createMarkdownPresentation", () => {
     const table = tableWidget(colored, presentation).toDOM();
 
     expect(findClass(findTag(table, "code"), "hl-Special")).not.toBeNull();
+  });
+
+  // `==text==` is Leo's own markup: Neovim highlights it and conceals the
+  // `==` with extmarks, and the island forwards both to the table.
+  it("renders ==text== markup in a cell with its delimiters hidden", () => {
+    const { effects, presentation, state } = fixture(
+      "| H | Value |\n| --- | --- |\n| A | ==new== x |",
+    );
+    const marked = state.update({
+      effects: [
+        effects.setTableInlineHighlights.of([[2, 8, 11, "MdHighlightMark"]]),
+        effects.setTableInlineOverlays.of([
+          [2, 6, 2, []],
+          [2, 11, 2, []],
+        ]),
+      ],
+    }).state;
+    const table = tableWidget(marked, presentation).toDOM();
+    const cell = findTag(table, "tbody").childNodes[0].childNodes[1];
+
+    expect(visibleText(cell)).toBe("new x");
+    expect(cell.textContent).toBe("==new== x");
+    expect(findClass(cell, "hl-MdHighlightMark").textContent).toBe("new");
   });
 
   // Rebuilding either field rescans every line of the document, so a change

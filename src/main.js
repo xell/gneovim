@@ -582,6 +582,10 @@ const setInteractiveHighlights = StateEffect.define();
 // Only inline syntax with its own replacement DOM gets this extra table path.
 // The live preview intentionally does not mirror every grid highlight.
 const setTableInlineHighlights = StateEffect.define();
+// The delimiters Neovim conceals around a table inline highlight that is
+// user markup rather than Markdown (the `==` of `==text==`), hidden in the
+// cell the same way the cell renderer hides its own `**`.
+const setTableInlineOverlays = StateEffect.define();
 // Same reasoning, for hop.nvim's per-target hint letters: a virt_text overlay
 // (Decoration.replace elsewhere) on text hidden behind the table's or the
 // image caption's own Decoration.replace has nothing left to replace either.
@@ -600,6 +604,7 @@ const {
   setTableConcealGuard,
   setInteractiveHighlights,
   setTableInlineHighlights,
+  setTableInlineOverlays,
   setInteractiveOverlays,
 });
 // Non-editable content is not focusable on its own; the tabindex keeps it the
@@ -753,6 +758,7 @@ class Island {
       setTableConcealGuard,
       setInteractiveHighlights,
       setTableInlineHighlights,
+      setTableInlineOverlays,
       setInteractiveOverlays,
       getCursor: () => this._nvimCursor,
       getMode: () => this.mode,

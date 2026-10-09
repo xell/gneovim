@@ -14,6 +14,7 @@ function fixture(
   const setTableConcealGuard = StateEffect.define();
   const setInteractiveHighlights = StateEffect.define();
   const setTableInlineHighlights = StateEffect.define();
+  const setTableInlineOverlays = StateEffect.define();
   const setInteractiveOverlays = StateEffect.define();
   let state = EditorState.create({
     doc,
@@ -52,6 +53,7 @@ function fixture(
     setTableConcealGuard,
     setInteractiveHighlights,
     setTableInlineHighlights,
+    setTableInlineOverlays,
     setInteractiveOverlays,
     getCursor,
     getMode,
@@ -65,6 +67,8 @@ function fixture(
   return {
     controller,
     decorationState,
+    setTableInlineHighlights,
+    setTableInlineOverlays,
     forceRepaint,
     frames,
     keepCursorInView,
@@ -479,6 +483,39 @@ describe("IslandDisplayDecorations", () => {
     expect(classes()).toEqual([[6, 10, "hl-HopUnmatched"]]);
     push([]);
     expect(classes()).toEqual([]);
+  });
+
+  it("feeds a table ==text== markup and only the conceals delimiting it", () => {
+    const {
+      controller,
+      setTableInlineHighlights,
+      setTableInlineOverlays,
+      view,
+    } = fixture("| A | ==new== `c` |");
+    controller.set({
+      guard_row: -1,
+      conceal: [
+        [0, 6, 8, ""],
+        [0, 11, 13, ""],
+        [0, 14, 15, ""], // a backtick, not this markup's
+        [0, 2, 3, "x"], // has replacement text
+      ],
+      hl: {
+        runs: [
+          [0, 8, 11, "MdHighlightMark"],
+          [0, 2, 3, "Title"], // ordinary syntax stays out of tables
+        ],
+        codespans: [],
+        virt: [],
+      },
+    });
+    const effects = view.dispatch.mock.calls.flatMap(([spec]) => spec.effects ?? []);
+    const value = (type) => effects.find((effect) => effect.is(type))?.value;
+    expect(value(setTableInlineHighlights)).toEqual([[0, 8, 11, "MdHighlightMark"]]);
+    expect(value(setTableInlineOverlays)).toEqual([
+      [0, 6, 2, []],
+      [0, 11, 2, []],
+    ]);
   });
 
   it("coordinates EasyMotion, table highlights, and incremental search", () => {

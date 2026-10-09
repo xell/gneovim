@@ -26,6 +26,7 @@ export function createMarkdownPresentation({
   setTableConcealGuard,
   setInteractiveHighlights,
   setTableInlineHighlights,
+  setTableInlineOverlays,
   setInteractiveOverlays,
 }) {
   const markdownParser = markdownLanguage.parser;
@@ -58,6 +59,11 @@ export function createMarkdownPresentation({
         (span) => span.from <= from && span.to >= to,
       );
       if (overlay) {
+        // An overlay with nothing to show is a concealed delimiter: keep its
+        // source text as an invisible shadow, like the cell's own `**`.
+        if (!overlay.segments.length) {
+          appendSourceShadow(container, text, overlay.from, overlay.to);
+        }
         for (const [segmentText, group] of overlay.segments) {
           const segment = document.createElement("span");
           if (group) segment.className = highlights.islandClass(group);
@@ -819,6 +825,7 @@ export function createMarkdownPresentation({
       guardRow: null,
       highlights: [],
       inlineHighlights: [],
+      inlineOverlays: [],
       overlays: [],
     }),
     update(value, transaction) {
@@ -827,6 +834,7 @@ export function createMarkdownPresentation({
       let guardRow = value.guardRow;
       let tableHighlights = value.highlights;
       let inlineHighlights = value.inlineHighlights;
+      let inlineOverlays = value.inlineOverlays;
       let tableOverlays = value.overlays;
       for (const effect of transaction.effects) {
         if (effect.is(setImageBase)) bufferName = effect.value;
@@ -836,6 +844,9 @@ export function createMarkdownPresentation({
         }
         if (effect.is(setTableInlineHighlights)) {
           inlineHighlights = effect.value;
+        }
+        if (effect.is(setTableInlineOverlays)) {
+          inlineOverlays = effect.value;
         }
         if (effect.is(setInteractiveHighlights)) {
           tableHighlights = effect.value;
@@ -851,6 +862,7 @@ export function createMarkdownPresentation({
         guardRow === value.guardRow &&
         tableHighlights === value.highlights &&
         inlineHighlights === value.inlineHighlights &&
+        inlineOverlays === value.inlineOverlays &&
         tableOverlays === value.overlays
       ) {
         return value;
@@ -861,9 +873,12 @@ export function createMarkdownPresentation({
         guardRow,
         highlights: tableHighlights,
         inlineHighlights,
+        inlineOverlays,
         overlays: tableOverlays,
       };
       const highlights = [...inlineHighlights, ...tableHighlights];
+      // hop's hint letters first: an overlay found first wins a tie.
+      const overlays = [...tableOverlays, ...inlineOverlays];
       // Profiled on the real app 2026-10-09 while holding j/k: this rescan
       // was 22% of all renderer CPU, nearly all of it from cursor moves
       // nowhere near a table. Those now keep the widgets as they are.
@@ -873,7 +888,7 @@ export function createMarkdownPresentation({
           cursor,
           guardRow,
           highlights,
-          tableOverlays,
+          overlays,
         );
         if (key === value.key) return { ...value, ...inputs };
       }
@@ -882,7 +897,7 @@ export function createMarkdownPresentation({
         cursor,
         guardRow,
         highlights,
-        tableOverlays,
+        overlays,
         bufferName,
       );
       return {
@@ -892,7 +907,7 @@ export function createMarkdownPresentation({
           cursor,
           guardRow,
           highlights,
-          tableOverlays,
+          overlays,
         ),
         ...inputs,
       };

@@ -14,6 +14,12 @@ import {
   todayNumber,
 } from "./pure/markdown-decoration-plan.js";
 
+// Highlight groups that are user markup drawn by Neovim itself rather than
+// Markdown the table's cell renderer parses: `==text==` is Leo's own syntax,
+// highlighted and its `==` concealed by extmarks in his
+// after/ftplugin/markdown.lua. Tables get these on top of code and math.
+const TABLE_MARKUP_GROUPS = new Set(["MdHighlightMark"]);
+
 // Longer than the gap between md_decor pushes during a held key (its debounce
 // stretches to 70ms), so a hold ends in one repaint.
 const REPAINT_SETTLE_MS = 150;
@@ -185,6 +191,7 @@ export class IslandDisplayDecorations {
     setTableConcealGuard,
     setInteractiveHighlights,
     setTableInlineHighlights,
+    setTableInlineOverlays,
     setInteractiveOverlays,
     getCursor,
     getMode,
@@ -203,6 +210,7 @@ export class IslandDisplayDecorations {
     this.setTableConcealGuard = setTableConcealGuard;
     this.setInteractiveHighlights = setInteractiveHighlights;
     this.setTableInlineHighlights = setTableInlineHighlights;
+    this.setTableInlineOverlays = setTableInlineOverlays;
     this.setInteractiveOverlays = setInteractiveOverlays;
     this.getCursor = getCursor;
     this.getMode = getMode;
@@ -216,6 +224,7 @@ export class IslandDisplayDecorations {
     this.easyMotionOverlay = false;
     this.interactiveHighlightsKey = null;
     this.tableInlineHighlightsKey = null;
+    this.tableInlineOverlaysKey = null;
     this.interactiveOverlaysKey = null;
     this.incsearchKey = "";
     this.guardRow = undefined;
@@ -297,13 +306,38 @@ export class IslandDisplayDecorations {
         codeSpans.some(
           ([codeRow, codeStart, codeEnd]) =>
             row === codeRow && start < codeEnd && end > codeStart,
-        ) || /math/i.test(group),
+        ) ||
+        /math/i.test(group) ||
+        TABLE_MARKUP_GROUPS.has(group),
     );
     const tableInlineHighlightsKey = JSON.stringify(tableInlineHighlights);
     if (this.tableInlineHighlightsKey !== tableInlineHighlightsKey) {
       this.tableInlineHighlightsKey = tableInlineHighlightsKey;
       interactiveEffects.push(
         this.setTableInlineHighlights.of(tableInlineHighlights),
+      );
+    }
+    // The delimiters of that markup are concealed by Neovim, not parsed by
+    // the cell renderer, so hand the table the empty conceals that sit right
+    // at either end of a markup run, as overlays with no replacement text.
+    const markupRuns = tableInlineHighlights.filter(([, , , group]) =>
+      TABLE_MARKUP_GROUPS.has(group),
+    );
+    const tableInlineOverlays = (payload?.conceal ?? [])
+      .filter(
+        ([row, start, end, text]) =>
+          !text &&
+          markupRuns.some(
+            ([runRow, runStart, runEnd]) =>
+              row === runRow && (end === runStart || start === runEnd),
+          ),
+      )
+      .map(([row, start, end]) => [row, start, end - start, []]);
+    const tableInlineOverlaysKey = JSON.stringify(tableInlineOverlays);
+    if (this.tableInlineOverlaysKey !== tableInlineOverlaysKey) {
+      this.tableInlineOverlaysKey = tableInlineOverlaysKey;
+      interactiveEffects.push(
+        this.setTableInlineOverlays.of(tableInlineOverlays),
       );
     }
     if (this.interactiveHighlightsKey !== interactiveHighlightsKey) {
