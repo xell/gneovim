@@ -179,6 +179,13 @@ body {
   word-break: normal;
   overflow-wrap: break-word;
 }
+/* Long unbroken runs (markdown-presentation.js wraps them) are the exception:
+   with overflow-wrap: break-word their full width still counts as the
+   column's minimum, so one long identifier widened the table past the
+   window. anywhere drops that minimum to a glyph for these runs only. */
+.island .cm-markdown-table .cm-markdown-long-run {
+  overflow-wrap: anywhere;
+}
 .island .cm-markdown-table th {
   background: color-mix(in srgb, var(--fg) 8%, transparent);
   font-weight: 600;

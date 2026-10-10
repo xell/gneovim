@@ -154,6 +154,22 @@ describe("createMarkdownPresentation", () => {
     expect(findTag(table, "a").href).toBe("https://example.com");
   });
 
+  it("lets only long unbroken runs in a cell break anywhere", () => {
+    const { presentation, state } = fixture(
+      "| H | Value |\n| --- | --- |\n" +
+        "| A | see `EKCalendar.allowsContentModifications` here |",
+    );
+    const table = tableWidget(state, presentation).toDOM();
+
+    expect(
+      visibleText(findClass(findTag(table, "code"), "cm-markdown-long-run")),
+    ).toBe("EKCalendar.allowsContentModifications");
+    expect(findClass(findTag(table, "thead"), "cm-markdown-long-run")).toBeNull();
+    expect(visibleText(findTag(table, "tbody"))).toBe(
+      "Asee EKCalendar.allowsContentModifications here",
+    );
+  });
+
   it("renders resolvable inline images inside table cells", () => {
     const { effects, presentation, state, convertFileSrc } = fixture(
       "| H | Image |\n| --- | --- |\n| A | ![diagram](./image.png) |",

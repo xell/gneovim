@@ -43,6 +43,30 @@ export function createMarkdownPresentation({
   // `overlays` (hop.nvim's per-target hint letters) replace it outright and
   // take priority over a `spans` colour on the same characters, matching the
   // non-table/image OverlayWidget elsewhere in this codebase.
+  // A run with no break opportunity sets its table column's minimum width,
+  // so one long identifier can push the table past the window. Such runs
+  // alone may break anywhere (styles.css); ordinary words keep whole-word
+  // minimums, which is what stops a short column being crushed.
+  const longRun = /\S{20,}/g;
+  function appendWrappable(container, text) {
+    let position = 0;
+    for (const match of text.matchAll(longRun)) {
+      if (match.index > position) {
+        container.append(
+          document.createTextNode(text.slice(position, match.index)),
+        );
+      }
+      const run = document.createElement("span");
+      run.className = "cm-markdown-long-run";
+      run.append(document.createTextNode(match[0]));
+      container.append(run);
+      position = match.index + match[0].length;
+    }
+    if (position < text.length || !container.childNodes.length) {
+      container.append(document.createTextNode(text.slice(position)));
+    }
+  }
+
   function appendHighlightedText(container, text, spans, overlays = []) {
     const boundaries = [
       ...new Set([
@@ -67,7 +91,7 @@ export function createMarkdownPresentation({
         for (const [segmentText, group] of overlay.segments) {
           const segment = document.createElement("span");
           if (group) segment.className = highlights.islandClass(group);
-          segment.textContent = segmentText;
+          appendWrappable(segment, segmentText);
           container.append(segment);
         }
         // The overlay's whole range is rendered from its first slice; skip
@@ -89,10 +113,10 @@ export function createMarkdownPresentation({
         mark.className = groups
           .map((group) => highlights.islandClass(group))
           .join(" ");
-        mark.textContent = text.slice(from, to);
+        appendWrappable(mark, text.slice(from, to));
         container.append(mark);
       } else {
-        container.append(document.createTextNode(text.slice(from, to)));
+        appendWrappable(container, text.slice(from, to));
       }
     }
     if (!container.childNodes.length) {
