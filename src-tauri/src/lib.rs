@@ -1533,7 +1533,11 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec, always_on_top: bo
             }
         });
 
-        match bridge::connect(tx, open, always_on_top).await {
+        let dark = app
+            .get_webview_window(&label)
+            .and_then(|w| w.theme().ok())
+            == Some(tauri::Theme::Dark);
+        match bridge::connect(tx, open, always_on_top, dark).await {
             Ok((bridge, child)) => {
                 app.state::<AppState>().windows.lock().unwrap().insert(
                     label.clone(),
@@ -2486,6 +2490,20 @@ pub fn run() {
                 let _ = window
                     .app_handle()
                     .emit(&format!("gnv://{}/focus", window.label()), ());
+            }
+            // macOS appearance flipped: this window's nvim follows it in
+            // 'background', as it would in a terminal with theme updates.
+            WindowEvent::ThemeChanged(theme) => {
+                let app = window.app_handle().clone();
+                let label = window.label().to_string();
+                let dark = *theme == tauri::Theme::Dark;
+                async_runtime::spawn(async move {
+                    if let Ok(bridge) = bridge_for(&app, &label).await {
+                        if let Err(e) = bridge.set_background(dark).await {
+                            log::warn!("theme: setting background failed: {e}");
+                        }
+                    }
+                });
             }
             #[cfg(target_os = "macos")]
             WindowEvent::Focused(false) => {

@@ -45,6 +45,15 @@ const LUA_APPLY_EDIT: &str = r#"
   return ticks
 "#;
 
+// Set 'background' from the window's appearance. Only a real change is written,
+// so an OptionSet handler (e.g. a colorscheme switch) runs once per flip.
+const LUA_SET_BACKGROUND: &str = r#"
+  local bg = ... and 'dark' or 'light'
+  if vim.o.background ~= bg then
+    vim.o.background = bg
+  end
+"#;
+
 const LUA_ISLAND_SNAPSHOT: &str = r#"
   local win, expected_buf = ...
   return vim.api.nvim_win_call(win, function()
@@ -1075,6 +1084,7 @@ pub async fn connect(
     tx: UnboundedSender<BridgeEvent>,
     open: OpenSpec,
     always_on_top: bool,
+    dark: bool,
 ) -> Result<(Bridge, Child), String> {
     let bin = find_nvim().await;
     let nv = &crate::config::get().neovim;
@@ -1176,13 +1186,10 @@ pub async fn connect(
         // buffers the launch args (or the user) produce. Filetype detection is
         // left to the user's config.
         //
-        // A bare `-u NONE` nvim ships Neovim 0.10+'s built-in colorscheme with
-        // background=dark. gneovim is a light prose surface, so force the light
-        // palette for that case only. With a real user config, respect whatever
-        // background / colorscheme it sets.
-        if crate::config::get().neovim.is_bare() {
-            nvim.command("set background=light").await.ok();
-        }
+        // 'background' follows the macOS appearance, the GUI-side twin of a
+        // terminal's theme notifications (DEC mode 2031 + OSC 11), which an
+        // embedded nvim never gets. Later flips arrive via `set_background`.
+        nvim.exec_lua(LUA_SET_BACKGROUND, vec![Value::from(dark)]).await.ok();
         // The GUI feeds mouse events via nvim_input_mouse; make sure nvim acts
         // on them even if a user config cleared 'mouse'.
         nvim.command("set mouse=a").await.ok();
@@ -1901,6 +1908,15 @@ impl Bridge {
                 "if _G.__gnv_zen_changed then _G.__gnv_zen_changed(...) end",
                 vec![Value::from(on)],
             )
+            .await
+            .map(|_| ())
+            .map_err(err)
+    }
+
+    /// The window's appearance flipped light <-> dark.
+    pub async fn set_background(&self, dark: bool) -> Result<(), String> {
+        self.nvim
+            .exec_lua(LUA_SET_BACKGROUND, vec![Value::from(dark)])
             .await
             .map(|_| ())
             .map_err(err)

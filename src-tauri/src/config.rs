@@ -312,9 +312,8 @@ impl Neovim {
     }
 
     /// True when running a bare `nvim -u NONE` (no user config): `config` unset
-    /// or "none". gneovim then owns more of the session (throwaway ShaDa, a
-    /// forced light background). With any real config, those choices are the
-    /// user's.
+    /// or "none". gneovim then owns more of the session (throwaway ShaDa).
+    /// With any real config, that choice is the user's.
     pub fn is_bare(&self) -> bool {
         self.config
             .as_deref()

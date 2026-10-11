@@ -316,8 +316,10 @@ By default gneovim runs `nvim -u NONE`, so your `~/.config/nvim` is not read. Th
 
 `config` also decides how much of the session gneovim owns:
 
-- `config = "none"` (the default): a throwaway session. gneovim adds `-i NONE` (no ShaDa) and forces `set background=light`.
-- `config = "user"` or a path: your session. Default ShaDa is used, so command-line history (`q:`), search history, marks, registers, and `:oldfiles` work like terminal nvim. `background`, colorscheme, and filetype detection are left to your config.
+- `config = "none"` (the default): a throwaway session. gneovim adds `-i NONE` (no ShaDa).
+- `config = "user"` or a path: your session. Default ShaDa is used, so command-line history (`q:`), search history, marks, registers, and `:oldfiles` work like terminal nvim. Colorscheme and filetype detection are left to your config.
+
+In both cases `background` follows the macOS appearance (Light or Dark Mode) and is updated live when it flips, so an `OptionSet background` autocmd in your config can switch colorschemes the way it would in a terminal that sends theme updates. See `'background'` in `neovim-api-surface.md`.
 
 The full launch line is `nvim --embed --headless` then the `config` args, then the ShaDa args, then `args`. gneovim also forces `mouse=a` at startup (the GUI feeds mouse events through `nvim_input_mouse`); everything else, including swap files and filetype detection, is up to your config or `args`.
 

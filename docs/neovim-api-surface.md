@@ -145,6 +145,12 @@ Every key is optional; see `configuration.md` for the file's location, reload po
 - `font_sans_serif` (string, unset) — font stack prepended in front of a built-in system sans-serif stack, applied to headings; unset leaves headings in the body serif font, as today. See `:MarkdownFontSansSerif`.
 - `font_mono` (string, unset) — font stack prepended in front of the built-in monospace stack (which itself tracks Neovim's own `guifont`); see `:MarkdownFontMono`.
 
+## Options gneovim sets
+
+### `'background'`
+
+Follows the macOS appearance: `dark` in Dark Mode, `light` in Light Mode, set once at startup and again whenever the appearance flips. This is the GUI equivalent of a terminal's theme change notifications (DEC mode 2031 plus the OSC 11 reply), which an embedded nvim never receives. It is only written when the value actually changes, so an `OptionSet background` autocmd (for example one that picks a colorscheme) runs once per flip. A config that pins `'background'` itself is overridden on the next flip.
+
 ## Client identification
 
 Gneovim also calls `nvim_set_client_info("gneovim", {major, minor, patch}, "ui", {}, {})` on startup, so `nvim_get_chan_info` on the UI channel reports gneovim's identity and parsed version as an alternative to reading `g:gneovim` and `g:gneovim_version` directly.
