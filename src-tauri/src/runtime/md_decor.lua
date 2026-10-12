@@ -13,7 +13,8 @@
 --   conceal : union of synconcealed() (:syntax), the treesitter highlights
 --             query `conceal` metadata, and extmark `conceal`.
 --   visual  : the visual / select range.
---   folds   : fold regions as {startRow, endRow, closed}.
+--   folds   : fold regions as {startRow, endRow, closed}; closed folds from
+--             the whole buffer, open ones viewport-limited.
 --   hl      : { runs, defs } - union of every treesitter capture, hl_group
 --             extmark, active 'hlsearch' result, a live '/' or '?' incsearch
 --             preview, a live ':s'/':g' (substitute/global) 'inccommand'
@@ -490,19 +491,27 @@ end
 -- Fold regions whose first line overlaps the padded viewport, as
 -- { {startRow, endRow, closed}, ... } (0-based rows, inclusive). There is no
 -- fold autocmd, so this re-runs on the same broad trigger set as the rest.
+-- Closed folds come from the whole buffer, not just first..last: a closed
+-- fold outside the range still collapses its lines in the island, and
+-- leaving it out expands it there. The range moves between Neovim's viewport
+-- and the island's own (see __gnv_md_decor_view), so folds above the cursor
+-- came and went, the content above changed height by thousands of pixels on
+-- a single j/k, and the view was thrown to the end of the note (2026-10-12).
+-- Open folds only mark the gutter, so they stay range-limited. The walk
+-- skips closed folds whole: about 3 ms for 30k lines with every fold open.
 local function collect_folds(win, first, last)
   local folds = {}
   vim.api.nvim_win_call(win, function()
     if not vim.wo.foldenable then
       return
     end
-    local l = first + 1 -- 1-based
-    local top = last + 1
-    while l <= top do
+    local l = 1
+    local n = vim.api.nvim_buf_line_count(0)
+    while l <= n do
       local fc = vim.fn.foldclosed(l)
       if fc == -1 then
-        local level = vim.fn.foldlevel(l)
-        local previous = l > 1 and vim.fn.foldlevel(l - 1) or 0
+        local level = (l > first and l <= last + 1) and vim.fn.foldlevel(l) or 0
+        local previous = l > 1 and level > 0 and vim.fn.foldlevel(l - 1) or 0
         if level > 0 and level > previous then
           local fe = l
           while vim.fn.foldlevel(fe + 1) >= level do
