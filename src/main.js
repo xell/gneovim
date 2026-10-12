@@ -883,8 +883,35 @@ class Island {
     this.inputQueue.input(keys);
   }
   queueNvimKey(keys, event) {
-    if (this.inputController.syncSelectionBeforeInput(event, keys))
-      this.inputQueue.input(keys);
+    if (!this.inputController.syncSelectionBeforeInput(event, keys))
+      return false;
+    this.inputQueue.input(keys);
+    return true;
+  }
+  // The deaf-island report (see dumpIslandDiagnostics): everything this
+  // island holds that a preview toggle throws away.
+  describeForDiagnostics(now) {
+    const ago = (t) => `${Math.round(now - t)}ms`;
+    const ic = this.inputController;
+    const writes = this._modeWrites
+      .map((w) => `${w.source}:${w.mode || "?"}@${ago(w.at)}`)
+      .join(" ");
+    const cursor = this._nvimCursor
+      ? `${this._nvimCursor.row}:${this._nvimCursor.col}`
+      : "none";
+    return (
+      `island win ${this.winId} buf ${this.bufnr} age ${ago(this._createdAt)} ` +
+      `attaching ${Boolean(this.attaching)} hidden ${this.el.hidden}\n` +
+      `  mode "${this.mode}" editable ${this.editable} cursor ${cursor} ` +
+      `mode writes: ${writes}\n` +
+      `  view hasFocus ${this.view.hasFocus} composing ${this.view.composing} ` +
+      `compositionStarted ${this.view.compositionStarted}\n` +
+      `  input controller composition ${Boolean(ic.composition)} ` +
+      `settling ${ic.compositionSettling} preedit ${ic.preedit} ` +
+      `pendingCursor ${JSON.stringify(ic.pendingCursor)} ` +
+      `lastExternalTarget ${JSON.stringify(ic.lastExternalTarget)}\n` +
+      `  input queue ${this.inputQueue.describe(now)}`
+    );
   }
   // True when `cursor` sits behind a rendered table, a concealed image
   // source line, a closed fold's hidden body, or a conceal-hidden marker:
@@ -1376,6 +1403,7 @@ addEventListener("error", (e) => {
     nvim.on("guiopt", (e) => applyGuiOpt(e.payload.name, e.payload.value)),
     nvim.on("md_preview", (e) => {
       const { win, state } = e.payload;
+      if (!state && islands.get(win)) dumpIslandDiagnostics(islands.get(win));
       session.setPreview(win, state);
       islandManager.reconcile();
       syncGrammarlyAccessibility();
@@ -1691,13 +1719,78 @@ function confirmMode(island, mode, fresh) {
   );
 }
 
+// The last keydowns and what became of each, kept in memory only for the
+// deaf-island report written when live preview is turned off (see
+// dumpIslandDiagnostics). Nothing is logged per key.
+const recentKeys = [];
+function recordKey(e) {
+  const entry = {
+    at: performance.now(),
+    key: e.key,
+    code: e.code,
+    keyCode: e.keyCode,
+    composing: e.isComposing,
+    imeComposing,
+    win: null,
+    mode: null,
+    outcome: "?",
+  };
+  recentKeys.push(entry);
+  if (recentKeys.length > 30) recentKeys.shift();
+  return entry;
+}
+
+// Leo's recovery from a deaf island (Insert-mode j/k/w acting as motions,
+// Escape and `:` doing nothing) is :MarkdownLivePreviewOff then On, which
+// throws the island away. So turning preview off is when its state is
+// written down: one log entry, nothing in normal use. 2026-10-13; remove
+// once the cause is fixed.
+function dumpIslandDiagnostics(island) {
+  const now = performance.now();
+  const ago = (t) => `${Math.round(now - t)}ms`;
+  const active = document.activeElement;
+  const activeName = active
+    ? `${active.tagName.toLowerCase()}${active.id ? "#" + active.id : ""}.${String(active.className).split(" ")[0]}`
+    : "none";
+  const latch = routingState.modeUnconfirmed;
+  const last = session.lastCursor;
+  const keys = recentKeys
+    .map(
+      (k) =>
+        `  ${ago(k.at)} ${JSON.stringify(k.key)} code ${k.code} keyCode ${k.keyCode}` +
+        `${k.composing ? " isComposing" : ""}${k.imeComposing ? " imeComposing" : ""}` +
+        ` win ${k.win} mode "${k.mode ?? ""}" -> ${k.outcome}`,
+    )
+    .join("\n");
+  jlog(
+    `island diagnostics on live preview off:\n` +
+      `  global imeComposing ${imeComposing} activeElement ${activeName} ` +
+      `cmdlineActive ${session.cmdlineActive} modeName ${session.modeName} ` +
+      `cursorGrid ${session.cursorGrid} -> win ${session.windowForGrid(session.cursorGrid)}\n` +
+      `  lastCursor ${last ? `win ${last.win} ${last.row}:${last.col} mode ${last.mode}` : "none"} ` +
+      `latch ${latch ? `win ${latch.island?.winId} ${ago(latch.at)}` : "clear"} ` +
+      `nativePending ${routingState.nativePending} pendingG ${Boolean(routingState.pendingG)}\n  ` +
+      island.describeForDiagnostics(now) +
+      `\n  last keys (oldest first):\n${keys}`,
+  );
+}
+
 addEventListener("keydown", (e) => {
-  if (imeComposing) return; // IME is mid-composition; let #ime + the OS handle it
-  if (handleFontZoom(e)) return;
+  const keyRecord = recordKey(e);
+  if (imeComposing) {
+    keyRecord.outcome = "ignored: imeComposing";
+    return; // IME is mid-composition; let #ime + the OS handle it
+  }
+  if (handleFontZoom(e)) {
+    keyRecord.outcome = "font zoom";
+    return;
+  }
   // A command line temporarily belongs to Neovim, even when the underlying
   // cursor grid is a Markdown island. Do not apply island Normal-mode physical
   // punctuation or semantic-motion interception to command-line text.
   const isl = session.cmdlineActive ? null : islandForGrid(session.cursorGrid);
+  keyRecord.win = isl ? isl.winId : `grid ${session.cursorGrid}`;
+  keyRecord.mode = isl?.mode ?? session.modeName;
   const plain = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
   // Fires only inside the window the mode latch covers, on exactly the
   // keystrokes it rescues, so it stays rare in real use and is the only way to
@@ -1745,14 +1838,19 @@ addEventListener("keydown", (e) => {
       e.preventDefault();
       isl._localAnswer = { key: e.key, at: performance.now() };
       isl.queueNvimCursor(routed.verdict.row, routed.verdict.col);
+      keyRecord.outcome = `answered locally: cursor ${routed.verdict.row}:${routed.verdict.col}`;
       return;
     case "holdG":
       e.preventDefault(); // the router is keeping the event for us
+      keyRecord.outcome = "held (g prefix)";
       return;
     case "forwardKeys":
       e.preventDefault();
-      if (isl) isl.queueNvimKey(routed.verdict.keys, e);
-      else
+      keyRecord.outcome = `sent ${routed.verdict.keys}`;
+      if (isl) {
+        if (!isl.queueNvimKey(routed.verdict.keys, e))
+          keyRecord.outcome = "consumed by selection sync";
+      } else
         nvim.input(routed.verdict.keys).catch((error) =>
           jlog("grid input failed: " + error),
         );
@@ -1767,7 +1865,10 @@ addEventListener("keydown", (e) => {
       break; // forward
   }
   const keys = keyToNvim(e);
-  if (keys === null) return; // mid-composition / lone modifier
+  if (keys === null) {
+    keyRecord.outcome = "dropped: not encodable (composition or lone modifier)";
+    return; // mid-composition / lone modifier
+  }
   // Editable grid context (insert/replace or command line): plain text goes into
   // the #ime textarea for the OS IME; input/compositionend forward it to nvim.
   // Named and modified keys, including Enter and Backspace, still pass here.
@@ -1775,11 +1876,16 @@ addEventListener("keydown", (e) => {
     gridTextInputActive() &&
     document.activeElement === imeEl &&
     !keys.startsWith("<")
-  )
+  ) {
+    keyRecord.outcome = "left to the #ime textarea";
     return;
+  }
   e.preventDefault();
-  if (isl) isl.queueNvimKey(keys, e);
-  else nvim.input(keys).catch((error) => jlog("grid input failed: " + error));
+  keyRecord.outcome = `sent ${keys}`;
+  if (isl) {
+    if (!isl.queueNvimKey(keys, e))
+      keyRecord.outcome = "consumed by selection sync";
+  } else nvim.input(keys).catch((error) => jlog("grid input failed: " + error));
 });
 
 // ---------------------------------------------------------------------------
