@@ -28,6 +28,10 @@
 local chan = ...
 
 local PAD = 40 -- extra buffer rows queried around the window viewport
+-- Largest row range a push grows to before starting over (see range_by_win).
+-- On link-heavy text a held j then averages 8 ms a push against 6 ms for the
+-- sliding window alone, measured 2026-10-13; 500 rows was 14 ms.
+local MAX_RANGE = 300
 
 -- Highlight groups resolved this session, cleared on ColorScheme.
 local hl_cache = {}
@@ -36,6 +40,12 @@ local hl_by_win = {}
 -- Per-window row range the island itself is showing, reported by the client
 -- (see __gnv_md_decor_view below), plus the cursor it was reported against.
 local view_by_win = {}
+-- Per-window row range the last push decorated. A row leaving the range goes
+-- back to raw text, and a raw link is several wrapped lines where the
+-- concealed one is one, so every row crossing the edge above the cursor
+-- moved the view by that much (2026-10-13). The range therefore only grows,
+-- up to MAX_RANGE rows; a short note ends up decorated whole.
+local range_by_win = {}
 
 local function hex(n)
   return n and string.format('#%06x', n) or nil
@@ -959,6 +969,14 @@ local function push(win)
   end
   local first = math.max(top - PAD, 0)
   local last = math.min(bot + PAD, n - 1)
+  local r = range_by_win[win]
+  if r and r.buf == buf and r.first <= last and first <= r.last then
+    local f, l = math.min(r.first, first), math.min(math.max(r.last, last), n - 1)
+    if l - f < MAX_RANGE then
+      first, last = f, l
+    end
+  end
+  range_by_win[win] = { buf = buf, first = first, last = last }
 
   -- Highlights are the heavy part (a treesitter walk); reuse the last
   -- snapshot when nothing collect_highlights reads has changed. `tick` and
@@ -1203,6 +1221,7 @@ end
 -- this. See docs/markdown-island-fold-desync.md.
 _G.__gnv_resync_decor = function(win)
   hl_by_win[win] = nil
+  range_by_win[win] = nil
   if preview_on(win) then
     pcall(push, win)
   end
