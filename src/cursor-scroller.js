@@ -6,6 +6,10 @@ import { byteToCol } from "./pure/text-geometry.js";
 // 100-250ms after the cursor echo, and it changes line heights: headings grow,
 // conceal shortens lines, and CodeMirror re-estimates every undrawn line.
 const FAR_JUMP_WINDOW_MS = 1000;
+// How long after a wheel event the reader still owns the scroll position:
+// macOS keeps sending wheel events through trackpad momentum, so this only
+// has to bridge the gap between two of them.
+const WHEEL_QUIET_MS = 250;
 
 // Owns measured CodeMirror cursor scrolling and its browser scheduling state.
 export class CursorScroller {
@@ -31,10 +35,12 @@ export class CursorScroller {
     // The target of the last far jump, until `until`. A wheel scroll is the
     // reader moving away on purpose: drop it.
     this.farJump = null;
+    this.wheelAt = 0;
     view.scrollDOM?.addEventListener?.(
       "wheel",
       () => {
         this.farJump = null;
+        this.wheelAt = Date.now();
       },
       { passive: true },
     );
@@ -60,6 +66,21 @@ export class CursorScroller {
     const jump = this.farJump;
     if (!jump || Date.now() > jump.until) return null;
     return jump.effect;
+  }
+
+  // For any other decoration transaction: keep the top visible line where it
+  // is. Decorations only cover rows near the viewport (md_decor.lua), so rows
+  // above it change height as they enter or leave that range: a closed fold
+  // opening (4cf040c), a long link going from concealed to raw (ddc5444).
+  // Without an anchor each such change moved everything below it, the view
+  // with it. CodeMirror restores the snapshot in the same measure cycle that
+  // applies the new heights, before anything paints. Not while a cursor scroll
+  // is pending (it measures after this update and would be undone), and not
+  // while the reader is wheel-scrolling (the snapshot would pull them back).
+  anchorEffect() {
+    if (this.frame || this.isHidden()) return null;
+    if (Date.now() - this.wheelAt < WHEEL_QUIET_MS) return null;
+    return this.view.scrollSnapshot();
   }
 
   scrollToPosition(position, scrolloff, force) {

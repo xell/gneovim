@@ -733,7 +733,8 @@ export class IslandDisplayDecorations {
     // Changed decorations change line heights. Right after a far jump, the
     // scroll that aimed at the cursor used the old ones; sending the same
     // scroll request in this transaction lets CodeMirror apply both in one
-    // measure cycle (see CursorScroller.scrollEffectForRelayout).
+    // measure cycle (see CursorScroller.scrollEffectForRelayout). Otherwise
+    // the request keeps the top visible line in place (anchorEffect).
     if (layoutChanged) {
       const scroll = this.cursorScrollEffect();
       if (scroll) effects.push(scroll);

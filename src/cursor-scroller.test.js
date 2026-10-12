@@ -98,6 +98,26 @@ describe("CursorScroller", () => {
     expect(moved.cursorScroller.scrollEffectForRelayout()).toBeNull();
   });
 
+  // Rows above the viewport change height as they enter or leave md_decor's
+  // range (a fold opening, a link going raw); the top visible line stays put.
+  it("anchors the top visible line, unless a cursor scroll or the wheel owns the position", () => {
+    vi.useFakeTimers();
+    const { cursorScroller, frames, listeners, view } = fixture();
+    const snapshot = { snapshot: true };
+    view.scrollSnapshot = vi.fn(() => snapshot);
+    expect(cursorScroller.anchorEffect()).toBe(snapshot);
+
+    cursorScroller.keepInView({ row: 0, col: 0 }, 2);
+    expect(cursorScroller.anchorEffect()).toBeNull(); // follow-scroll pending
+    [...frames.values()][0]();
+    expect(cursorScroller.anchorEffect()).toBe(snapshot);
+
+    listeners.wheel();
+    expect(cursorScroller.anchorEffect()).toBeNull();
+    vi.advanceTimersByTime(251);
+    expect(cursorScroller.anchorEffect()).toBe(snapshot);
+  });
+
   it("uses measured geometry and pixel scrolloff", () => {
     const { cursorScroller, frames, timers, classes, scroller, view } = fixture();
     cursorScroller.keepInView({ row: 1, col: 1 }, 2);
