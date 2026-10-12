@@ -641,7 +641,16 @@ class Island {
     this.attaching = null;
     this.reconcileAfterAttach = false;
     this.resyncAfterAttach = false;
-    this.mode = "n";
+    // Unknown until Neovim reports it (the attach snapshot or a cursor echo).
+    // Starting at "n" let the keydown router answer j/k/w as Normal-mode
+    // motions in an island rebuilt mid-Insert, e.g. by an external reload
+    // (filetype is re-detected, so the island is destroyed and recreated).
+    this.mode = "";
+    // Diagnostics for the Insert-mode-motions bug (2026-10-13): the last few
+    // writes of `mode` and their source, and a key just answered locally.
+    this._modeWrites = [];
+    this._localAnswer = null;
+    this._createdAt = performance.now();
     this.fontZoom = 0;
     this.editableComp = new Compartment();
     this.editable = true;
@@ -1005,8 +1014,10 @@ class Island {
       islandManager.reconcile(true);
     }
   }
-  applyCursor(row, col, mode, scrolloff = this.scrolloff) {
+  applyCursor(row, col, mode, scrolloff = this.scrolloff, source = "?") {
     this.mode = mode;
+    this._modeWrites.push({ source, mode, at: performance.now() });
+    if (this._modeWrites.length > 6) this._modeWrites.shift();
     confirmMode(this, mode, false);
     const nextScrolloff = Math.max(0, scrolloff);
     const scrolloffChanged = this.scrolloff !== nextScrolloff;
@@ -1025,7 +1036,7 @@ class Island {
       this._pendingZeroScrolloff = setTimeout(() => {
         this._pendingZeroScrolloff = 0;
         if (!this.displayDecorations.easyMotionOverlay) {
-          this.applyCursor(row, col, mode, 0);
+          this.applyCursor(row, col, mode, 0, "zero-scrolloff");
         }
       }, 80);
       return;
@@ -1142,7 +1153,7 @@ class Island {
     this.tx({
       changes: { from: 0, to: this.view.state.doc.length, insert: m.lines.join("\n") },
     });
-    this.applyCursor(m.row, m.col, m.mode, m.scrolloff);
+    this.applyCursor(m.row, m.col, m.mode, m.scrolloff, "snapshot");
   }
   scrollTo(topline, botline, linecount) {
     // Neovim's viewport is based on grid rows and keeps whole wrapped buffer
@@ -1562,9 +1573,43 @@ function keyToNvim(e) {
 function applyCursorEcho(payload) {
   session.setCursor(payload);
   const island = islands.get(payload.win);
-  if (island) confirmMode(island, payload.mode, true);
-  island?.applyCursor(payload.row, payload.col, payload.mode, payload.scrolloff);
+  if (island) {
+    reportInsertModeMotion(island, payload);
+    confirmMode(island, payload.mode, true);
+  }
+  island?.applyCursor(
+    payload.row,
+    payload.col,
+    payload.mode,
+    payload.scrolloff,
+    "echo",
+  );
   syncGrammarlyAccessibility();
+}
+
+// The one probe for the Insert-mode-motions bug (2026-10-13): Leo sees j/k/w
+// act as motions while typing, after window switches, folds and external
+// reloads, and cannot reproduce it on demand. Fires only when it happens: the
+// island answered a key locally as a Normal-mode motion, and the first echo
+// Neovim sent after it says Insert. One log line with what that island
+// believed and where its mode came from. Remove once the cause is fixed.
+function reportInsertModeMotion(island, payload) {
+  const answer = island._localAnswer;
+  island._localAnswer = null;
+  if (!answer || !/^[iR]/.test(payload.mode)) return;
+  const now = performance.now();
+  const ago = (t) => `${Math.round(now - t)}ms`;
+  const writes = island._modeWrites
+    .map((w) => `${w.source}:${w.mode || "?"}@${ago(w.at)}`)
+    .join(" ");
+  const gridWin = session.windowForGrid(session.cursorGrid);
+  jlog(
+    `island: BUG insert-mode motion: answered ${answer.key} locally as Normal ` +
+      `${ago(answer.at)} before Neovim reported mode ${payload.mode} ` +
+      `(island win ${island.winId}, cursor grid ${session.cursorGrid} -> win ${gridWin}, ` +
+      `island age ${ago(island._createdAt)}, attaching ${Boolean(island.attaching)}, ` +
+      `latch ${routingState.modeUnconfirmed ? "set" : "clear"}); mode writes: ${writes}`,
+  );
 }
 
 function islandLookup() {
@@ -1698,6 +1743,7 @@ addEventListener("keydown", (e) => {
   switch (routed.verdict.type) {
     case "cursor":
       e.preventDefault();
+      isl._localAnswer = { key: e.key, at: performance.now() };
       isl.queueNvimCursor(routed.verdict.row, routed.verdict.col);
       return;
     case "holdG":

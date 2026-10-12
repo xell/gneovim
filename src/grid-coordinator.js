@@ -164,6 +164,7 @@ export class GridCoordinator {
         this.session.lastCursor.col,
         this.session.lastCursor.mode,
         this.session.lastCursor.scrolloff,
+        "replay-grid",
       );
     }
   }
@@ -217,6 +218,7 @@ export class GridCoordinator {
         this.session.lastCursor.col,
         this.session.lastCursor.mode,
         this.session.lastCursor.scrolloff,
+        "replay-viewport",
       );
     }
   }
