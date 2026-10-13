@@ -40,6 +40,7 @@ import { screenMetrics as calculateScreenMetrics } from "./pure/layout.js";
 import { bufferLineEdit } from "./pure/buffer-line-edit.js";
 import { semanticWordTarget as findSemanticWordTarget } from "./pure/semantic-word.js";
 import { CursorScroller } from "./cursor-scroller.js";
+import { ZeroScrolloffGate } from "./zero-scrolloff-gate.js";
 import { tableVerticalStep } from "./table-vertical-motion.js";
 import { GutterController } from "./gutter-controller.js";
 import { IslandInputQueue } from "./island-input-queue.js";
@@ -749,6 +750,15 @@ class Island {
     });
     this.inputController.attach(this.view);
     this.gutterController.attach(this.view);
+    this.zeroScrolloff = new ZeroScrolloffGate({
+      setTimer: (callback, ms) => setTimeout(callback, ms),
+      clearTimer: (id) => clearTimeout(id),
+      isEasyMotion: () => this.displayDecorations.easyMotionOverlay,
+      applyZero: () => {
+        this.scrolloff = 0;
+        this.keepCursorInView();
+      },
+    });
     this.cursorScroller = new CursorScroller({
       view: this.view,
       isHidden: () => this.el.hidden,
@@ -771,11 +781,7 @@ class Island {
       setInteractiveOverlays,
       getCursor: () => this._nvimCursor,
       getMode: () => this.mode,
-      cancelPendingZeroScrolloff: () => {
-        if (!this._pendingZeroScrolloff) return;
-        clearTimeout(this._pendingZeroScrolloff);
-        this._pendingZeroScrolloff = 0;
-      },
+      cancelPendingZeroScrolloff: () => this.zeroScrolloff.cancel(),
       keepPositionInView: (position) =>
         this.keepPositionInView(position),
       keepCursorInView: () => this.keepCursorInView(),
@@ -869,6 +875,7 @@ class Island {
     }, 50);
   }
   destroy() {
+    this.zeroScrolloff.cancel();
     this.gutterController.destroy();
     this.displayDecorations.destroy();
     clearTimeout(this._decorViewTimer);
@@ -1048,29 +1055,9 @@ class Island {
     confirmMode(this, mode, false);
     const nextScrolloff = Math.max(0, scrolloff);
     const scrolloffChanged = this.scrolloff !== nextScrolloff;
-    // EasyMotion's marker prompt temporarily sets its window's 'scrolloff' to
-    // zero, then restores it after the hint is chosen. It never moved the
-    // cursor, so feeding that short-lived zero to the pixel scrolloff code
-    // causes the distracting out-and-back jump. Wait long enough for the
-    // display bridge to identify the EasyMotion matches. A real :set
-    // scrolloff=0 has no such overlay and still applies normally.
-    if (
-      scrolloffChanged &&
-      nextScrolloff === 0 &&
-      !this.displayDecorations.easyMotionOverlay
-    ) {
-      clearTimeout(this._pendingZeroScrolloff);
-      this._pendingZeroScrolloff = setTimeout(() => {
-        this._pendingZeroScrolloff = 0;
-        if (!this.displayDecorations.easyMotionOverlay) {
-          this.applyCursor(row, col, mode, 0, "zero-scrolloff");
-        }
-      }, 80);
-      return;
-    }
-    if (scrolloffChanged) clearTimeout(this._pendingZeroScrolloff);
-    this._pendingZeroScrolloff = 0;
-    this.scrolloff = nextScrolloff;
+    // A drop to zero waits for EasyMotion to show itself (see
+    // ZeroScrolloffGate); everything else in this echo applies now.
+    this.scrolloff = this.zeroScrolloff.next(this.scrolloff, nextScrolloff);
     // if this island holds the cursor, keep its .cm-content focused so hasFocus
     // is reliable (needed for the insert-mode IME carve-out), in every mode
     if (
