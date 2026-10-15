@@ -1,5 +1,6 @@
 import { StateField } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType } from "@codemirror/view";
+import { syntaxTree } from "@codemirror/language";
 import { markdownLanguage } from "@codemirror/lang-markdown";
 import {
   entriesInSpans,
@@ -572,36 +573,89 @@ export function createMarkdownPresentation({
     }
   }
 
+  // Paths the image scan walks through: the containers an image line may sit
+  // in. Everything else (code blocks, tables, HTML, headings) is skipped
+  // whole, which is what keeps `![...](...)` inside a code fence or an
+  // indented code block from rendering.
+  const imageContainers = new Set([
+    "Document",
+    "Blockquote",
+    "BulletList",
+    "OrderedList",
+    "ListItem",
+    "Paragraph",
+  ]);
+
+  // Images that are the only content on their source line, read from the
+  // syntax tree rather than the raw text so the line may start with list
+  // markers, a task box, or quote markers. Within the paragraph, the line
+  // may hold nothing but those around the image; the parser has already
+  // owned the list and quote markers that sit before the paragraph starts.
+  function standaloneImages(state) {
+    const { doc } = state;
+    const images = [];
+    syntaxTree(state).iterate({
+      enter(node) {
+        if (node.name !== "Image") return imageContainers.has(node.name);
+        const paragraph = node.node.parent;
+        if (paragraph?.name !== "Paragraph") return false;
+        const line = doc.lineAt(node.from);
+        if (line.to < node.to) return false;
+        let before = doc.sliceString(
+          Math.max(line.from, paragraph.from),
+          node.from,
+        );
+        // A quote continuation line's own ">" sits inside the paragraph.
+        for (const mark of paragraph.getChildren("QuoteMark")) {
+          if (mark.from >= line.from && mark.to <= node.from) {
+            const at = mark.from - Math.max(line.from, paragraph.from);
+            before = before.slice(0, at) + " " + before.slice(at + 1);
+          }
+        }
+        const after = doc.sliceString(node.to, Math.min(line.to, paragraph.to));
+        if (!/^\s*(?:\[[ xX]\]\s+)?$/.test(before) || /\S/.test(after)) {
+          return false;
+        }
+        const marks = node.node.getChildren("LinkMark");
+        const url = node.node.getChild("URL");
+        if (marks.length < 2 || !url) return false;
+        images.push({
+          line,
+          from: node.from,
+          altFrom: marks[0].to,
+          altTo: marks[1].from,
+          url: doc.sliceString(url.from, url.to).replace(/^<(.*)>$/, "$1"),
+        });
+        return false;
+      },
+    });
+    return images;
+  }
+
   function imageDecorations(
-    doc,
+    state,
     bufferName,
     cursor,
     interactiveHighlights = [],
     interactiveOverlays = [],
   ) {
+    const { doc } = state;
     const ranges = [];
     const rows = [];
-    for (let number = 1; number <= doc.lines; number++) {
-      const line = doc.line(number);
-      const match =
-        /^\s*!\[([^\]]*)\]\((?:<([^>]+)>|([^\s)]+))(?:\s+["'][^"']*["'])?\)\s*$/.exec(
-          line.text,
-        );
-      if (!match) continue;
-      const src = imageSource(
-        match[2] || match[3],
-        bufferName,
-        convertFileSrc,
-      );
+    for (const image of standaloneImages(state)) {
+      const { line } = image;
+      const number = line.number;
+      const src = imageSource(image.url, bufferName, convertFileSrc);
       if (!src) continue;
       rows.push([number - 1, number - 1]);
-      const label = imageLabel(match[1]);
+      const alt = doc.sliceString(image.altFrom, image.altTo);
+      const label = imageLabel(alt);
       if (cursor?.row !== number - 1) {
         // The alt text is copied verbatim into the caption (see imageLabel),
         // so its bounds in the source line are also its bounds in the
-        // caption: the leading "![" is the only fixed prefix ahead of it.
-        const altStart = /^\s*/.exec(line.text)[0].length + 2;
-        const altEnd = altStart + match[1].length;
+        // caption.
+        const altStart = image.altFrom - line.from;
+        const altEnd = image.altTo - line.from;
         const captionHighlights = imageCaptionHighlights(
           doc,
           number - 1,
@@ -616,6 +670,10 @@ export function createMarkdownPresentation({
           altEnd,
           interactiveOverlays,
         );
+        // A bare indent goes with the caption, as it always has. Anything
+        // else ahead of the image is a list, task, or quote marker that
+        // its own decorations draw, so the caption must not swallow it.
+        const prefix = doc.sliceString(line.from, image.from);
         ranges.push(
           Decoration.replace({
             widget: new MarkdownImageSourceWidget(
@@ -623,7 +681,7 @@ export function createMarkdownPresentation({
               captionHighlights,
               captionOverlays,
             ),
-          }).range(line.from, line.to),
+          }).range(/\S/.test(prefix) ? image.from : line.from, line.to),
         );
       }
       ranges.push(
@@ -652,7 +710,7 @@ export function createMarkdownPresentation({
 
   const markdownImageField = StateField.define({
     create: (state) => ({
-      ...imageDecorations(state.doc, "", null),
+      ...imageDecorations(state, "", null),
       key: imageInputKey([], null, [], []),
       bufferName: "",
       cursor: null,
@@ -674,8 +732,13 @@ export function createMarkdownPresentation({
           interactiveOverlays = effect.value;
         }
       }
+      // The parser fills the tree in the background, so a document that
+      // hasn't changed can still gain (or lose) images as parsing advances.
+      const treeChanged =
+        syntaxTree(transaction.state) !== syntaxTree(transaction.startState);
       if (
         !transaction.docChanged &&
+        !treeChanged &&
         bufferName === value.bufferName &&
         cursor === value.cursor &&
         interactiveHighlights === value.highlights &&
@@ -691,7 +754,11 @@ export function createMarkdownPresentation({
       };
       // A cursor move or a highlight change away from every image leaves the
       // widgets as they are, without rescanning the document.
-      if (!transaction.docChanged && bufferName === value.bufferName) {
+      if (
+        !transaction.docChanged &&
+        !treeChanged &&
+        bufferName === value.bufferName
+      ) {
         const key = imageInputKey(
           value.rows,
           cursor,
@@ -701,7 +768,7 @@ export function createMarkdownPresentation({
         if (key === value.key) return { ...value, ...inputs };
       }
       const built = imageDecorations(
-        transaction.state.doc,
+        transaction.state,
         bufferName,
         cursor,
         interactiveHighlights,

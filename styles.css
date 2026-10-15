@@ -208,6 +208,10 @@ body {
   margin: 0;
   padding: 0.55em 0.7em;
 }
+/* An image under a list item or in a quote is still a block widget: the
+   figure is the next sibling of its source line, not part of it, so it
+   inherits none of that line's classes. The list depth and quote rules
+   below also match it through `+`, giving it the line's text column. */
 .island .cm-markdown-image img {
   display: block;
   max-height: 60vh;
@@ -329,7 +333,8 @@ body {
   font-size: 0.9em;
   background: color-mix(in srgb, var(--fg) 6%, transparent);
 }
-.island .cm-blockquote {
+.island .cm-blockquote,
+.island .cm-blockquote + .cm-markdown-image {
   --quote-indent: 0.8em;
   border-left: 3px solid color-mix(in srgb, var(--fg) 30%, transparent);
   padding-left: var(--quote-indent);
@@ -421,7 +426,8 @@ body {
    flush in the column like the rest of the paragraph. listMarkerRanges
    (island-display-decorations.js) hides each marker row's own literal
    indentation so it doesn't double up with this. */
-.island [class*="cm-list-depth-"] {
+.island [class*="cm-list-depth-"],
+.island [class*="cm-list-depth-"] + .cm-markdown-image {
   position: relative;
   padding-left: calc(
     var(--list-indent-base, 2em) + (var(--list-depth) + 1) * var(--list-indent-step, 1.3em)
@@ -438,7 +444,8 @@ body {
    --list-indent-base -- padding-left above, .cm-list-bullet's left below
    -- lines up with the quote's own text column for free, with no separate
    calc to keep in sync. */
-.island .cm-blockquote[class*="cm-list-depth-"] {
+.island .cm-blockquote[class*="cm-list-depth-"],
+.island .cm-blockquote[class*="cm-list-depth-"] + .cm-markdown-image {
   --list-indent-base: var(--quote-indent, 0.8em);
 }
 .island .cm-list-marker-line {
@@ -478,28 +485,36 @@ body {
     -1.1em - var(--list-depth) * 0.45em - var(--list-indent-step, 1.3em)
   );
 }
-.island .cm-list-depth-0 {
+.island .cm-list-depth-0,
+.island .cm-list-depth-0 + .cm-markdown-image {
   --list-depth: 0;
 }
-.island .cm-list-depth-1 {
+.island .cm-list-depth-1,
+.island .cm-list-depth-1 + .cm-markdown-image {
   --list-depth: 1;
 }
-.island .cm-list-depth-2 {
+.island .cm-list-depth-2,
+.island .cm-list-depth-2 + .cm-markdown-image {
   --list-depth: 2;
 }
-.island .cm-list-depth-3 {
+.island .cm-list-depth-3,
+.island .cm-list-depth-3 + .cm-markdown-image {
   --list-depth: 3;
 }
-.island .cm-list-depth-4 {
+.island .cm-list-depth-4,
+.island .cm-list-depth-4 + .cm-markdown-image {
   --list-depth: 4;
 }
-.island .cm-list-depth-5 {
+.island .cm-list-depth-5,
+.island .cm-list-depth-5 + .cm-markdown-image {
   --list-depth: 5;
 }
-.island .cm-list-depth-6 {
+.island .cm-list-depth-6,
+.island .cm-list-depth-6 + .cm-markdown-image {
   --list-depth: 6;
 }
-.island .cm-list-depth-7 {
+.island .cm-list-depth-7,
+.island .cm-list-depth-7 + .cm-markdown-image {
   --list-depth: 7;
 }
 /* Unordered bullet glyph, replacing the literal dash, asterisk, or plus

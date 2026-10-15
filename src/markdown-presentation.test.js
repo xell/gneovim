@@ -1,3 +1,4 @@
+import { markdown } from "@codemirror/lang-markdown";
 import { EditorState, StateEffect } from "@codemirror/state";
 import { describe, expect, it, vi } from "vitest";
 import { createMarkdownPresentation } from "./markdown-presentation.js";
@@ -56,6 +57,7 @@ function fixture(doc, convertFileSrc = vi.fn((path) => `asset:${path}`)) {
   const state = EditorState.create({
     doc,
     extensions: [
+      markdown({ addKeymap: false }),
       presentation.markdownImageField,
       presentation.markdownTableField,
     ],
@@ -126,6 +128,67 @@ describe("createMarkdownPresentation", () => {
     expect(
       ranges(active.field(presentation.markdownImageField).deco),
     ).toEqual([{ from: 23, to: 23 }]);
+  });
+
+  it("presents images behind list, task, and quote markers", () => {
+    const { effects, presentation, state } = fixture(
+      [
+        "- a",
+        "  - ![](./a.png)",
+        "- [ ] ![t](./b.png)",
+        "1. ![o](./c.png)",
+        "",
+        "> ![q](./d.png)",
+        "> ![r](./e.png)",
+        "",
+        "  ![](./f.png)",
+      ].join("\n"),
+    );
+    const { doc } = state;
+    const at = (row, text) => doc.line(row + 1).from + doc.line(row + 1).text.indexOf(text);
+    const end = (row) => doc.line(row + 1).to;
+    const withBase = state.update({
+      effects: effects.setImageBase.of("/tmp/note.md"),
+    }).state;
+    expect(ranges(withBase.field(presentation.markdownImageField).deco)).toEqual([
+      { from: at(1, "!["), to: end(1) },
+      { from: end(1), to: end(1) },
+      { from: at(2, "!["), to: end(2) },
+      { from: end(2), to: end(2) },
+      { from: at(3, "!["), to: end(3) },
+      { from: end(3), to: end(3) },
+      { from: at(5, "!["), to: end(5) },
+      { from: end(5), to: end(5) },
+      { from: at(6, "!["), to: end(6) },
+      { from: end(6), to: end(6) },
+      // A bare indent still goes with the caption.
+      { from: doc.line(9).from, to: end(8) },
+      { from: end(8), to: end(8) },
+    ]);
+  });
+
+  it("leaves images in code blocks and running text alone", () => {
+    const { effects, presentation, state } = fixture(
+      [
+        "```",
+        "![a](./a.png)",
+        "```",
+        "",
+        "    ![b](./b.png)",
+        "",
+        "See ![c](./c.png)",
+        "",
+        "- ![d](./d.png) and more",
+        "- ![e](./e.png) ![f](./f.png)",
+        "- `![g](./g.png)`",
+      ].join("\n"),
+    );
+    const withBase = state.update({
+      effects: effects.setImageBase.of("/tmp/note.md"),
+    }).state;
+    expect(ranges(withBase.field(presentation.markdownImageField).deco)).toEqual(
+      [],
+    );
   });
 
   it("replaces Markdown tables but not tables inside code fences", () => {
