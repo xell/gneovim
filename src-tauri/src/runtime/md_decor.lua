@@ -1195,7 +1195,12 @@ end
 local function flush()
   pending = false
   last_flush = now_ms()
-  for _, win in ipairs(vim.api.nvim_list_wins()) do
+  -- Current tab only. Windows in other tabs are hidden, and with every tab
+  -- included a keystroke paid for all of them: measured live 2026-10-28,
+  -- 8 preview windows over 6 tabs (three of them 952-line notes) made one
+  -- flush 89ms against 1ms for the current window alone. Switching tabs
+  -- fires WinEnter, which schedules a flush of the new tab's windows.
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     if preview_on(win) then
       pcall(push, win)
     end
