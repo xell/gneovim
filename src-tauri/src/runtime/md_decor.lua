@@ -115,15 +115,64 @@ local function conceal_guard_row(win)
   return nil
 end
 
--- Whether a parsed tree reaches rows first..last at all. Markdown parses every
--- inline region as its own small markdown_inline tree, and only once a redraw
--- or a parse({ first, last }) has needed it, so the tree list grows with how
--- far the window has scrolled. Querying every one of them on each push made a
+-- The rows of first..last that `win` actually shows, as { {a, b}, ... }
+-- (0-based, inclusive, ascending). A closed fold shows its first line only,
+-- in Neovim and in the island alike (pure/fold-ranges.js), so the rest of it
+-- is left out. Without this a fully folded note decorated every one of its
+-- rows: all of them fit between topline and botline, so first..last was the
+-- whole buffer. Measured live 2026-10-28 on a 952-line note folded to its
+-- headings: 18ms and an 80KB payload a push, for text nobody could see.
+local function shown_segments(win, first, last)
+  local segs, a = {}, nil
+  vim.api.nvim_win_call(win, function()
+    local row = first
+    while row <= last do
+      local fc = vim.fn.foldclosed(row + 1)
+      if fc == -1 then
+        a = a or row
+        row = row + 1
+      else
+        if fc - 1 == row then
+          segs[#segs + 1] = { a or row, row }
+        elseif a then
+          segs[#segs + 1] = { a, row - 1 }
+        end
+        a = nil
+        row = vim.fn.foldclosedend(row + 1)
+      end
+    end
+  end)
+  if a then
+    segs[#segs + 1] = { a, last }
+  end
+  return segs
+end
+
+-- The shown segments a parsed tree reaches. Markdown parses every inline
+-- region as its own small markdown_inline tree, and only once a redraw or a
+-- parse({ first, last }) has needed it, so the tree list grows with how far
+-- the window has scrolled. Querying every one of them on each push made a
 -- held j stall for 100-250ms by line 2000 of a 3375-line note (2026-10-09);
 -- checking the root's rows first skips them for the price of a range read.
-local function tree_in_rows(tstree, first, last)
+local function tree_segments(tstree, segs)
   local sr, _, er = tstree:root():range()
-  return sr <= last and er >= first
+  local hit = {}
+  for _, s in ipairs(segs) do
+    if sr <= s[2] and er >= s[1] then
+      hit[#hit + 1] = s
+    end
+  end
+  return hit
+end
+
+-- Whether rows a..b overlap any shown segment.
+local function in_segments(segs, a, b)
+  for _, s in ipairs(segs) do
+    if a <= s[2] and b >= s[1] then
+      return true
+    end
+  end
+  return false
 end
 
 -- Inline conceal runs for `win` over the padded viewport, as
@@ -156,7 +205,7 @@ end
 -- touching the text is not noticed until the next edit, colorscheme or reload.
 local conceal_scan = {}
 
-local function collect_conceal(win, buf, first, last)
+local function collect_conceal(win, buf, first, last, segs)
   local cl = vim.wo[win].conceallevel
   if cl == 0 then
     return {}
@@ -194,9 +243,11 @@ local function collect_conceal(win, buf, first, last)
     conceal_scan[win] = cache
   end
   local missing = {}
-  for row = first, last do
-    if cache.rows[row] == nil then
-      missing[#missing + 1] = row
+  for _, s in ipairs(segs) do
+    for row = s[1], s[2] do
+      if cache.rows[row] == nil then
+        missing[#missing + 1] = row
+      end
     end
   end
   if #missing > 0 then
@@ -236,9 +287,11 @@ local function collect_conceal(win, buf, first, last)
       end
     end)
   end
-  for row = first, last do
-    for _, run in ipairs(cache.rows[row]) do
-      add(row, run[1], run[2], run[3])
+  for _, s in ipairs(segs) do
+    for row = s[1], s[2] do
+      for _, run in ipairs(cache.rows[row]) do
+        add(row, run[1], run[2], run[3])
+      end
     end
   end
   -- Keep the cache near the viewport so a long scroll cannot accumulate a row
@@ -263,8 +316,8 @@ local function collect_conceal(win, buf, first, last)
       local q = vim.treesitter.query.get(ltree:lang(), 'highlights')
       if q then
         for _, tstree in pairs(ltree:trees()) do
-          if tree_in_rows(tstree, first, last) then
-            for id, node, meta in q:iter_captures(tstree:root(), buf, first, last + 1) do
+          for _, s in ipairs(tree_segments(tstree, segs)) do
+            for id, node, meta in q:iter_captures(tstree:root(), buf, s[1], s[2] + 1) do
               local cc = (meta[id] and meta[id].conceal) or meta.conceal
               if cc ~= nil then
                 local sr, sc, er, ec = node:range()
@@ -390,36 +443,38 @@ local function first_content_col(text)
   return col
 end
 
-local function collect_list_depths(buf, root, first, last)
+local function collect_list_depths(buf, root, first, last, segs)
   local lists = {}
   pcall(function()
     local lines = vim.api.nvim_buf_get_lines(buf, first, last + 1, false)
-    for i, text in ipairs(lines) do
-      local row = first + i - 1
-      local col = first_content_col(text)
-      local node = root:descendant_for_range(row, col, row, col)
-      -- Whether this row actually *starts* an item, answered by the grammar
-      -- rather than by the row's own text. A row indented 4 columns past its
-      -- parent's content column is a lazy paragraph continuation inside that
-      -- parent (or, after a blank line, an indented code block), so
-      -- `        - item` is prose that merely looks like a marker: it gets the
-      -- parent's depth, correctly, but has no marker of its own. The client's
-      -- LIST_MARKER_PATTERN is a plain text regex and cannot tell the two
-      -- apart, so it used to hide that text and stamp a bullet on it, drawing
-      -- an over-indented pseudo-item as a sibling of the list it is really
-      -- buried in. Probed against quoted, tab-indented, checkbox, ordered,
-      -- `*` / `+`, bare (`-` alone) and 4-deep items: a genuine marker row
-      -- always resolves to a `list_marker_*` leaf at this point.
-      local marker = node ~= nil and node:type():find('^list_marker_') ~= nil
-      local depth = -1
-      while node do
-        if node:type() == 'list_item' then
-          depth = depth + 1
+    for _, s in ipairs(segs) do
+      for row = s[1], s[2] do
+        local text = lines[row - first + 1] or ''
+        local col = first_content_col(text)
+        local node = root:descendant_for_range(row, col, row, col)
+        -- Whether this row actually *starts* an item, answered by the grammar
+        -- rather than by the row's own text. A row indented 4 columns past its
+        -- parent's content column is a lazy paragraph continuation inside that
+        -- parent (or, after a blank line, an indented code block), so
+        -- `        - item` is prose that merely looks like a marker: it gets the
+        -- parent's depth, correctly, but has no marker of its own. The client's
+        -- LIST_MARKER_PATTERN is a plain text regex and cannot tell the two
+        -- apart, so it used to hide that text and stamp a bullet on it, drawing
+        -- an over-indented pseudo-item as a sibling of the list it is really
+        -- buried in. Probed against quoted, tab-indented, checkbox, ordered,
+        -- `*` / `+`, bare (`-` alone) and 4-deep items: a genuine marker row
+        -- always resolves to a `list_marker_*` leaf at this point.
+        local marker = node ~= nil and node:type():find('^list_marker_') ~= nil
+        local depth = -1
+        while node do
+          if node:type() == 'list_item' then
+            depth = depth + 1
+          end
+          node = node:parent()
         end
-        node = node:parent()
-      end
-      if depth >= 0 then
-        lists[#lists + 1] = { row, depth, marker }
+        if depth >= 0 then
+          lists[#lists + 1] = { row, depth, marker }
+        end
       end
     end
   end)
@@ -432,7 +487,7 @@ end
 -- collect_list_depths). Read straight off the base markdown tree by node
 -- *type*, not a highlights query: these are structural, not colour, and want
 -- the whole block's line range.
-local function collect_structure(buf, first, last)
+local function collect_structure(buf, first, last, segs)
   local heads, codes, quotes, lists, hrs = {}, {}, {}, {}, {}
   pcall(function()
     local parser = vim.treesitter.get_parser(buf, 'markdown')
@@ -449,8 +504,8 @@ local function collect_structure(buf, first, last)
     end
     local function walk(node)
       local sr, _, er, ec = node:range()
-      if sr > last or last_row(er, ec) < first then
-        return -- outside the padded viewport; prune the subtree
+      if not in_segments(segs, sr, last_row(er, ec)) then
+        return -- outside the padded viewport or folded away; prune the subtree
       end
       local t = node:type()
       if t == 'atx_heading' then
@@ -493,7 +548,7 @@ local function collect_structure(buf, first, last)
       end
     end
     walk(root)
-    lists = collect_list_depths(buf, root, first, last)
+    lists = collect_list_depths(buf, root, first, last, segs)
   end)
   return heads, codes, quotes, lists, hrs
 end
@@ -730,7 +785,7 @@ local function add_preview_matches(add, buf, first, last, preview)
   end
 end
 
-local function collect_highlights(win, buf, first, last, marks, search_pattern, incsearch, substitute, global)
+local function collect_highlights(win, buf, first, last, segs, marks, search_pattern, incsearch, substitute, global)
   local runs, seen, codespans, virt = {}, {}, {}, {}
   local function note(group, prio)
     if group then
@@ -754,8 +809,8 @@ local function collect_highlights(win, buf, first, last, marks, search_pattern, 
       local q = vim.treesitter.query.get(ltree:lang(), 'highlights')
       if q then
         for _, tstree in pairs(ltree:trees()) do
-          if tree_in_rows(tstree, first, last) then
-            for id, node in q:iter_captures(tstree:root(), buf, first, last + 1) do
+          for _, s in ipairs(tree_segments(tstree, segs)) do
+            for id, node in q:iter_captures(tstree:root(), buf, s[1], s[2] + 1) do
               local name = q.captures[id]
               if name and name:sub(1, 1) ~= '_' and not HL_SKIP[name] then
                 local sr, sc, er, ec = node:range()
@@ -977,6 +1032,15 @@ local function push(win)
     end
   end
   range_by_win[win] = { buf = buf, first = first, last = last }
+  -- Collectors skip rows inside closed folds. The highlight cache keys on
+  -- the shown rows too, so a `zo` that leaves first..last as it was still
+  -- decorates the rows it reveals.
+  local segs = shown_segments(win, first, last)
+  local seg_key = {}
+  for _, s in ipairs(segs) do
+    seg_key[#seg_key + 1] = s[1] .. '-' .. s[2]
+  end
+  seg_key = table.concat(seg_key, ',')
 
   -- Highlights are the heavy part (a treesitter walk); reuse the last
   -- snapshot when nothing collect_highlights reads has changed. `tick` and
@@ -1049,6 +1113,7 @@ local function push(win)
     and c.tick == tick
     and c.first == first
     and c.last == last
+    and c.seg_key == seg_key
     and c.search_pattern == search_pattern
     and c.incsearch_pattern == (incsearch and incsearch.pattern or nil)
     and c.incsearch_row == (incsearch and incsearch.row or nil)
@@ -1066,11 +1131,12 @@ local function push(win)
   then
     hl = c.value
   else
-    hl = collect_highlights(win, buf, first, last, marks, search_pattern, incsearch, substitute, global)
+    hl = collect_highlights(win, buf, first, last, segs, marks, search_pattern, incsearch, substitute, global)
     hl_by_win[win] = {
       tick = tick,
       first = first,
       last = last,
+      seg_key = seg_key,
       search_pattern = search_pattern,
       incsearch_pattern = incsearch and incsearch.pattern or nil,
       incsearch_row = incsearch and incsearch.row or nil,
@@ -1089,11 +1155,11 @@ local function push(win)
     }
   end
 
-  local heads, codes, quotes, lists, hrs = collect_structure(buf, first, last)
+  local heads, codes, quotes, lists, hrs = collect_structure(buf, first, last, segs)
   local payload = {
     first = first,
     last = last,
-    conceal = collect_conceal(win, buf, first, last),
+    conceal = collect_conceal(win, buf, first, last, segs),
     visual = collect_visual(win, first, last),
     folds = collect_folds(win, first, last),
     hl = hl,
