@@ -4,6 +4,7 @@ import {
   confirmIslandMode,
   extendsNativePending,
   initialRoutingState,
+  mappingIndex,
   routeIslandKey,
 } from "./island-key-routing.js";
 
@@ -28,6 +29,8 @@ function route(keys, options = {}) {
       exitsNormal: spec.exitsNormal ?? /^[iIaAoOsSCRvV]$/.test(spec.key),
       punctuation: spec.punctuation ?? null,
       now,
+      mapKey: "mapKey" in spec ? spec.mapKey : spec.key.length === 1 ? spec.key : null,
+      mappings: spec.mappings ?? options.mappings ?? null,
       event: spec.event ?? `event:${spec.key}`,
       vertical: spec.vertical ?? options.vertical ?? (() => ({ row: 5, col: 2 })),
       word: spec.word ?? options.word ?? (() => ({ row: 7, col: 0 })),
@@ -136,6 +139,71 @@ describe("routeIslandKey, Neovim is mid-command", () => {
   it("keeps a punctuation key native and raises the same protection", () => {
     const { types } = route([{ key: ";", punctuation: ";" }, "w"]);
     expect(types).toEqual(["forwardKeys", "forward"]);
+  });
+});
+
+// `,fg` used to do nothing until one more key: `,` raised the pending flag, `f`
+// let it decay, and the `g` was held as a possible gj/gk, so Neovim saw the
+// mapping's last key only when the next keystroke released it.
+describe("routeIslandKey, inside a user mapping", () => {
+  const comma = { key: ",", punctuation: "," };
+  const maps = (...lhs) => mappingIndex(lhs, 1000);
+
+  it("forwards the g that completes a mapping", () => {
+    expect(route([comma, "f", "g"], { mappings: maps(",fg") }).types).toEqual([
+      "forwardKeys",
+      "forward",
+      "forward",
+    ]);
+  });
+
+  it("forwards a g that only continues a longer mapping", () => {
+    expect(route([comma, "f", "g"], { mappings: maps(",fgx") }).types).toEqual([
+      "forwardKeys",
+      "forward",
+      "forward",
+    ]);
+  });
+
+  it("leaves a shifted G alone", () => {
+    const { types } = route([comma, "f", { key: "G", plain: false }], {
+      mappings: maps(",fg"),
+    });
+    expect(types).toEqual(["forwardKeys", "forward", "forward"]);
+  });
+
+  it("still holds a bare g for gj, even when a mapping starts with g", () => {
+    expect(route(["g", "j"], { mappings: maps(",fg", "gx") }).types).toEqual([
+      "holdG",
+      "cursor",
+    ]);
+  });
+
+  it("holds g again once the mapping has completed", () => {
+    expect(route([comma, "f", "g", "g", "j"], { mappings: maps(",fg") }).types).toEqual([
+      "forwardKeys",
+      "forward",
+      "forward",
+      "holdG",
+      "cursor",
+    ]);
+  });
+
+  it("keeps j and w native inside a mapping too", () => {
+    const mappings = maps(",fj", ",fw");
+    expect(route([comma, "f", "j"], { mappings }).types.at(2)).toBe("forward");
+    expect(route([comma, "f", "w"], { mappings }).types.at(2)).toBe("forward");
+  });
+
+  it("holds g when the keys before it are no mapping's prefix", () => {
+    expect(route([comma, "x", "g"], { mappings: maps(",fg") }).types.at(2)).toBe("holdG");
+  });
+
+  it("forgets the run after timeoutlen, as Neovim does", () => {
+    const { types } = route([comma, "f", { key: "g", gap: 1500 }], {
+      mappings: maps(",fg"),
+    });
+    expect(types.at(2)).toBe("holdG");
   });
 });
 

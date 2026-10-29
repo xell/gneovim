@@ -33,6 +33,7 @@ import {
 } from "./pure/keymap.js";
 import {
   confirmIslandMode,
+  mappingIndex,
   initialRoutingState,
   routeIslandKey,
 } from "./pure/island-key-routing.js";
@@ -1443,6 +1444,10 @@ addEventListener("error", (e) => {
       }
       nvim.refreshMarkdownDecorations().catch(() => {});
     }),
+    // runtime/normal_maps.lua: mapping left-hand sides for the key router.
+    nvim.on("normal_maps", (e) => {
+      normalMappings = mappingIndex(e.payload.lhs, e.payload.timeoutlen);
+    }),
     nvim.on("gone", (e) => showGone(e.payload)),
     // Rust pushes this on every tab-group membership change (gnv://<label>/tabbar);
     // see the tabbarVisible() pull below for this window's state as of boot.
@@ -1693,6 +1698,9 @@ let routingState = initialRoutingState();
 // pixel column that only verticalMotionTarget can produce, and both it and
 // applyReset own it.
 let islandVerticalGoal = null; // { island, column }
+// Neovim's Normal-mode mapping left-hand sides, pushed by
+// runtime/normal_maps.lua, so the router can keep the `g` of `,fg` native.
+let normalMappings = null;
 // Neovim has spoken about this island's mode; see confirmIslandMode in
 // src/pure/island-key-routing.js for which reports clear the latch. `fresh` is
 // true only for Neovim's own cursor notification, not a cached replay.
@@ -1805,6 +1813,8 @@ addEventListener("keydown", (e) => {
       // reports Process / keyCode 229 / a full-width character.
       punctuation: normalModeActive(isl) ? normalModePunctuation(e) : null,
       now: performance.now(),
+      mapKey: !e.metaKey && !e.ctrlKey && !e.altKey && e.key.length === 1 ? e.key : null,
+      mappings: normalMappings,
       event: e,
       vertical: (forward, count) => isl.verticalMotionTarget(forward, count),
       word: () => isl.semanticWordTarget(),

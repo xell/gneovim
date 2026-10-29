@@ -129,6 +129,12 @@ pub struct GuiOptPayload {
 }
 
 #[derive(Clone, Serialize)]
+pub struct NormalMapsPayload {
+    pub timeoutlen: i64,
+    pub lhs: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
 pub struct MdPreviewPayload {
     pub win: i64,
     pub state: i64,
@@ -219,6 +225,11 @@ pub enum BridgeEvent {
     /// that one (the automatic reload path). From `runtime/md_preview.lua`
     /// and `runtime/md_decor.lua`.
     ResyncIsland(i64),
+    /// The Normal-mode mapping left-hand sides (global plus the current
+    /// buffer's, printable ones only) and `timeoutlen`, so the island key
+    /// router can tell a `g` inside `<Leader>fg` from the start of a gj/gk.
+    /// From `runtime/normal_maps.lua`.
+    NormalMaps(NormalMapsPayload),
     /// `:OpenInNewGneovimTab` / `_G.OpenInNewGneovimTab()`: open a new gui-tab
     /// with its own nvim. `paths` open one Neovim tabpage each; `content` (for a
     /// `[No Name]` buffer being moved) seeds the initial buffer's lines.
@@ -551,6 +562,14 @@ mod redraw_wire_tests {
             .unwrap(),
             json!({"win": 1000, "json": "{}"})
         );
+        assert_eq!(
+            serde_json::to_value(NormalMapsPayload {
+                timeoutlen: 1000,
+                lhs: vec![",fg".into()],
+            })
+            .unwrap(),
+            json!({"timeoutlen": 1000, "lhs": [",fg"]})
+        );
     }
 
     #[test]
@@ -790,6 +809,21 @@ impl Handler for NvHandler {
                     .to_string();
                 self.shared
                     .send(BridgeEvent::MdDecor(MdDecorPayload { win, json }));
+            }
+            // [timeoutlen, [lhs, ...]]
+            "gnv_normal_maps" => {
+                let timeoutlen = args.first().and_then(Value::as_i64).unwrap_or(1000);
+                let lhs = args
+                    .get(1)
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.shared
+                    .send(BridgeEvent::NormalMaps(NormalMapsPayload { timeoutlen, lhs }));
             }
             "gnv_resync_island" => {
                 let win = args.first().and_then(Value::as_i64).unwrap_or(0);
@@ -1314,6 +1348,17 @@ pub async fn connect(
             .await
         {
             log::warn!("open_request.lua injection failed: {e}");
+        }
+
+        // Normal-mode mapping left-hand sides for the island key router, so a
+        // `g` inside `<Leader>fg` is not held back as a possible gj/gk. Its
+        // `gnv_normal_maps` rpcnotify must match `handle_notify`'s arm and
+        // `BridgeEvent::NormalMaps`.
+        if let Err(e) = nvim
+            .exec_lua(include_str!("runtime/normal_maps.lua"), vec![chan.into()])
+            .await
+        {
+            log::warn!("normal_maps.lua injection failed: {e}");
         }
 
         // Route a session-ending `ZZ` through the same Cmd+W close guard

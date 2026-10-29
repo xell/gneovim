@@ -34,6 +34,18 @@ export function extendsNativePending(key, wasPending) {
   );
 }
 
+// The Normal-mode mapping left-hand sides pushed by runtime/normal_maps.lua,
+// indexed for the router: `strict` holds every proper prefix of some lhs (Neovim
+// is still waiting after it), `exact` every whole lhs. `timeout` is
+// 'timeoutlen', after which Neovim gives up waiting on a prefix.
+export function mappingIndex(lhsList, timeout) {
+  const strict = new Set();
+  const exact = new Set(lhsList);
+  for (const lhs of lhsList)
+    for (let i = 1; i < lhs.length; i++) strict.add(lhs.slice(0, i));
+  return { strict, exact, timeout };
+}
+
 export function initialRoutingState() {
   return {
     // A Neovim multi-key command may be mid-parse, so the next key must stay
@@ -51,7 +63,26 @@ export function initialRoutingState() {
     // docs/markdown-island-visual-line-motion.md.
     modeUnconfirmed: null, // { island, at }
     accel: { direction: null, time: 0, count: 0 },
+    // The keys typed so far of what may be a user mapping (`,f` of `,fg`),
+    // empty when no mapping is in progress. `at` is the last key's time, since
+    // Neovim stops waiting on a prefix after 'timeoutlen'.
+    mapRun: { keys: "", at: 0 },
   };
+}
+
+// Advance the mapping run by one key and say whether this key lands inside a
+// mapping Neovim is already partway through. A key that merely starts a run
+// (`,` on its own) does not count: only a continuation does, which is what
+// keeps a plain `g` then `j` local even when some mapping begins with `g`.
+function stepMappingRun(mapRun, token, mappings, now) {
+  if (token == null || !mappings) return { mapRun: { keys: "", at: now }, inside: false };
+  const run = now - mapRun.at <= mappings.timeout ? mapRun.keys : "";
+  const candidate = run + token;
+  const inside = run !== "" && (mappings.strict.has(candidate) || mappings.exact.has(candidate));
+  let keys = "";
+  if (mappings.strict.has(candidate)) keys = candidate;
+  else if (!inside && mappings.strict.has(token)) keys = token;
+  return { mapRun: { keys, at: now }, inside };
 }
 
 // fast-cursor-move's hold-to-accelerate curve, as a pure step over `accel`.
@@ -97,6 +128,11 @@ function localNormal(island, mode, state) {
  * @param input.punctuation  normalModePunctuation's answer, or null when it
  *                           does not apply (not Normal mode, not punctuation)
  * @param input.now          performance.now()
+ * @param input.mapKey       the typed character as it would appear in a
+ *                           mapping's lhs (shift allowed), or null for named
+ *                           or Ctrl/Alt/Cmd keys
+ * @param input.mappings     mappingIndex(...) of Neovim's Normal-mode maps, or
+ *                           null before the first push
  * @param input.vertical     (forward, count) => {row, col} | null
  * @param input.word         () => {row, col} | null
  * @returns { state, verdict, releaseG }
@@ -130,6 +166,15 @@ export function routeIslandKey(input, state) {
   // the decay line must read this, not the live flag: getting that wrong cost
   // us `dgj` swallowing an operator and `5j` freezing the app.
   const hadNativePendingBefore = next.nativePending;
+
+  // Inside a user mapping (`g` of `,fg`), Neovim is waiting for this very key,
+  // so it must not be held as a gj/gk prefix or answered as a local motion.
+  // The punctuation path's own key is the token when it applies, since a CJK
+  // input source reports something else as event.key.
+  const mapToken = island && mode === "n" ? (punctuation ?? input.mapKey ?? null) : null;
+  const mapping = stepMappingRun(next.mapRun, mapToken, input.mappings, now);
+  next.mapRun = mapping.mapRun;
+  const insideMapping = mapping.inside;
 
   // A key that hands Normal mode to Insert/Replace/Select/Visual: distrust this
   // island's "n" until Neovim confirms, so keys typed inside that round trip
@@ -186,7 +231,13 @@ export function routeIslandKey(input, state) {
   // CJK and for rendered markdown, so answer it from the document instead --
   // unless a prefix is pending, in which case Neovim is mid-command and must
   // see the key itself (`dw`, `2w`, `"aw`).
-  if (localNormal(island, mode, next) && key === "w" && plain && !next.nativePending) {
+  if (
+    localNormal(island, mode, next) &&
+    key === "w" &&
+    plain &&
+    !next.nativePending &&
+    !insideMapping
+  ) {
     const target = input.word();
     if (target)
       return result(next, { type: "cursor", ...target }, releaseG, clearVerticalGoal);
@@ -196,16 +247,22 @@ export function routeIslandKey(input, state) {
   // only reset on `w`/Escape, so a `:` command left it raised for the rest of
   // the session and silently disabled both this and gj/gk.
   if (!extendsNativePending(key, next.nativePending)) next.nativePending = false;
+  // A key inside a user mapping is not an operator or count, even when it is
+  // `g` or `d`: the mapping run is what protects the keys after it, and a
+  // completed `,fg` must leave the next `g` free to start a gj/gk.
+  if (insideMapping) next.nativePending = false;
 
   // First key of a possible `gj`/`gk`: hold it rather than forward it, since
   // which g-command this is only becomes clear with the next key. A `g` that
-  // follows an operator or count (`dgj`, `"gj`) stays native.
+  // follows an operator or count (`dgj`, `"gj`) stays native, and so does one
+  // inside a user mapping (`,fg`).
   if (
     localNormal(island, mode, next) &&
     plain &&
     key === "g" &&
     !skipGEntry &&
-    !hadNativePendingBefore
+    !hadNativePendingBefore &&
+    !insideMapping
   ) {
     next.pendingZ = null;
     next.pendingG = { island, event: input.event };
@@ -224,6 +281,7 @@ export function routeIslandKey(input, state) {
     plain &&
     !gPrefixResolved &&
     !hadNativePendingBefore &&
+    !insideMapping &&
     (key === "j" || key === "k")
   ) {
     const stepped = accelStep(next.accel, key, now);

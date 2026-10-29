@@ -1456,6 +1456,7 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec, always_on_top: bo
                     BridgeEvent::WinGutter(p) => emit_app.emit(&ev("win_gutter"), p),
                     BridgeEvent::MdDecor(p) => emit_app.emit(&ev("md_decor"), p),
                     BridgeEvent::ResyncIsland(win) => emit_app.emit(&ev("resync_island"), win),
+                    BridgeEvent::NormalMaps(p) => emit_app.emit(&ev("normal_maps"), p),
                     // Spawn a new gui-tab (its own nvim) loaded with the
                     // requested files / carried-over text. Window creation +
                     // macOS tab grouping must run on the main thread.
