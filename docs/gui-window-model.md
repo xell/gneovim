@@ -65,7 +65,7 @@ A gui-window like any other, except pinned above the rest via Tauri's own always
 
 ## Switching gui-tabs by number
 
-Cmd+1 through Cmd+9 select the Nth gui-tab of the focused gui-window's tab group (Cmd+0 stays the font-size reset). Holding Cmd alone for a moment (`[window] tab_numbers_delay_ms`, default 350) shows each tab's number at the left edge of its native tab, where the hover close button sits, while the title stays centred; releasing Cmd hides them. Both live in the native shortcut monitor in `lib.rs` (`tab_numbers`), above the webview, so they never reach Neovim, whatever `forward_cmd_keys` says. The number is the tab's `NSWindowTab.accessoryView`, kept zero-sized because AppKit pins that view to the tab's trailing edge and a wide one pushes the title off centre; the label is drawn outside it.
+Cmd+1 through Cmd+9 select the Nth gui-tab of the focused gui-window's tab group (Cmd+0 stays the font-size reset). Holding Cmd alone for a moment (`[window] tab_numbers_delay_ms`, default 350) shows each tab's number at the left edge of its native tab, half an em right of the hover close button, while the title stays centred; releasing Cmd hides them. Both live in the native shortcut monitor in `lib.rs` (`tab_numbers`), above the webview, so they never reach Neovim, whatever `forward_cmd_keys` says. The number is the tab's `NSWindowTab.accessoryView`, kept zero-sized because AppKit pins that view to the tab's trailing edge and a wide one pushes the title off centre; the label is drawn outside it.
 
 ## What this does not change
 

@@ -314,8 +314,8 @@ fn install_native_shortcut_monitor(app_handle: AppHandle) {
 /// The number is the tab's `NSWindowTab.accessoryView`. AppKit puts that view
 /// at the tab's trailing edge and a wide one pushes the title off centre, so
 /// the accessory stays zero-sized and its label is drawn outside it (views do
-/// not clip to bounds by default), placed over the spot where the hover close
-/// button sits. The title keeps its own centring.
+/// not clip to bounds by default), placed half an em right of the spot where the
+/// hover close button sits. The title keeps its own centring.
 #[cfg(target_os = "macos")]
 mod tab_numbers {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -437,8 +437,11 @@ mod tab_numbers {
                 tab.layoutSubtreeIfNeeded();
                 // Place by centre: the tab view and the accessory may not
                 // agree on flippedness, which would skew a corner origin.
+                // Half an em right of the close button reads less cramped
+                // against the tab's rounded left edge.
+                let x = CLOSE_BUTTON_CENTRE + NSFont::smallSystemFontSize() / 2.0;
                 let centre = accessory.convertPoint_fromView(
-                    NSPoint::new(CLOSE_BUTTON_CENTRE, tab.bounds().size.height / 2.0),
+                    NSPoint::new(x, tab.bounds().size.height / 2.0),
                     Some(&tab),
                 );
                 let size = label.frame().size;
