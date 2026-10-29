@@ -63,6 +63,10 @@ Default: a new gui-window, a new nvim, started in the file's folder. The `[windo
 
 A gui-window like any other, except pinned above the rest via Tauri's own always-on-top support, opened from **File > New Always On Top Window** or a global keyboard shortcut (`[window] always_on_top_shortcut`, default `cmd+ctrl+space`) that works even while gneovim is not the active app. Only one exists at a time; the menu item greys out and the shortcut refocuses the existing one instead of creating another. See `docs/configuration.md`.
 
+## Switching gui-tabs by number
+
+Cmd+1 through Cmd+9 select the Nth gui-tab of the focused gui-window's tab group (Cmd+0 stays the font-size reset). Holding Cmd alone for a moment (`[window] tab_numbers_delay_ms`, default 350) shows each tab's number at the left edge of its native tab, where the hover close button sits, while the title stays centred; releasing Cmd hides them. Both live in the native shortcut monitor in `lib.rs` (`tab_numbers`), above the webview, so they never reach Neovim, whatever `forward_cmd_keys` says. The number is the tab's `NSWindowTab.accessoryView`, kept zero-sized because AppKit pins that view to the tab's trailing edge and a wide one pushes the title off centre; the label is drawn outside it.
+
 ## What this does not change
 
 The decoupling is transport only. The browser client (`src/main.js`) still talks to the bridge over the `/nvim` WebSocket and cannot tell whether the bridge reached nvim over stdio or a socket. Buffer-sync, cursor, cmdline mirror, active buffer following: all unchanged. See `docs/state-ownership-and-the-tmux-analogy.md` for the state ownership model this builds on.

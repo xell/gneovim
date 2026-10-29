@@ -41,6 +41,7 @@ block_ime_in_normal_mode = true
 # Forward Cmd+<key> to Neovim as <D-...>. Default false: on macOS Cmd is the
 # app/menu modifier, and forwarding it collides with menu shortcuts (Cmd+N, ...).
 # Enable if you have <D-...> mappings.
+# Cmd+1..9 never reach Neovim either way: they select gui-tabs.
 forward_cmd_keys = false
 
 [window]
@@ -86,6 +87,10 @@ focus_normal_window_shortcut = "cmd+shift+j"
 # always_on_top_shortcut. An unrecognised value logs a warning and falls back
 # to the default.
 zen_mode_shortcut = "cmd+alt+z"
+# How long, in milliseconds, Cmd must be held alone before each gui-tab shows
+# its Cmd+1..9 number at its left edge. 0 shows them at once, but then they
+# flash on every Cmd shortcut (Cmd+S, Cmd+W, ...). Default 350.
+tab_numbers_delay_ms = 350
 
 [markdown]
 # Whether a filetype=markdown window renders as a CodeMirror live-preview

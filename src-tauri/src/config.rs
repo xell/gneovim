@@ -127,6 +127,11 @@ pub struct Window {
     /// `always_on_top_shortcut`. Default "cmd+alt+z". An unrecognised value
     /// logs a warning and falls back to the default.
     pub zen_mode_shortcut: Option<String>,
+
+    /// How long, in milliseconds, Cmd must be held alone before each gui-tab
+    /// shows its Cmd+1..9 number. 0 shows them at once, at the cost of a
+    /// flash on every Cmd shortcut. Default 350.
+    pub tab_numbers_delay_ms: u64,
 }
 
 impl Default for Window {
@@ -138,6 +143,7 @@ impl Default for Window {
             always_on_top_shortcut: None,
             focus_normal_window_shortcut: None,
             zen_mode_shortcut: None,
+            tab_numbers_delay_ms: 350,
         }
     }
 }

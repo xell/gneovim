@@ -255,13 +255,17 @@ fn sync_zen_menu_item(app: &AppHandle, label: &str) {
 /// `keyToNvim`. Globe-Control uses `performKeyEquivalent:`, with the menu as
 /// its whitelist. Every other event continues through to the focused surface
 /// unchanged.
+///
+/// The same monitor also owns the gui-tab number shortcuts (Cmd+1..9) and
+/// sees modifier changes for the numbers shown while Cmd is held; see
+/// `tab_numbers`.
 #[cfg(target_os = "macos")]
-fn install_native_shortcut_monitor() {
+fn install_native_shortcut_monitor(app_handle: AppHandle) {
     use std::ptr;
 
     use block2::RcBlock;
     use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSEvent, NSEventMask, NSEventModifierFlags};
+    use objc2_app_kit::{NSApplication, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType};
 
     let monitor = RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
         // The monitor runs on AppKit's main thread. A local monitor sees the
@@ -269,6 +273,13 @@ fn install_native_shortcut_monitor() {
         // consume an event that the Window menu handled.
         let event = unsafe { event.as_ref() };
         let flags = event.modifierFlags();
+        if event.r#type() == NSEventType::FlagsChanged {
+            tab_numbers::modifiers_changed(&app_handle, flags);
+            return event as *const NSEvent as *mut NSEvent;
+        }
+        if tab_numbers::handle_key_down(event) {
+            return ptr::null_mut();
+        }
         let window_shortcut =
             flags.contains(NSEventModifierFlags::Function | NSEventModifierFlags::Control);
         if window_shortcut {
@@ -287,12 +298,193 @@ fn install_native_shortcut_monitor() {
     // leave every shortcut to WKWebView.
     let token = unsafe {
         NSEvent::addLocalMonitorForEventsMatchingMask_handler(
-            NSEventMask::KeyDown,
+            NSEventMask::KeyDown | NSEventMask::FlagsChanged,
             &monitor,
         )
     };
     std::mem::forget(token);
     log::info!("native shortcut monitor installed");
+}
+
+/// Cmd+1..9 selects the Nth gui-tab of the focused gui-window's tab group,
+/// and holding Cmd alone for a moment (`[window] tab_numbers_delay_ms`) shows each tab's number at the left
+/// edge of the native tab, gone again on release. Cmd+0 stays the webview's
+/// font-size reset.
+///
+/// The number is the tab's `NSWindowTab.accessoryView`. AppKit puts that view
+/// at the tab's trailing edge and a wide one pushes the title off centre, so
+/// the accessory stays zero-sized and its label is drawn outside it (views do
+/// not clip to bounds by default), placed over the spot where the hover close
+/// button sits. The title keeps its own centring.
+#[cfg(target_os = "macos")]
+mod tab_numbers {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    use objc2::{rc::Retained, MainThreadMarker};
+    use objc2_app_kit::{
+        NSApplication, NSColor, NSEvent, NSEventModifierFlags, NSFont, NSFontWeightMedium,
+        NSTextField, NSView, NSWindow,
+    };
+    use objc2_foundation::{NSPoint, NSString};
+    use tauri::AppHandle;
+
+    /// Horizontal centre of the hover close button, from the tab's own left
+    /// edge (measured on macOS 26/27).
+    const CLOSE_BUTTON_CENTRE: f64 = 13.0;
+
+    /// Bumped on every modifier change and non-digit Cmd chord; a pending
+    /// show only fires if nothing happened since it was scheduled.
+    static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+    fn cmd_only(flags: NSEventModifierFlags) -> bool {
+        let chord = NSEventModifierFlags::Command
+            | NSEventModifierFlags::Control
+            | NSEventModifierFlags::Option
+            | NSEventModifierFlags::Shift;
+        flags & chord == NSEventModifierFlags::Command
+    }
+
+    /// Physical number-row keys, so layouts that need Shift for digits
+    /// (AZERTY) still get Cmd+<key in the 1 position>.
+    fn digit(key_code: u16) -> Option<usize> {
+        Some(match key_code {
+            0x12 => 1,
+            0x13 => 2,
+            0x14 => 3,
+            0x15 => 4,
+            0x17 => 5,
+            0x16 => 6,
+            0x1A => 7,
+            0x1C => 8,
+            0x19 => 9,
+            _ => return None,
+        })
+    }
+
+    pub fn modifiers_changed(app: &AppHandle, flags: NSEventModifierFlags) {
+        let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+        if !cmd_only(flags) {
+            hide();
+            return;
+        }
+        // A short hold first, so a plain Cmd+S or Cmd+W does not flash the
+        // numbers across the tab bar.
+        let delay = Duration::from_millis(crate::config::get().window.tab_numbers_delay_ms);
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = app.run_on_main_thread(move || {
+                if GENERATION.load(Ordering::SeqCst) == generation {
+                    show();
+                }
+            });
+        });
+    }
+
+    /// Cmd+1..9: select that tab and consume the key (true). Any other Cmd
+    /// chord cancels a pending show, as Cmd was a modifier, not a hold.
+    pub fn handle_key_down(event: &NSEvent) -> bool {
+        if !cmd_only(event.modifierFlags()) {
+            return false;
+        }
+        let Some(n) = digit(event.keyCode()) else {
+            GENERATION.fetch_add(1, Ordering::SeqCst);
+            hide();
+            return false;
+        };
+        let Some(mtm) = MainThreadMarker::new() else { return false };
+        let Some(key) = NSApplication::sharedApplication(mtm).keyWindow() else {
+            return true;
+        };
+        let Some(group) = key.tabGroup() else { return true };
+        let windows = group.windows();
+        if n <= windows.count() {
+            let target = windows.objectAtIndex(n - 1);
+            group.setSelectedWindow(Some(&target));
+            target.makeKeyAndOrderFront(None);
+        }
+        true
+    }
+
+    /// Re-check after focus moves: a Cmd released while another app was
+    /// active never reaches this monitor, so drop numbers left showing.
+    pub fn refresh() {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        if !NSApplication::sharedApplication(mtm).isActive()
+            || !cmd_only(NSEvent::modifierFlags_class())
+        {
+            hide();
+        }
+    }
+
+    fn show() {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let app = NSApplication::sharedApplication(mtm);
+        if !app.isActive() || !cmd_only(NSEvent::modifierFlags_class()) {
+            return;
+        }
+        let Some(group) = app.keyWindow().and_then(|w| w.tabGroup()) else { return };
+        if !group.isTabBarVisible() {
+            return;
+        }
+        for (i, window) in group.windows().iter().enumerate().take(9) {
+            let (accessory, label) = label_of(&window, mtm);
+            label.setStringValue(&NSString::from_str(&(i + 1).to_string()));
+            label.sizeToFit();
+            // SAFETY: a plain view-hierarchy read on the main thread.
+            if let Some(tab) = unsafe { accessory.superview() } {
+                tab.layoutSubtreeIfNeeded();
+                // Place by centre: the tab view and the accessory may not
+                // agree on flippedness, which would skew a corner origin.
+                let centre = accessory.convertPoint_fromView(
+                    NSPoint::new(CLOSE_BUTTON_CENTRE, tab.bounds().size.height / 2.0),
+                    Some(&tab),
+                );
+                let size = label.frame().size;
+                label.setFrameOrigin(NSPoint::new(
+                    centre.x - size.width / 2.0,
+                    centre.y - size.height / 2.0,
+                ));
+            }
+            label.setHidden(false);
+        }
+    }
+
+    fn hide() {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        for window in NSApplication::sharedApplication(mtm).windows().iter() {
+            if let Some(label) = existing_label(&window, mtm) {
+                label.setHidden(true);
+            }
+        }
+    }
+
+    fn existing_label(window: &NSWindow, mtm: MainThreadMarker) -> Option<Retained<NSTextField>> {
+        let accessory = window.tab().accessoryView(mtm)?;
+        accessory.subviews().firstObject()?.downcast::<NSTextField>().ok()
+    }
+
+    /// This tab's number label, installing the zero-sized accessory that
+    /// holds it on first use. It then stays installed, hidden between holds.
+    fn label_of(window: &NSWindow, mtm: MainThreadMarker) -> (Retained<NSView>, Retained<NSTextField>) {
+        if let (Some(accessory), Some(label)) =
+            (window.tab().accessoryView(mtm), existing_label(window, mtm))
+        {
+            return (accessory, label);
+        }
+        let accessory = NSView::new(mtm);
+        let label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+        label.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(
+            NSFont::smallSystemFontSize(),
+            unsafe { NSFontWeightMedium },
+        )));
+        label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        label.setHidden(true);
+        accessory.addSubview(&label);
+        window.tab().setAccessoryView(Some(&accessory));
+        (accessory, label)
+    }
 }
 
 /// Withhold a WKWebView's web content from macOS Accessibility on request.
@@ -2485,7 +2677,10 @@ pub fn run() {
                 }
                 sync_zen_menu_item(window.app_handle(), window.label());
                 #[cfg(target_os = "macos")]
-                lookup_hotkey::set_active(true);
+                {
+                    lookup_hotkey::set_active(true);
+                    let _ = window.run_on_main_thread(tab_numbers::refresh);
+                }
                 // Poke the webview over the same IPC path that gnv://.../grid
                 // uses (which is why V+move repaints a revealed tab).
                 let _ = window
@@ -2512,6 +2707,9 @@ pub fn run() {
                 // process-global shortcut. Release it when Gneovim loses
                 // focus so macOS and other applications keep their binding.
                 lookup_hotkey::set_active(false);
+                // Queued, so it runs once AppKit has settled whether the app
+                // itself went inactive (Cmd+Tab) or just another tab took key.
+                let _ = window.run_on_main_thread(tab_numbers::refresh);
             }
             _ => {}
         })
@@ -2519,7 +2717,7 @@ pub fn run() {
             spawn_bridge(app.handle().clone(), "main".to_string(), OpenSpec::default(), false);
             #[cfg(target_os = "macos")]
             {
-                install_native_shortcut_monitor();
+                install_native_shortcut_monitor(app.handle().clone());
                 webview_accessibility::install();
                 lookup_hotkey::install(app.handle().clone());
                 always_on_top_hotkey::install(app.handle().clone());

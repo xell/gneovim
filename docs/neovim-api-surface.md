@@ -124,7 +124,7 @@ Every key is optional; see `configuration.md` for the file's location, reload po
 
 - `option_is_meta` (bool, `true`) — macOS Option reaches Neovim as `<M-...>` instead of composing an accented character.
 - `block_ime_in_normal_mode` (bool, `true`) — a markdown island is non-editable outside insert/replace mode, so an IME cannot hijack a normal-mode key.
-- `forward_cmd_keys` (bool, `false`) — forward Cmd+`<key>` to Neovim as `<D-...>`.
+- `forward_cmd_keys` (bool, `false`) — forward Cmd+`<key>` to Neovim as `<D-...>`. Cmd+1..9 are never forwarded: they select gui-tabs.
 
 ### `[window]`
 
@@ -134,6 +134,7 @@ Every key is optional; see `configuration.md` for the file's location, reload po
 - `always_on_top_shortcut` (string, `"cmd+ctrl+space"`) — global keyboard shortcut that opens, or brings to the front, the always-on-top window (`File > New Always On Top Window`); see `g:gneovim_aot_window` above.
 - `focus_normal_window_shortcut` (string, `"cmd+shift+j"`) — local (app-focus-only) keyboard shortcut that focuses the frontmost normal (non-always-on-top) gui-window; the way back out when the always-on-top window has focus and `Cmd+\`` has nothing to cycle to.
 - `zen_mode_shortcut` (string, `"cmd+alt+z"`) — local keyboard shortcut for View > Zen Mode, which hides the focused gui-window's native tab bar and traffic lights; see `:GneovimZenOn` and `User GneovimZenEnter` above.
+- `tab_numbers_delay_ms` (number, `350`) — how long Cmd must be held alone before each gui-tab shows its Cmd+1..9 number; `0` shows them at once.
 
 ### `[markdown]`
 
