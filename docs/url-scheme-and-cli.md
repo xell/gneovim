@@ -76,6 +76,8 @@ With no `User GneovimAction` handler at all, the action shows a "no handler" war
 
 From a shell, `gneovim --action inbox`; from anywhere else (a BetterTouchTool or Shortcuts action, say), `open "gneovim://action/inbox"`.
 
+To try actions by hand, `docs/hello-action.lua` is a ready-made `hello` handler that shows a notification naming the receiving Neovim's pid; its header says how to link it into your config. `src-tauri/tests/action.rs` checks the same path automatically: the action waits for the UI, and a `nested = true` handler's new window reaches the GUI.
+
 ## The `gneovim` command
 
 The script ships inside the app bundle. Install it once with:
