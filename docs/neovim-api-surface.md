@@ -4,7 +4,7 @@ This document specifies the complete set of user commands, autocmd events, and v
 
 ## Scope
 
-Everything listed here is injected by `bridge::connect` via `exec_lua(include_str!(...))` from these files: `src-tauri/src/runtime/md_preview.lua`, `src-tauri/src/runtime/md_decor.lua`, `src-tauri/src/runtime/open_in_new_tab.lua`, and `src-tauri/src/runtime/open_request.lua`. These files carry a header comment stating they are GUI protocol glue, not a user plugin, so this document draws the line explicitly: anything a user's init file, statusline, or autocmd could reasonably reference is in scope; the RPC notification channel between the embedded Neovim and the Tauri shell (`gnv_md_preview`, `gnv_cursor`, `gnv_win_gutter`, and similar `rpcnotify` payload names) is not, since it exists only between `bridge.rs` and these Lua files and is never meant to be read from Neovim configuration. `config.toml` options are enumerated below for reference, but `configuration.md` is the authoritative doc for loading and behaviour detail.
+Everything listed here is injected by `bridge::connect` via `exec_lua(include_str!(...))` from these files: `src-tauri/src/runtime/md_preview.lua`, `src-tauri/src/runtime/md_decor.lua`, `src-tauri/src/runtime/open_in_new_tab.lua`, `src-tauri/src/runtime/open_request.lua`, `src-tauri/src/runtime/zen.lua`, and `src-tauri/src/runtime/action.lua`. These files carry a header comment stating they are GUI protocol glue, not a user plugin, so this document draws the line explicitly: anything a user's init file, statusline, or autocmd could reasonably reference is in scope; the RPC notification channel between the embedded Neovim and the Tauri shell (`gnv_md_preview`, `gnv_cursor`, `gnv_win_gutter`, and similar `rpcnotify` payload names) is not, since it exists only between `bridge.rs` and these Lua files and is never meant to be read from Neovim configuration. `config.toml` options are enumerated below for reference, but `configuration.md` is the authoritative doc for loading and behaviour detail.
 
 Each item below is a stable, intentional contract. Unlisted globals, augroup names, or buffer variables that happen to appear in the source are implementation detail and may change without notice.
 
@@ -52,6 +52,24 @@ vim.api.nvim_create_autocmd("User", { pattern = "GneovimZenLeave", nested = true
 ```
 
 Use `nested = true` if the handler opens, closes or switches windows, tabpages or buffers (a `:tab split`, say). Neovim does not run autocmds triggered inside another autocmd's callback unless it is nested, and gneovim learns about a new window through its `WinNew` / `WinEnter` / `BufWinEnter` autocmds: without it, a new markdown window opened by the handler renders as a plain grid instead of a live preview island.
+
+### `User GneovimAction`
+
+Fired for a `gneovim://action/<name>` URL or `gneovim --action <name>` (see `url-scheme-and-cli.md`), in the gui-window that received it: a normal window on the current macOS Space, or a newly spawned one. `event.data.name` is the action's name, a string of letters, digits, `_` and `-`; there is nothing else, since any web page can fire the URL and so it never carries arguments. What the action does is entirely up to the handler:
+
+```lua
+vim.api.nvim_create_autocmd("User", {
+  pattern = "GneovimAction",
+  nested = true,
+  callback = function(ev)
+    if ev.data.name == "inbox" then require("inbox").add() end
+  end,
+})
+```
+
+An action almost always opens or switches to a buffer, so `nested = true` matters here for the same reason as for the zen events above: without it, a markdown file the handler opens shows as a plain grid instead of an island. Ignore names you do not recognise; several handlers can share the event.
+
+The event fires on a later main loop tick, after this Neovim has finished starting and the GUI has attached to it, so on a cold launch it waits for your config to load and for the window to be on screen (a `vim.notify` from the handler is visible). Register the handler at startup, from `init.lua` or a `plugin/` file: one defined by a lazily loaded plugin may not exist yet. If no `User GneovimAction` handler exists at all, gneovim shows a warning naming the action and does nothing else. An error inside the handler is reported by Neovim as for any autocmd ("Error in User Autocommands for "GneovimAction"").
 
 ### `User GneovimMarkdownPreviewChanged`
 
@@ -158,4 +176,4 @@ Gneovim also calls `nvim_set_client_info("gneovim", {major, minor, patch}, "ui",
 
 ## Stability
 
-The commands, the `User GneovimMarkdownPreviewChanged` event and its data shape, and the three window variables are the parts of this surface most directly exercised by the plugin integration examples in `markdown-live-preview-plugin-integration.md`, and are treated as a public contract: changing them is a breaking change for any configuration built against this document. The global variables and client info are additive and expected to remain stable as well. Everything named in the Scope section as internal detail (RPC payload names, augroup names) is free to change independently of this document. The `config.toml` enumeration above is a reference snapshot, not a contract: keys, defaults, and accepted values may change; `configuration.md` reflects the current behaviour.
+The commands, the `User GneovimMarkdownPreviewChanged` event and its data shape, and the three window variables are the parts of this surface most directly exercised by the plugin integration examples in `markdown-live-preview-plugin-integration.md`, and are treated as a public contract: changing them is a breaking change for any configuration built against this document. The `User GneovimAction` event and its `data.name` are a public contract in the same way, together with the `gneovim://action/<name>` URL that fires them, since outside triggers (a keyboard shortcut tool, Shortcuts) call actions by name. The global variables and client info are additive and expected to remain stable as well. Everything named in the Scope section as internal detail (RPC payload names, augroup names) is free to change independently of this document. The `config.toml` enumeration above is a reference snapshot, not a contract: keys, defaults, and accepted values may change; `configuration.md` reflects the current behaviour.

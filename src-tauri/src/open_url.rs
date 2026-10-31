@@ -1,16 +1,19 @@
-//! The `gneovim://` URL scheme: parse an incoming URL into an [`OpenRequest`].
+//! The `gneovim://` URL scheme: parse an incoming URL into a [`Request`].
 //!
-//! One action for now, VS Code shaped so editor-link templates from other tools
-//! (`vscode://file/__FILE__:__LINE__`) work by swapping the scheme name:
+//! Opening a file is VS Code shaped, so editor-link templates from other tools
+//! (`vscode://file/__FILE__:__LINE__`) work by swapping the scheme name. An
+//! action fires the user's `User GneovimAction` handler for `<name>`:
 //!
 //! ```text
 //! gneovim://file/<abs path>[:<line>[:<col>]]
 //!     [?target=window|tab|nvim-tab][&cwd=<abs dir>][&readonly=1]
 //!     [&swap=reveal|readonly|takeover|ask]
+//! gneovim://action/<name>
 //! ```
 //!
 //! Any web page or app can fire a URL, so this only ever carries declarative
-//! parameters: never an Ex command or Lua. The `gneovim` CLI shim (bundled at
+//! parameters: never an Ex command or Lua, and an action only a name, never
+//! arguments. The `gneovim` CLI shim (bundled at
 //! `Contents/Resources/bin/gneovim`) builds these URLs from Neovim style args.
 
 use crate::config::OpenTarget;
@@ -103,17 +106,45 @@ impl OpenRequest {
     }
 }
 
+/// A parsed `gneovim://` URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Request {
+    /// `gneovim://file/...`
+    Open(OpenRequest),
+    /// `gneovim://action/<name>`: the name, `[A-Za-z0-9_-]+`.
+    Action(String),
+}
+
 /// Parse a `gneovim://` URL. `Err` explains why it was rejected (logged by the
 /// caller); unknown query parameters are ignored, not rejected.
-pub fn parse(url: &Url) -> Result<OpenRequest, String> {
+pub fn parse(url: &Url) -> Result<Request, String> {
     if url.scheme() != "gneovim" {
         return Err(format!("not a gneovim:// URL: {url}"));
     }
     match url.host_str() {
-        Some("file") => {}
-        other => return Err(format!("unknown action {other:?} in {url}")),
+        Some("file") => parse_file(url).map(Request::Open),
+        Some("action") => parse_action(url).map(Request::Action),
+        other => Err(format!("unknown host {other:?} in {url}")),
     }
+}
 
+/// `gneovim://action/<name>`. Checked on the still percent-encoded path, so
+/// an encoded `/`, space or anything else can never make it into the name.
+/// Dot segments are resolved by the URL parser before this sees the path:
+/// `action/..` arrives as `/` (rejected), `action/a/../b` as `/b`.
+fn parse_action(url: &Url) -> Result<String, String> {
+    let name = url.path().strip_prefix('/').unwrap_or_default();
+    let valid = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
+    if name.is_empty() || !name.bytes().all(valid) {
+        return Err(format!("bad action name in {url}"));
+    }
+    for (k, v) in url.query_pairs() {
+        log::info!("gneovim://: ignoring parameter {k}={v}");
+    }
+    Ok(name.to_string())
+}
+
+fn parse_file(url: &Url) -> Result<OpenRequest, String> {
     // `url.path()` is still percent-encoded, so a `:` that is really part of
     // the file name arrives as `%3A` and is never mistaken for `:line`.
     let raw = url.path();
@@ -186,6 +217,13 @@ mod tests {
     use super::*;
 
     fn p(s: &str) -> Result<OpenRequest, String> {
+        match parse(&Url::parse(s).unwrap())? {
+            Request::Open(r) => Ok(r),
+            other => Err(format!("not a file open: {other:?}")),
+        }
+    }
+
+    fn action(s: &str) -> Result<Request, String> {
         parse(&Url::parse(s).unwrap())
     }
 
@@ -274,5 +312,41 @@ mod tests {
         assert!(p("gneovim://file/").is_err());
         assert!(p("gneovim://file/a.md?swap=nuke").is_err());
         assert!(p("gneovim://file/a.md?target=elsewhere").is_err());
+    }
+
+    #[test]
+    fn action_name() {
+        assert_eq!(action("gneovim://action/inbox"), Ok(Request::Action("inbox".into())));
+        assert_eq!(
+            action("gneovim://action/Add_to-Inbox2"),
+            Ok(Request::Action("Add_to-Inbox2".into()))
+        );
+    }
+
+    #[test]
+    fn action_query_parameters_are_ignored() {
+        assert_eq!(
+            action("gneovim://action/inbox?text=hello&cmd=qa!"),
+            Ok(Request::Action("inbox".into()))
+        );
+    }
+
+    #[test]
+    fn rejects_bad_action_names() {
+        assert!(action("gneovim://action").is_err());
+        assert!(action("gneovim://action/").is_err());
+        assert!(action("gneovim://action/a/b").is_err());
+        assert!(action("gneovim://action/inbox/").is_err());
+        assert!(action("gneovim://action/in%20box").is_err());
+        assert!(action("gneovim://action/in%2Fbox").is_err());
+        assert!(action("gneovim://action/..").is_err());
+        assert!(action("gneovim://action/a.b").is_err());
+        assert!(action("gneovim://action/%E4%B8%AD").is_err());
+    }
+
+    #[test]
+    fn cli_shim_action_output() {
+        // Exactly what resources/bin/gneovim emits for `gneovim --action inbox`.
+        assert_eq!(action("gneovim://action/inbox"), Ok(Request::Action("inbox".into())));
     }
 }

@@ -57,9 +57,14 @@ confirm_close = true
 # association) lands. Default "window".
 #   "window"   -> a new gui-window with its own Neovim
 #   "tab"      -> a new gui-tab (a macOS merged tab) with its own Neovim
-#   "nvim-tab" -> a new Neovim tabpage in the last-focused gui-window,
+#   "nvim-tab" -> a new Neovim tabpage in the receiving gui-window,
 #                 reusing its Neovim (no new window or process)
-# "nvim-tab" falls back to "window" when no gui-window is ready to receive the
+# The receiving gui-window (the one "nvim-tab" opens in, "tab" joins, or an
+# untouched one the file takes over) is always on the macOS Space you are
+# looking at: the last-focused one if it is there, else another normal one
+# there, never the always-on-top window. With none on this Space, "nvim-tab"
+# and "tab" fall back to "window", which opens on this Space. "nvim-tab" also
+# falls back when that window's Neovim is not ready to receive the
 # file. Multiple files open as that many windows / gui-tabs, or as that many
 # Neovim tabpages in the one window. A file already open in some gui-window is
 # revealed there instead, and an untouched window takes the file instead of a

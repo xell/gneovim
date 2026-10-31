@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use bridge::{Bridge, BridgeEvent, FileOpen, OpenSpec, Region, ResetPayload};
 use config::OpenTarget;
-use open_url::{OpenRequest, SwapPolicy};
+use open_url::{OpenRequest, Request, SwapPolicy};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::{
     async_runtime, AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
@@ -777,7 +777,7 @@ mod lookup_hotkey {
             return NO_ERR;
         }
         if let Some(app) = APP.get() {
-            if let Some(label) = super::recipient_window(app) {
+            if let Some(label) = super::last_focused_window(app) {
                 log::info!("look up: Carbon shortcut selected for {label}");
                 let _ = app.emit(&format!("gnv://{label}/look_up"), ());
             }
@@ -1532,32 +1532,21 @@ fn join_all_spaces(win: &tauri::WebviewWindow) {
     ns_window.setCollectionBehavior(behavior);
 }
 
-/// Create a gui-window with its own nvim. `as_tab` adds it to the focused
-/// window's tab group (macOS); otherwise it is a standalone window. `open`
-/// carries any files / text the new nvim should load (`:OpenInNewGneovimTab`).
-/// `always_on_top` pins it above other windows (Tauri's own API; see
-/// `open_or_focus_aot_window`) and, on macOS, restores its remembered frame
-/// instead of the usual default size.
+/// Create a gui-window with its own nvim. `tab_of` adds it to that window's
+/// tab group (macOS; usually [`last_focused_window`]); otherwise, or if that
+/// window is gone, it is a standalone window. `open` carries any files / text
+/// the new nvim should load (`:OpenInNewGneovimTab`). `always_on_top` pins it
+/// above other windows (Tauri's own API; see `open_or_focus_aot_window`) and,
+/// on macOS, restores its remembered frame instead of the usual default size.
 fn spawn_window(
     app: &AppHandle,
-    as_tab: bool,
+    tab_of: Option<String>,
     open: OpenSpec,
     always_on_top: bool,
 ) -> Option<String> {
-    let _ = as_tab;
+    let _ = &tab_of;
     #[cfg(target_os = "macos")]
-    let parent: Option<tauri::WebviewWindow> = if as_tab {
-        let last = app.state::<AppState>().last_focused.lock().unwrap().clone();
-        last.and_then(|l| app.get_webview_window(&l))
-            .or_else(|| {
-                app.webview_windows()
-                    .into_values()
-                    .find(|w| w.is_focused().unwrap_or(false))
-            })
-            .or_else(|| app.webview_windows().into_values().next())
-    } else {
-        None
-    };
+    let parent: Option<tauri::WebviewWindow> = tab_of.and_then(|l| app.get_webview_window(&l));
 
     let label = next_label();
     let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App("index.html".into()))
@@ -1568,7 +1557,7 @@ fn spawn_window(
     #[cfg(target_os = "macos")]
     let builder = builder
         .tabbing_identifier("gneovim")
-        .visible(!as_tab && !always_on_top)
+        .visible(parent.is_none() && !always_on_top)
         .title_bar_style(tauri::TitleBarStyle::Overlay);
 
     let win = match builder.build() {
@@ -1587,19 +1576,11 @@ fn spawn_window(
         let w = win.clone();
         let tab_app = app.clone();
         let _ = win.run_on_main_thread(move || {
-            if as_tab {
-                match &parent {
-                    Some(p) => {
-                        log::info!("new tab: grouping with {}", p.label());
-                        add_as_tab(p, &w);
-                        let _ = w.show();
-                        sync_tab_bars(&tab_app);
-                    }
-                    None => {
-                        log::warn!("new tab: no parent window, opening standalone");
-                        let _ = w.show();
-                    }
-                }
+            if let Some(p) = &parent {
+                log::info!("new tab: grouping with {}", p.label());
+                add_as_tab(p, &w);
+                let _ = w.show();
+                sync_tab_bars(&tab_app);
             } else if always_on_top {
                 restore_and_autosave_frame(&w, AOT_FRAME_AUTOSAVE_NAME);
                 join_all_spaces(&w);
@@ -1660,7 +1641,7 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec, always_on_top: bo
                         emit_app.run_on_main_thread(move || {
                             spawn_window(
                                 &tab_app,
-                                true,
+                                last_focused_window(&tab_app),
                                 OpenSpec { paths, content, ..Default::default() },
                                 false,
                             );
@@ -2138,13 +2119,13 @@ async fn tabbar_visible(app: AppHandle, window: tauri::Window) -> bool {
 
 #[tauri::command]
 async fn new_window(app: AppHandle) -> Result<(), String> {
-    spawn_window(&app, false, OpenSpec::default(), false);
+    spawn_window(&app, None, OpenSpec::default(), false);
     Ok(())
 }
 
 #[tauri::command]
 async fn new_tab(app: AppHandle) -> Result<(), String> {
-    spawn_window(&app, true, OpenSpec::default(), false);
+    spawn_window(&app, last_focused_window(&app), OpenSpec::default(), false);
     Ok(())
 }
 
@@ -2322,7 +2303,7 @@ fn open_or_focus_aot_window(app: &AppHandle) {
         return;
     }
 
-    let Some(label) = spawn_window(app, false, OpenSpec::default(), true) else {
+    let Some(label) = spawn_window(app, None, OpenSpec::default(), true) else {
         return;
     };
     *state.aot_window.lock().unwrap() = Some(label);
@@ -2331,12 +2312,6 @@ fn open_or_focus_aot_window(app: &AppHandle) {
     }
 }
 
-/// Focus the frontmost normal (non-always-on-top) gui-window, for
-/// `[window] focus_normal_window_shortcut`'s menu item. "Frontmost" is
-/// best-effort: `last_focused` if it is not itself the always-on-top window,
-/// else any other gui-window there is -- there is no cheaper way to learn
-/// true window z-order, and any normal window is an acceptable answer here
-/// (there is usually only one anyway, in the situation this exists for).
 /// Whether `win` is on the currently active Space. Always `true` outside
 /// macOS, where every window is trivially "on" the one desktop there is.
 #[cfg(target_os = "macos")]
@@ -2354,26 +2329,71 @@ fn is_on_active_space(_win: &tauri::WebviewWindow) -> bool {
     true
 }
 
+/// `(label, is the always-on-top window, is on the active Space)` for every
+/// gui-window, for [`pick_normal_window`]. Main thread only: it asks AppKit.
+fn window_spaces(app: &AppHandle) -> Vec<(String, bool, bool)> {
+    let aot = app.state::<AppState>().aot_window.lock().unwrap().clone();
+    app.webview_windows()
+        .into_iter()
+        .map(|(label, win)| {
+            let is_aot = Some(&label) == aot.as_ref();
+            let here = is_on_active_space(&win);
+            (label, is_aot, here)
+        })
+        .collect()
+}
+
+/// A normal gui-window on the Space the user is looking at: `last_focused`
+/// if it is one, else any other, else none. Not the always-on-top window,
+/// which `CanJoinAllSpaces` puts on every Space, and never a window on some
+/// other Space, even the most recently focused one overall. `windows` is
+/// [`window_spaces`]'s answer.
+fn pick_normal_window(
+    last_focused: Option<&str>,
+    windows: &[(String, bool, bool)],
+) -> Option<String> {
+    let normal: Vec<&String> = windows
+        .iter()
+        .filter(|(_, is_aot, here)| !is_aot && *here)
+        .map(|(label, ..)| label)
+        .collect();
+    normal
+        .iter()
+        .find(|label| Some(label.as_str()) == last_focused)
+        .or(normal.first())
+        .map(|label| label.to_string())
+}
+
+/// The gui-window an outside request (Finder, a `gneovim://` URL, the
+/// `gneovim` command) goes to: [`pick_normal_window`], or `None` to spawn
+/// one, which then appears on the current Space. Asks AppKit on the main
+/// thread, as `open_request` runs on a worker.
+async fn recipient_window(app: &AppHandle) -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let main_app = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(window_spaces(&main_app));
+    })
+    .ok()?;
+    let windows = rx.await.ok()?;
+    let last = app.state::<AppState>().last_focused.lock().unwrap().clone();
+    let pick = pick_normal_window(last.as_deref(), &windows);
+    log::info!(
+        "outside request goes to {pick:?} (last focused {last:?}; \
+         label, always-on-top, on this Space: {windows:?})"
+    );
+    pick
+}
+
+/// Focus the frontmost normal (non-always-on-top) gui-window on this Space,
+/// for `[window] focus_normal_window_shortcut`'s menu item. "Frontmost" is
+/// best-effort, see [`pick_normal_window`]: there is no cheaper way to learn
+/// true window z-order, and any normal window is an acceptable answer here
+/// (there is usually only one anyway, in the situation this exists for).
 fn focus_normal_window(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    let aot_label = state.aot_window.lock().unwrap().clone();
-    // Not the always-on-top window, and on the Space the user is actually
-    // looking at: a window on some other Space is not a usable answer here,
-    // even if it was the most recently focused one overall.
-    let is_normal = |label: &String, win: &tauri::WebviewWindow| {
-        Some(label) != aot_label.as_ref() && is_on_active_space(win)
-    };
-    let last_focused = state.last_focused.lock().unwrap().clone();
-    let candidate = last_focused
-        .and_then(|l| app.get_webview_window(&l).map(|w| (l, w)))
-        .filter(|(l, w)| is_normal(l, w))
-        .map(|(_, w)| w)
-        .or_else(|| {
-            app.webview_windows()
-                .into_iter()
-                .find(|(l, w)| is_normal(l, w))
-                .map(|(_, w)| w)
-        });
+    let last_focused = app.state::<AppState>().last_focused.lock().unwrap().clone();
+    let candidate = pick_normal_window(last_focused.as_deref(), &window_spaces(app))
+        .and_then(|label| app.get_webview_window(&label));
     let Some(win) = candidate else {
         log::info!("focus normal window: no normal window on the active space to focus");
         return;
@@ -2414,10 +2434,19 @@ where
     });
 }
 
-/// The last-focused gui-window, or any gui-window, or none.
-fn recipient_window(app: &AppHandle) -> Option<String> {
+/// The last-focused gui-window, else the focused one, else any, else none,
+/// whatever Space it is on. Where menu items act and where Cmd+T or
+/// `:OpenInNewGneovimTab` adds a gui-tab; an outside request goes to
+/// [`recipient_window`] instead.
+fn last_focused_window(app: &AppHandle) -> Option<String> {
     let last = app.state::<AppState>().last_focused.lock().unwrap().clone();
     last.filter(|l| app.get_webview_window(l).is_some())
+        .or_else(|| {
+            app.webview_windows()
+                .into_iter()
+                .find(|(_, w)| w.is_focused().unwrap_or(false))
+                .map(|(l, _)| l)
+        })
         .or_else(|| app.webview_windows().into_keys().next())
 }
 
@@ -2449,15 +2478,12 @@ async fn find_holder(app: &AppHandle, path: &str) -> Option<(String, Bridge)> {
     None
 }
 
-/// An untouched gui-window a file can take over instead of opening a window
-/// next to it: the last-focused one (on a cold launch, the `main` window the
-/// app creates before the file arrives), never the always-on-top window.
-async fn pristine_window(app: &AppHandle) -> Option<(String, Bridge)> {
-    let label = recipient_window(app)?;
-    let aot = app.state::<AppState>().aot_window.lock().unwrap().clone();
-    if aot.as_deref() == Some(label.as_str()) {
-        return None;
-    }
+/// `here`, the [`recipient_window`], if it is an untouched gui-window a file
+/// can take over instead of opening a window next to it (on a cold launch,
+/// the `main` window the app creates before the file arrives). So never the
+/// always-on-top window, nor a window on another Space.
+async fn pristine_window(app: &AppHandle, here: Option<&str>) -> Option<(String, Bridge)> {
+    let label = here?.to_string();
     let b = bridge_for(app, &label).await.ok()?;
     match tokio::time::timeout(Duration::from_millis(500), b.is_pristine()).await {
         Ok(Ok(true)) => Some((label, b)),
@@ -2470,18 +2496,18 @@ async fn pristine_window(app: &AppHandle) -> Option<(String, Bridge)> {
 /// gui-window's Neovim already has it loaded: then `swap=` decides (reveal
 /// there, open readonly here, or take it over). There is no conflict when the
 /// receiving Neovim is itself the holder; it just jumps there. A new window
-/// or gui-tab takes over an untouched window instead, if there is one. `cwd`
-/// starts a spawned Neovim there, or `:tcd`s the file's tabpage in an
-/// existing one.
+/// or gui-tab takes over an untouched window instead, if there is one. Only
+/// windows on the active Space receive (or parent a gui-tab); with none
+/// there, a new window opens. `cwd` starts a spawned Neovim there, or `:tcd`s
+/// the file's tabpage in an existing one.
 async fn open_request(app: AppHandle, req: OpenRequest) {
     let path = std::fs::canonicalize(&req.path)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| req.path.clone());
     let target = req.target.unwrap_or_else(|| crate::config::get().window.open_target());
     let policy = req.swap_policy();
-    let receiver = (target == OpenTarget::NvimTab)
-        .then(|| recipient_window(&app))
-        .flatten();
+    let here = recipient_window(&app).await;
+    let receiver = (target == OpenTarget::NvimTab).then(|| here.clone()).flatten();
 
     let mut open = FileOpen {
         path: &path,
@@ -2528,7 +2554,7 @@ async fn open_request(app: AppHandle, req: OpenRequest) {
             }
         }
         log::warn!("gneovim://: target nvim-tab: no ready gui-window, opening a new one");
-    } else if let Some((label, b)) = pristine_window(&app).await {
+    } else if let Some((label, b)) = pristine_window(&app, here.as_deref()).await {
         if b.open_request_file(&open).await.is_ok() {
             focus_window(&app, &label);
             return;
@@ -2538,8 +2564,8 @@ async fn open_request(app: AppHandle, req: OpenRequest) {
     open.tcd = None;
 
     let spec = OpenSpec { cwd: req.cwd.clone(), ..Default::default() };
-    let as_tab = target == OpenTarget::Tab;
-    let Some(label) = spawn_window(&app, as_tab, spec, false) else {
+    let tab_of = (target == OpenTarget::Tab).then_some(here).flatten();
+    let Some(label) = spawn_window(&app, tab_of, spec, false) else {
         return;
     };
     match bridge_for(&app, &label).await {
@@ -2550,6 +2576,32 @@ async fn open_request(app: AppHandle, req: OpenRequest) {
         }
         Err(e) => log::warn!("gneovim://: {e}"),
     }
+}
+
+/// Run a `gneovim://action/<name>` (or `gneovim --action <name>`): fire the
+/// user's `User GneovimAction` handler in the [`recipient_window`], spawning
+/// a window when there is none on this Space, then focus it. What the handler
+/// opens, and where, is up to the handler; see `runtime/action.lua`.
+async fn action_request(app: AppHandle, name: String) {
+    let label = match recipient_window(&app).await {
+        Some(label) => label,
+        None => match spawn_window(&app, None, OpenSpec::default(), false) {
+            Some(label) => label,
+            None => return,
+        },
+    };
+    match bridge_for(&app, &label).await {
+        Ok(b) => {
+            if let Err(e) = b.action(&name).await {
+                log::warn!("gneovim://: action {name} in {label}: {e}");
+            }
+        }
+        Err(e) => {
+            log::warn!("gneovim://: action {name}: {e}");
+            return;
+        }
+    }
+    focus_window(&app, &label);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2602,7 +2654,7 @@ pub fn run() {
         .menu(|handle| build_menu(handle))
         .on_menu_event(|app, event| match event.id().as_ref() {
             "gnv:new_window" => {
-                spawn_window(app, false, OpenSpec::default(), false);
+                spawn_window(app, None, OpenSpec::default(), false);
             }
             "gnv:new_aot_window" => {
                 open_or_focus_aot_window(app);
@@ -2611,11 +2663,11 @@ pub fn run() {
                 focus_normal_window(app);
             }
             "gnv:new_tab" => {
-                spawn_window(app, true, OpenSpec::default(), false);
+                spawn_window(app, last_focused_window(app), OpenSpec::default(), false);
             }
             "gnv:zen_mode" => {
                 #[cfg(target_os = "macos")]
-                if let Some(label) = recipient_window(app) {
+                if let Some(label) = last_focused_window(app) {
                     set_zen(app, &label, None);
                 } else if let Some(item) = ZEN_MENU_ITEM.get() {
                     let _ = item.set_checked(false);
@@ -2633,7 +2685,7 @@ pub fn run() {
                 focused_bridge(app, |b| async move { b.input("\x1bggVG").await })
             }
             "gnv:look_up" => {
-                if let Some(label) = recipient_window(app) {
+                if let Some(label) = last_focused_window(app) {
                     log::info!("look up: native menu selected for {label}");
                     let _ = app.emit(&format!("gnv://{label}/look_up"), ());
                 }
@@ -2744,13 +2796,12 @@ pub fn run() {
                 // `file://`, plus `gneovim://` URLs (link templates, the
                 // `gneovim` CLI shim). Sequential, so a batch lands in a
                 // predictable order.
-                let reqs: Vec<OpenRequest> = urls
+                let reqs: Vec<Request> = urls
                     .iter()
                     .filter_map(|u| match u.scheme() {
-                        "file" => u
-                            .to_file_path()
-                            .ok()
-                            .map(|p| OpenRequest::finder(p.to_string_lossy().into_owned())),
+                        "file" => u.to_file_path().ok().map(|p| {
+                            Request::Open(OpenRequest::finder(p.to_string_lossy().into_owned()))
+                        }),
                         "gneovim" => open_url::parse(u)
                             .map_err(|e| log::warn!("gneovim://: {e}"))
                             .ok(),
@@ -2761,10 +2812,59 @@ pub fn run() {
                     let app = _app.clone();
                     async_runtime::spawn(async move {
                         for req in reqs {
-                            open_request(app.clone(), req).await;
+                            match req {
+                                Request::Open(req) => open_request(app.clone(), req).await,
+                                Request::Action(name) => action_request(app.clone(), name).await,
+                            }
                         }
                     });
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod recipient_tests {
+    use super::pick_normal_window;
+
+    /// `(label, is the always-on-top window, is on the active Space)`.
+    fn w(label: &str, is_aot: bool, here: bool) -> (String, bool, bool) {
+        (label.to_string(), is_aot, here)
+    }
+
+    #[test]
+    fn last_focused_on_this_space_wins() {
+        let ws = [w("a", false, true), w("b", false, true)];
+        assert_eq!(pick_normal_window(Some("b"), &ws).as_deref(), Some("b"));
+        assert_eq!(pick_normal_window(Some("a"), &ws).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn last_focused_on_another_space_is_passed_over() {
+        let ws = [w("desk1", false, false), w("desk2", false, true)];
+        assert_eq!(pick_normal_window(Some("desk1"), &ws).as_deref(), Some("desk2"));
+    }
+
+    #[test]
+    fn nothing_on_this_space_means_spawn() {
+        let ws = [w("desk1", false, false)];
+        assert_eq!(pick_normal_window(Some("desk1"), &ws), None);
+        assert_eq!(pick_normal_window(None, &[]), None);
+    }
+
+    #[test]
+    fn always_on_top_window_never_receives() {
+        // It joins every Space, so it always reports being on this one.
+        let ws = [w("aot", true, true), w("desk1", false, false)];
+        assert_eq!(pick_normal_window(Some("aot"), &ws), None);
+        let ws = [w("aot", true, true), w("main", false, true)];
+        assert_eq!(pick_normal_window(Some("aot"), &ws).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn last_focused_closed_or_unset() {
+        let ws = [w("main", false, true)];
+        assert_eq!(pick_normal_window(Some("closed"), &ws).as_deref(), Some("main"));
+        assert_eq!(pick_normal_window(None, &ws).as_deref(), Some("main"));
+    }
 }

@@ -8,12 +8,14 @@
 # src-tauri/src/open_url.rs) and handed to the app with `open`, so the shell
 # returns at once. That URL scheme is public, any web page can fire it, so it
 # never carries Ex commands: only +N and +call cursor(N,M) are accepted here.
+# --action NAME sends gneovim://action/NAME instead, a name and nothing else.
 
 set -u
 
 usage() {
     cat <<'EOF'
 Usage: gneovim [options] [+N | "+call cursor(N,M)"] [file ...]
+       gneovim --action NAME
 
 Options:
   -p                 Open the files as Neovim tabpages in the last focused
@@ -28,6 +30,9 @@ Options:
                        ask       let Neovim's swap file handling ask
   +N                 Put the cursor on line N of the first file.
   +call cursor(N,M)  Line N, byte column M of the first file.
+  --action NAME      Run the User GneovimAction handler for NAME (letters,
+                     digits, _ and -) in a gui-window on the current Space;
+                     no files or other options. Also --action=NAME.
   -h, --help         Show this help.
   -v, --version      Show the gneovim version.
 
@@ -61,10 +66,14 @@ enc() {
     printf '%s' "$out"
 }
 
-target= readonly= swap= line= col=
+target= readonly= swap= line= col= action= want_action=
 files=()
 opts_done=
 for arg in "$@"; do
+    if [ -n "$want_action" ]; then
+        action=$arg want_action=
+        continue
+    fi
     if [ -n "$opts_done" ]; then
         files+=("$arg")
         continue
@@ -83,6 +92,9 @@ for arg in "$@"; do
         --target=*) die "--target must be window, tab or nvim-tab" ;;
         --swap=reveal | --swap=readonly | --swap=takeover | --swap=ask) swap=${arg#--swap=} ;;
         --swap=*) die "--swap must be reveal, readonly, takeover or ask" ;;
+        --action) want_action=1 ;;
+        --action=?*) action=${arg#--action=} ;;
+        --action=) die "--action needs a NAME" ;;
         +*)
             cmd=${arg#+}
             if [[ $cmd =~ ^[0-9]+$ ]]; then
@@ -100,6 +112,14 @@ done
 
 open_args=()
 [ -n "$app" ] && open_args=(-a "$app")
+
+[ -n "$want_action" ] && die "--action needs a NAME"
+if [ -n "$action" ]; then
+    [[ $action =~ ^[A-Za-z0-9_-]+$ ]] || die "--action NAME may only use letters, digits, _ and -"
+    [ ${#files[@]} -eq 0 ] && [ -z "$target$readonly$swap$line" ] ||
+        die "--action takes no files or other options"
+    exec open ${open_args[@]+"${open_args[@]}"} "gneovim://action/$action"
+fi
 
 if [ ${#files[@]} -eq 0 ]; then
     if [ -n "$app" ]; then

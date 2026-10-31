@@ -1350,6 +1350,16 @@ pub async fn connect(
             log::warn!("open_request.lua injection failed: {e}");
         }
 
+        // `gneovim://action/<name>` / `gneovim --action <name>`: fires
+        // `User GneovimAction` for the user's handler. Driven by
+        // `Bridge::action` through `_G.__gnv_action`.
+        if let Err(e) = nvim
+            .exec_lua(include_str!("runtime/action.lua"), vec![])
+            .await
+        {
+            log::warn!("action.lua injection failed: {e}");
+        }
+
         // Normal-mode mapping left-hand sides for the island key router, so a
         // `g` inside `<Leader>fg` is not held back as a possible gj/gk. Its
         // `gnv_normal_maps` rpcnotify must match `handle_notify`'s arm and
@@ -1953,6 +1963,17 @@ impl Bridge {
                 "if _G.__gnv_zen_changed then _G.__gnv_zen_changed(...) end",
                 vec![Value::from(on)],
             )
+            .await
+            .map(|_| ())
+            .map_err(err)
+    }
+
+    /// Fire `User GneovimAction` for a `gneovim://action/<name>`, through
+    /// `runtime/action.lua`. Returns at once: the handler runs on a later
+    /// tick, after startup and the UI attach if this nvim is still booting.
+    pub async fn action(&self, name: &str) -> Result<(), String> {
+        self.nvim
+            .exec_lua("_G.__gnv_action(...)", vec![Value::from(name)])
             .await
             .map(|_| ())
             .map_err(err)
