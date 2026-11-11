@@ -249,6 +249,10 @@ pub enum BridgeEvent {
     /// `:GneovimZenOn` / `Off` / `Toggle`: `Some(true)` / `Some(false)` /
     /// `None`. The same as View > Zen Mode. From `runtime/zen.lua`.
     Zen(Option<bool>),
+    /// `:GneovimFocusSession {addr}` / `_G.GneovimFocusSession(addr)`: bring
+    /// the gui-window whose nvim listens on `addr` to the front. From
+    /// `runtime/focus_session.lua`.
+    FocusSession(String),
     /// nvim's stdio closed (it exited or the connection dropped).
     Gone(String),
 }
@@ -866,6 +870,12 @@ impl Handler for NvHandler {
                 };
                 self.shared.send(BridgeEvent::Zen(want));
             }
+            // [addr]
+            "gnv_focus_session" => {
+                if let Some(addr) = args.first().and_then(Value::as_str) {
+                    self.shared.send(BridgeEvent::FocusSession(addr.to_string()));
+                }
+            }
             "redraw" => {
                 let mut batch = lock_recover(&self.shared.grid_batch, "grid batch");
                 for group in &args {
@@ -1232,6 +1242,23 @@ pub async fn connect(
         let api = nvim.get_api_info().await.map_err(err)?;
         let chan = api.first().and_then(Value::as_i64).ok_or("no channel id")?;
 
+        // Name this channel, the one the UI attaches on, so a config can tell
+        // gneovim from the TUI: `nvim_get_chan_info(ui.chan).client.name` for
+        // a `nvim_list_uis()` entry is "gneovim". Over RPC, because Lua's
+        // `vim.api` has no `nvim_set_client_info` (it is remote only).
+        let num = |s: &str| Value::from(s.parse::<i64>().unwrap_or(0));
+        let version = vec![
+            ("major".into(), num(env!("CARGO_PKG_VERSION_MAJOR"))),
+            ("minor".into(), num(env!("CARGO_PKG_VERSION_MINOR"))),
+            ("patch".into(), num(env!("CARGO_PKG_VERSION_PATCH"))),
+        ];
+        if let Err(e) = nvim
+            .set_client_info("gneovim", version, "ui", vec![], vec![])
+            .await
+        {
+            log::warn!("nvim_set_client_info failed: {e}");
+        }
+
         // Wire the + and * registers to the macOS pasteboard through this
         // channel (no reliance on pbcopy/pbpaste, which a bundled app cannot
         // find on PATH).
@@ -1358,6 +1385,18 @@ pub async fn connect(
             .await
         {
             log::warn!("action.lua injection failed: {e}");
+        }
+
+        // `:GneovimFocusSession {addr}` + `_G.GneovimFocusSession(addr)`:
+        // bring the gui-window running the nvim at `addr` to the front. Its
+        // `gnv_focus_session` rpcnotify must match `handle_notify`'s arm and
+        // `BridgeEvent::FocusSession`; `Bridge::serves` / `no_session` call
+        // back into it.
+        if let Err(e) = nvim
+            .exec_lua(include_str!("runtime/focus_session.lua"), vec![chan.into()])
+            .await
+        {
+            log::warn!("focus_session.lua injection failed: {e}");
         }
 
         // Normal-mode mapping left-hand sides for the island key router, so a
@@ -1974,6 +2013,26 @@ impl Bridge {
     pub async fn action(&self, name: &str) -> Result<(), String> {
         self.nvim
             .exec_lua("_G.__gnv_action(...)", vec![Value::from(name)])
+            .await
+            .map(|_| ())
+            .map_err(err)
+    }
+
+    /// Whether this nvim listens on `addr`: one of its `serverlist()`
+    /// addresses, symlinks resolved. For `:GneovimFocusSession`.
+    pub async fn serves(&self, addr: &str) -> Result<bool, String> {
+        self.nvim
+            .exec_lua("return _G.__gnv_serves(...)", vec![Value::from(addr)])
+            .await
+            .map(|v| v.as_bool().unwrap_or(false))
+            .map_err(err)
+    }
+
+    /// Warn in this nvim that `:GneovimFocusSession {addr}` found no
+    /// gui-window running the nvim at `addr`.
+    pub async fn no_session(&self, addr: &str) -> Result<(), String> {
+        self.nvim
+            .exec_lua("_G.__gnv_no_session(...)", vec![Value::from(addr)])
             .await
             .map(|_| ())
             .map_err(err)

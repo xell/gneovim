@@ -1664,6 +1664,15 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec, always_on_top: bo
                         let _ = want;
                         Ok(())
                     }
+                    // :GneovimFocusSession, e.g. from a session picker.
+                    BridgeEvent::FocusSession(addr) => {
+                        async_runtime::spawn(focus_session(
+                            emit_app.clone(),
+                            emit_label.clone(),
+                            addr,
+                        ));
+                        Ok(())
+                    }
                     BridgeEvent::QuitRequest => {
                         #[cfg(target_os = "macos")]
                         if let Some(w) = emit_app.get_webview_window(&emit_label) {
@@ -2457,18 +2466,22 @@ fn focus_window(app: &AppHandle, label: &str) {
     }
 }
 
-/// The gui-window whose Neovim has `path` loaded, if any. A Neovim that does
-/// not answer promptly (stuck in a prompt, say) counts as not holding it.
-async fn find_holder(app: &AppHandle, path: &str) -> Option<(String, Bridge)> {
-    let bridges: Vec<(String, Bridge)> = app
-        .state::<AppState>()
+/// Every connected gui-window's label and bridge, copied out of the lock so
+/// the caller can await on them.
+fn window_bridges(app: &AppHandle) -> Vec<(String, Bridge)> {
+    app.state::<AppState>()
         .windows
         .lock()
         .unwrap()
         .iter()
         .map(|(label, w)| (label.clone(), w.bridge.clone()))
-        .collect();
-    for (label, b) in bridges {
+        .collect()
+}
+
+/// The gui-window whose Neovim has `path` loaded, if any. A Neovim that does
+/// not answer promptly (stuck in a prompt, say) counts as not holding it.
+async fn find_holder(app: &AppHandle, path: &str) -> Option<(String, Bridge)> {
+    for (label, b) in window_bridges(app) {
         if let Ok(Ok(true)) =
             tokio::time::timeout(Duration::from_millis(500), b.holds_file(path)).await
         {
@@ -2476,6 +2489,42 @@ async fn find_holder(app: &AppHandle, path: &str) -> Option<(String, Bridge)> {
         }
     }
     None
+}
+
+/// The gui-window whose Neovim listens on `addr` (one of its `serverlist()`
+/// addresses), if any. A Neovim that does not answer promptly counts as not
+/// it, as in [`find_holder`].
+async fn find_session(app: &AppHandle, addr: &str) -> Option<String> {
+    for (label, b) in window_bridges(app) {
+        if let Ok(Ok(true)) =
+            tokio::time::timeout(Duration::from_millis(500), b.serves(addr)).await
+        {
+            return Some(label);
+        }
+    }
+    None
+}
+
+/// `:GneovimFocusSession {addr}` from `from`'s Neovim
+/// (`runtime/focus_session.lua`): bring the gui-window running the Neovim at
+/// `addr` to the front. When no gui-window runs it
+/// (a Neovim in a terminal, say), warn in `from` instead; nothing attaches
+/// to `addr`.
+async fn focus_session(app: AppHandle, from: String, addr: String) {
+    if let Some(label) = find_session(&app, &addr).await {
+        log::info!("focus session {addr}: window {label}");
+        focus_window(&app, &label);
+        return;
+    }
+    log::info!("focus session {addr}: no gui-window runs it");
+    match bridge_for(&app, &from).await {
+        Ok(b) => {
+            if let Err(e) = b.no_session(&addr).await {
+                log::warn!("focus session {addr}: warning {from}: {e}");
+            }
+        }
+        Err(e) => log::warn!("focus session {addr}: {e}"),
+    }
 }
 
 /// `here`, the [`recipient_window`], if it is an untouched gui-window a file

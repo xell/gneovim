@@ -4,7 +4,7 @@ This document specifies the complete set of user commands, autocmd events, and v
 
 ## Scope
 
-Everything listed here is injected by `bridge::connect` via `exec_lua(include_str!(...))` from these files: `src-tauri/src/runtime/md_preview.lua`, `src-tauri/src/runtime/md_decor.lua`, `src-tauri/src/runtime/open_in_new_tab.lua`, `src-tauri/src/runtime/open_request.lua`, `src-tauri/src/runtime/zen.lua`, and `src-tauri/src/runtime/action.lua`. These files carry a header comment stating they are GUI protocol glue, not a user plugin, so this document draws the line explicitly: anything a user's init file, statusline, or autocmd could reasonably reference is in scope; the RPC notification channel between the embedded Neovim and the Tauri shell (`gnv_md_preview`, `gnv_cursor`, `gnv_win_gutter`, and similar `rpcnotify` payload names) is not, since it exists only between `bridge.rs` and these Lua files and is never meant to be read from Neovim configuration. `config.toml` options are enumerated below for reference, but `configuration.md` is the authoritative doc for loading and behaviour detail.
+Everything listed here is injected by `bridge::connect` via `exec_lua(include_str!(...))` from these files: `src-tauri/src/runtime/md_preview.lua`, `src-tauri/src/runtime/md_decor.lua`, `src-tauri/src/runtime/open_in_new_tab.lua`, `src-tauri/src/runtime/open_request.lua`, `src-tauri/src/runtime/zen.lua`, `src-tauri/src/runtime/action.lua`, and `src-tauri/src/runtime/focus_session.lua`. These files carry a header comment stating they are GUI protocol glue, not a user plugin, so this document draws the line explicitly: anything a user's init file, statusline, or autocmd could reasonably reference is in scope; the RPC notification channel between the embedded Neovim and the Tauri shell (`gnv_md_preview`, `gnv_cursor`, `gnv_win_gutter`, and similar `rpcnotify` payload names) is not, since it exists only between `bridge.rs` and these Lua files and is never meant to be read from Neovim configuration. `config.toml` options are enumerated below for reference, but `configuration.md` is the authoritative doc for loading and behaviour detail.
 
 Each item below is a stable, intentional contract. Unlisted globals, augroup names, or buffer variables that happen to appear in the source are implementation detail and may change without notice.
 
@@ -35,6 +35,12 @@ Forces a full resync of every markdown island in the current Neovim instance: re
 With no arguments, moves the current buffer into a fresh gui tab: writes it first if it is a modified file buffer, or carries its text across if it has no name, then wipes it from the current session. With one or more file arguments, opens a fresh gui tab with each file in its own Neovim tabpage, leaving the current session untouched. Arguments accept quoted paths with spaces and complete as files.
 
 The same operation is available to scripts as `_G.OpenInNewGneovimTab(files)`, called with a path, a list of paths, or `nil` for the move the current buffer behavior. It returns `false` only when a required write failed, in which case nothing was moved.
+
+### `:GneovimFocusSession {addr}`
+
+Brings the gui-window whose Neovim listens on `{addr}` to the front, unminimising it if needed. `{addr}` is a server address of that Neovim (its `v:servername`, or any other entry of its `serverlist()`); `serverlist({ peer = true })` lists every running Neovim's, and is what the command completes. Every gui-window runs its own Neovim, so this is how a session picker switches sessions under gneovim, where `:connect` would detach the window's UI and lose the window. When no gui-window runs that Neovim (one in a terminal, say), it shows a warning in the current window and does nothing else: it never attaches this window to `{addr}`.
+
+The same is available to scripts as `_G.GneovimFocusSession(addr)`. The request is asynchronous and returns nothing; to know beforehand whether a session has a gneovim window, read the client names of its UIs (see Client identification below).
 
 ### `:GneovimZenOn`, `:GneovimZenOff`, `:GneovimZenToggle`
 
@@ -172,7 +178,18 @@ Follows the macOS appearance: `dark` in Dark Mode, `light` in Light Mode, set on
 
 ## Client identification
 
-Gneovim also calls `nvim_set_client_info("gneovim", {major, minor, patch}, "ui", {}, {})` on startup, so `nvim_get_chan_info` on the UI channel reports gneovim's identity and parsed version as an alternative to reading `g:gneovim` and `g:gneovim_version` directly.
+Gneovim calls `nvim_set_client_info("gneovim", {major, minor, patch}, "ui", {}, {})` on startup, on the channel its UI then attaches on. So for each entry `ui` of `nvim_list_uis()`, `nvim_get_chan_info(ui.chan).client.name` is `"gneovim"` for a gneovim window and `"nvim-tui"` for the built-in TUI. Unlike `g:gneovim`, this can also be read from another Neovim over RPC, which is how a session picker can tell whether a listed session has a gneovim window (`:GneovimFocusSession`) or a TUI (`:connect`):
+
+```lua
+-- ch: an RPC channel to the other session, from vim.fn.sockconnect('pipe', addr, { rpc = true })
+local function has_gneovim_ui(ch)
+  for _, ui in ipairs(vim.rpcrequest(ch, 'nvim_list_uis')) do
+    local client = vim.rpcrequest(ch, 'nvim_get_chan_info', ui.chan).client
+    if client and client.name == 'gneovim' then return true end
+  end
+  return false
+end
+```
 
 ## Stability
 

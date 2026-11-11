@@ -35,17 +35,6 @@ vim.g.gneovim_version = version
 if aot_window == 1 then
   vim.g.gneovim_aot_window = true
 end
-do
-  local mj, mn, pt = tostring(version):match('(%d+)%.(%d+)%.(%d+)')
-  pcall(
-    vim.api.nvim_set_client_info,
-    'gneovim',
-    { major = tonumber(mj) or 0, minor = tonumber(mn) or 0, patch = tonumber(pt) or 0 },
-    'ui',
-    vim.empty_dict(),
-    vim.empty_dict()
-  )
-end
 
 local function is_md(win)
   if not vim.api.nvim_win_is_valid(win) then
