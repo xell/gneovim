@@ -7,14 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use bridge::{Bridge, BridgeEvent, FileOpen, OpenSpec, Region, ResetPayload};
+use bridge::{Bridge, BridgeEvent, FileOpen, NvimProcess, OpenSpec, Region, ResetPayload};
 use config::OpenTarget;
 use open_url::{OpenRequest, Request, SwapPolicy};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::{
     async_runtime, AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
-use tokio::process::Child;
 
 /// One nvim + one webview per gui-window. macOS window tabbing groups the
 /// windows visually; it never shares an nvim.
@@ -60,8 +59,9 @@ static ZEN_MENU_ITEM: std::sync::OnceLock<CheckMenuItem<tauri::Wry>> = std::sync
 
 struct WindowBridge {
     bridge: Bridge,
-    /// Held so nvim is killed (`kill_on_drop`) when the window's entry is removed.
-    _child: Child,
+    /// Held so nvim is killed when the window's entry is removed, unless it
+    /// was released when its channel closed (`BridgeEvent::Gone`).
+    process: NvimProcess,
 }
 
 static NEXT_LABEL: AtomicU64 = AtomicU64::new(1);
@@ -1694,16 +1694,31 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec, always_on_top: bo
                         // this generic "connection lost" text is a strictly worse one
                         // to show over it anyway. A window that *did* connect and later
                         // lost nvim (:q, a crash) is unaffected: it is still in `windows`.
-                        let ever_connected = emit_app
+                        //
+                        // Its channel is closed, so this nvim has either exited or
+                        // detached (`:detach`, or `:connect`, which is `:detach` for a
+                        // UI without the "connect" UI event). A detached one keeps
+                        // running in the background with its unsaved buffers, as
+                        // `:h :detach` says, and `serverlist({peer=true})` still lists
+                        // it. Either way it is no longer this window's to kill, so
+                        // release it before the window's removal would.
+                        let ever_connected = match emit_app
                             .state::<AppState>()
                             .windows
                             .lock()
                             .unwrap()
-                            .contains_key(&emit_label);
+                            .get_mut(&emit_label)
+                        {
+                            Some(w) => {
+                                w.process.release();
+                                true
+                            }
+                            None => false,
+                        };
                         if ever_connected {
                             // :q / :qa is the common case; drop the gui-window too.
-                            // destroy(), not close(): nvim is already gone, so the
-                            // Cmd+W CloseRequested guard has nothing to check.
+                            // destroy(), not close(): this window's nvim is gone, so
+                            // the Cmd+W CloseRequested guard has nothing to check.
                             if let Some(w) = emit_app.get_webview_window(&emit_label) {
                                 let _ = w.destroy();
                             }
@@ -1723,15 +1738,19 @@ fn spawn_bridge(app: AppHandle, label: String, open: OpenSpec, always_on_top: bo
             .get_webview_window(&label)
             .and_then(|w| w.theme().ok())
             == Some(tauri::Theme::Dark);
-        match bridge::connect(tx, open, always_on_top, dark).await {
-            Ok((bridge, child)) => {
-                app.state::<AppState>().windows.lock().unwrap().insert(
-                    label.clone(),
-                    WindowBridge {
-                        bridge,
-                        _child: child,
-                    },
-                );
+        // A session detached from an earlier gui-window (see `focus_session`)
+        // is attached to; anything else gets a freshly spawned nvim.
+        let connected = match open.attach.clone() {
+            Some(addr) => bridge::attach(tx, &addr, dark).await,
+            None => bridge::connect(tx, open, always_on_top, dark).await,
+        };
+        match connected {
+            Ok((bridge, process)) => {
+                app.state::<AppState>()
+                    .windows
+                    .lock()
+                    .unwrap()
+                    .insert(label.clone(), WindowBridge { bridge, process });
                 log::info!("bridge ready for window {label}");
                 let _ = ready_tx.send(Some(Ok(())));
             }
@@ -2507,16 +2526,26 @@ async fn find_session(app: &AppHandle, addr: &str) -> Option<String> {
 
 /// `:GneovimFocusSession {addr}` from `from`'s Neovim
 /// (`runtime/focus_session.lua`): bring the gui-window running the Neovim at
-/// `addr` to the front. When no gui-window runs it
-/// (a Neovim in a terminal, say), warn in `from` instead; nothing attaches
-/// to `addr`.
+/// `addr` to the front. When no gui-window runs it but nothing else shows it
+/// either (a session detached from a gui-window, a `nvim --headless
+/// --listen`), open it in a new gui-tab of `from`. One a terminal shows stays
+/// there, since attaching would share it with that UI: warn in `from`.
 async fn focus_session(app: AppHandle, from: String, addr: String) {
     if let Some(label) = find_session(&app, &addr).await {
         log::info!("focus session {addr}: window {label}");
         focus_window(&app, &label);
         return;
     }
-    log::info!("focus session {addr}: no gui-window runs it");
+    if bridge::has_ui(&addr).await == Some(false) {
+        log::info!("focus session {addr}: no UI, attaching in a new gui-tab of {from}");
+        // Never a tab of the always-on-top window: a new normal window then.
+        let aot = app.state::<AppState>().aot_window.lock().unwrap().clone();
+        let tab_of = (aot.as_deref() != Some(from.as_str())).then_some(from);
+        let spec = OpenSpec { attach: Some(addr), ..Default::default() };
+        spawn_window(&app, tab_of, spec, false);
+        return;
+    }
+    log::info!("focus session {addr}: no gui-window runs it, and it has a UI or does not answer");
     match bridge_for(&app, &from).await {
         Ok(b) => {
             if let Err(e) = b.no_session(&addr).await {

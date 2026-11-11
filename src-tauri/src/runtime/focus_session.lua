@@ -11,9 +11,11 @@
 --
 -- `_G.GneovimFocusSession(addr)` is the same, for scripts (a session picker).
 -- Each gui-window runs its own Neovim, so this is the gneovim way to switch
--- sessions; `:connect` would detach this window's UI and lose the window. It
--- never attaches anything to {addr}: when no gui-window runs that Neovim (one
--- in a terminal, say), it only warns here.
+-- sessions; `:connect` only detaches: the window closes and its Neovim keeps
+-- running in the background. When no gui-window runs that Neovim and nothing
+-- else shows it either (one detached from a gui-window, say), it opens in a
+-- new gui-tab of this window. One a terminal shows stays there: that, or no
+-- answer at all, only warns here.
 
 local chan = ...
 
@@ -49,10 +51,14 @@ function _G.__gnv_serves(addr)
   return false
 end
 
--- `Bridge::no_session`: no gui-window runs the Neovim at `addr`. Scheduled,
--- so the message is drawn as ordinary main loop output, not inside the RPC.
+-- `Bridge::no_session`: no gui-window runs the Neovim at `addr`, and it has a
+-- UI of its own (a terminal) or does not answer. Scheduled, so the message is
+-- drawn as ordinary main loop output, not inside the RPC.
 function _G.__gnv_no_session(addr)
   vim.schedule(function()
-    vim.notify('gneovim: no gneovim window runs the Neovim at ' .. addr, vim.log.levels.WARN)
+    vim.notify(
+      'gneovim: no gneovim window runs the Neovim at ' .. addr .. ', and it is shown elsewhere or not answering',
+      vim.log.levels.WARN
+    )
   end)
 end

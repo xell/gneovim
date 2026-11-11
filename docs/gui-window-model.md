@@ -34,9 +34,21 @@ In dev, the Vite plugin (`vite.config.js`, `provisionNvim`) plays that shell rol
 
 The webview is never nvim's parent in any wrapper, so a webview reload or crash never kills nvim. That is the tmux style property (detach and reattach the view, the session lives), and it needs no special handling.
 
+The one exception to the rule is Neovim's own `:detach`, below.
+
+### `:detach` and `:connect`
+
+`:detach` closes the UI channel but, as `:h :detach` and `:h --embed` say, leaves the server running in the background with its buffers, unsaved changes included. `:connect {addr}` is the same as `:detach` here, since gneovim does not implement the "connect" UI event. In gneovim the gui-window closes, like the TUI exits on `:detach`, and its Neovim keeps running: `serverlist({ peer = true })` still lists it, a terminal Neovim can `:connect` to it, and it outlives gneovim quitting. `:GneovimFocusSession {addr}` (a session picker's way in) brings it back in a new gui-tab.
+
+The mechanism: the window's `bridge::NvimProcess` kills nvim when dropped (what `kill_on_drop` used to do), and the `BridgeEvent::Gone` handler in `spawn_bridge` calls `release()` on it first. A closed channel means nvim has exited or detached; either way it is no longer the window's to kill.
+
+On the Neovim side, `runtime/ui_leave.lua` turns a detached session back into a plain Neovim when gneovim's UI leaves (`UILeave` for gneovim's channel, not while exiting): it deletes the `gnv*` augroups (whose `rpcnotify` to the closed channel would raise E475 on every cursor move) and the island decoration provider, removes the `ZZ` guard, restores Neovim's own clipboard provider (`g:clipboard` unset, provider reloaded) and unsets `g:gneovim*`. gneovim's commands stay, inert. A terminal that `:connect`s then gets an ordinary session.
+
+The way back: `bridge::attach(addr)` connects to the session's socket and runs the same handshake as a spawned window, so every runtime file is injected again on the new channel (each clears its own augroup, so nothing doubles). Its `NvimProcess` owns no process: closing that gui-window with Cmd+W still quits the session through the guard, but nothing gneovim drops ever kills it. `lib.rs::focus_session` only attaches when `bridge::has_ui(addr)` says no UI shows the session; one a terminal shows is left alone. `tests/detach.rs` covers detach, the teardown, reattaching, and that `:qa` and an unreleased drop still end nvim.
+
 ### Unsaved-changes guard
 
-Because `nvim` is `kill_on_drop`, a bare Cmd+W / Cmd+Q would SIGKILL it and leave swap files behind. So the close paths are intercepted and the guard asks each window's nvim `unsaved_blockers()` (a Lua scan for modified file buffers, `E37`, and `:terminal` buffers with a live job, `E947`). If a window is clean it is quit with `:qall` so shada and `VimLeave` run, then destroyed. If anything blocks, a native `NSAlert` (`lib.rs::warn_unsaved`) offers Cancel / (for Cmd+Q) Review, which focuses the first offending window / Discard, which runs `:qall!`. The `QUITTING` flag lets the guard's own `app.exit(0)` through without re-entering.
+Because dropping a window's `NvimProcess` kills `nvim`, a bare Cmd+W / Cmd+Q would SIGKILL it and leave swap files behind. So the close paths are intercepted and the guard asks each window's nvim `unsaved_blockers()` (a Lua scan for modified file buffers, `E37`, and `:terminal` buffers with a live job, `E947`). If a window is clean it is quit with `:qall` so shada and `VimLeave` run, then destroyed. If anything blocks, a native `NSAlert` (`lib.rs::warn_unsaved`) offers Cancel / (for Cmd+Q) Review, which focuses the first offending window / Discard, which runs `:qall!`. The `QUITTING` flag lets the guard's own `app.exit(0)` through without re-entering.
 
 The wiring:
 

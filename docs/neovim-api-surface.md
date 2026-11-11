@@ -38,7 +38,7 @@ The same operation is available to scripts as `_G.OpenInNewGneovimTab(files)`, c
 
 ### `:GneovimFocusSession {addr}`
 
-Brings the gui-window whose Neovim listens on `{addr}` to the front, unminimising it if needed. `{addr}` is a server address of that Neovim (its `v:servername`, or any other entry of its `serverlist()`); `serverlist({ peer = true })` lists every running Neovim's, and is what the command completes. Every gui-window runs its own Neovim, so this is how a session picker switches sessions under gneovim, where `:connect` would detach the window's UI and lose the window. When no gui-window runs that Neovim (one in a terminal, say), it shows a warning in the current window and does nothing else: it never attaches this window to `{addr}`.
+Brings the gui-window whose Neovim listens on `{addr}` to the front, unminimising it if needed. `{addr}` is a server address of that Neovim (its `v:servername`, or any other entry of its `serverlist()`); `serverlist({ peer = true })` lists every running Neovim's, and is what the command completes. Every gui-window runs its own Neovim, so this is how a session picker switches sessions under gneovim. `:connect` only detaches there: the window closes and its session keeps running in the background (see `gui-window-model.md`). When no gui-window runs that Neovim but nothing else shows it either (a session detached from a gui-window, or a `nvim --headless --listen`), it opens in a new gui-tab of the current window, which then behaves like any other: Cmd+W quits that session after the usual unsaved-changes check, `:detach` leaves it running again. A session that another UI shows (a terminal) stays there, since attaching would share it with that UI; that, or a session that does not answer, only shows a warning in the current window.
 
 The same is available to scripts as `_G.GneovimFocusSession(addr)`. The request is asynchronous and returns nothing; to know beforehand whether a session has a gneovim window, read the client names of its UIs (see Client identification below).
 
@@ -116,7 +116,7 @@ All three variables are gneovim's output, not input. Setting one directly does n
 
 ### `g:gneovim`
 
-`true` in every Neovim instance embedded by gneovim, and unset otherwise. The standard presence check for "is this Neovim running under gneovim", most usefully read from a `UIEnter` autocmd or later, since it is set before the GUI attaches.
+`true` in every Neovim instance embedded by gneovim, and unset otherwise, including after gneovim's UI detaches from it (`:detach`; see `gui-window-model.md`). The standard presence check for "is this Neovim running under gneovim", most usefully read from a `UIEnter` autocmd or later, since it is set before the GUI attaches.
 
 ### `g:gneovim_version`
 

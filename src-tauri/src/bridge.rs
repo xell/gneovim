@@ -14,17 +14,18 @@ use std::sync::{
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nvim_rs::{
-    compat::tokio::Compat, create::tokio as create, Buffer, Handler, Neovim,
-    UiAttachOptions, Value,
-};
+use nvim_rs::{compat::tokio::Compat, Buffer, Handler, Neovim, UiAttachOptions, Value};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, Command};
 use tokio::sync::{mpsc::UnboundedSender, Mutex};
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-pub type NWriter = Compat<ChildStdin>;
+/// The RPC channel's two ends: a spawned nvim's stdin / stdout, or a
+/// running nvim's socket ([`attach`]).
+pub type NWriter = Compat<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>;
+type NReader = Compat<Box<dyn tokio::io::AsyncRead + Send + Unpin>>;
 pub type Nvim = Neovim<NWriter>;
 
 // How long `connect()` waits for the whole post-spawn handshake (every
@@ -280,6 +281,9 @@ pub struct OpenSpec {
     /// Working directory to start nvim in (`gneovim://...&cwd=`, the CLI
     /// shim's `$PWD`). Ignored unless it is an existing directory.
     pub cwd: Option<String>,
+    /// Spawn nothing: attach to the Neovim already running at this address
+    /// ([`attach`]). The fields above are then ignored.
+    pub attach: Option<String>,
 }
 
 /// One `gneovim://file/...` open, for [`Bridge::open_request_file`] and
@@ -1122,14 +1126,45 @@ pub struct Bridge {
     bufs: Bufs,
 }
 
-/// Spawn `nvim --embed` and wire the bridge. Returns the bridge plus the child
-/// handle so the caller can keep it alive (and kill it) with the app.
+/// The spawned `nvim --embed` process. Dropping it kills Neovim, as
+/// `kill_on_drop` would, unless it was [`release`](Self::release)d first.
+pub struct NvimProcess(Option<Child>);
+
+impl NvimProcess {
+    /// Stop owning the process, so dropping this no longer kills it. For a
+    /// Neovim whose channel has closed: it either exited, or it detached
+    /// (`:detach`, or `:connect` from a UI without the "connect" UI event)
+    /// and, as `:h :detach` says, keeps running in the background with its
+    /// buffers, unsaved changes included, until something quits it.
+    pub fn release(&mut self) {
+        // Spawned without `kill_on_drop`: tokio leaves a dropped Child
+        // running and reaps it in the background once it exits.
+        self.0.take();
+    }
+
+    /// The process id, while this still owns the process.
+    pub fn id(&self) -> Option<u32> {
+        self.0.as_ref().and_then(Child::id)
+    }
+}
+
+impl Drop for NvimProcess {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+/// Spawn `nvim --embed` and wire the bridge. Returns the bridge plus the
+/// process, which the caller keeps for as long as the window lives: dropping
+/// it kills Neovim (see [`NvimProcess`]).
 pub async fn connect(
     tx: UnboundedSender<BridgeEvent>,
     open: OpenSpec,
     always_on_top: bool,
     dark: bool,
-) -> Result<(Bridge, Child), String> {
+) -> Result<(Bridge, NvimProcess), String> {
     let bin = find_nvim().await;
     let nv = &crate::config::get().neovim;
     let init_args = nv.init_args();
@@ -1148,7 +1183,8 @@ pub async fn connect(
         .args(&init_args)
         .args(&shada_args)
         .args(&extra_args)
-        .kill_on_drop(true)
+        // No `kill_on_drop`: `NvimProcess` does the killing, so that a
+        // detached Neovim can be released instead.
         // Inherited by default, i.e. invisible: capture it instead so a stuck
         // startup (see CONNECT_TIMEOUT below) can show the user why.
         .stderr(std::process::Stdio::piped());
@@ -1161,37 +1197,15 @@ pub async fn connect(
         cmd.current_dir(dir);
     }
 
-    let shared = Shared {
-        tx,
-        forwarding: Arc::new(AtomicBool::new(true)),
-        edit_sync: Arc::new(std::sync::Mutex::new(EditSync::default())),
-        edit_lock: Arc::new(Mutex::new(())),
-        grid_batch: Arc::new(std::sync::Mutex::new(Vec::new())),
-        ui_attached: Arc::new(AtomicBool::new(false)),
-    };
-    let bufs: Bufs = Arc::new(Mutex::new(HashMap::new()));
-
-    let handler = NvHandler {
-        shared: shared.clone(),
-        bufs: bufs.clone(),
-    };
-
-    let (nvim, io, mut child) = create::new_child_cmd(&mut cmd, handler)
-        .await
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("spawn nvim ({bin}): {e}"))?;
-
-    // The io loop future resolves when nvim's stdio closes, i.e. nvim exited.
-    {
-        let tx = shared.tx.clone();
-        tokio::spawn(async move {
-            let reason = match io.await {
-                Ok(Ok(())) => "Neovim exited".to_string(),
-                Ok(Err(e)) => format!("Neovim connection lost: {e}"),
-                Err(e) => format!("Neovim io task failed: {e}"),
-            };
-            let _ = tx.send(BridgeEvent::Gone(reason));
-        });
-    }
+    let reader: Box<dyn tokio::io::AsyncRead + Send + Unpin> =
+        Box::new(child.stdout.take().ok_or("spawn nvim: no stdout")?);
+    let writer: Box<dyn tokio::io::AsyncWrite + Send + Unpin> =
+        Box::new(child.stdin.take().ok_or("spawn nvim: no stdin")?);
 
     // A terminal nvim that hits a startup error (a lazy.nvim plugin missing a
     // dependency, say) prints it and sits at a "Press ENTER" prompt; a human
@@ -1215,6 +1229,138 @@ pub async fn connect(
                 }
                 buf.push_back(line);
             }
+        });
+    }
+    // From here on a failed or timed-out handshake drops it, killing nvim.
+    let process = NvimProcess(Some(child));
+    let stuck = move || {
+        let tail: Vec<String> = stderr_tail.lock().unwrap().iter().cloned().collect();
+        let mut msg = format!(
+            "Neovim did not respond within {}s of starting; it is likely stuck at a \
+             startup prompt this embedded session cannot answer (e.g. a config error \
+             that a terminal nvim would show as \u{201c}Press ENTER to continue\u{201d}).",
+            CONNECT_TIMEOUT.as_secs()
+        );
+        if !tail.is_empty() {
+            msg.push_str("\n\nNeovim's own output:\n");
+            msg.push_str(&tail.join("\n"));
+        }
+        msg
+    };
+    let content = open.content;
+    start(
+        tx,
+        reader.compat(),
+        writer.compat_write(),
+        process,
+        content,
+        always_on_top,
+        dark,
+        stuck,
+    )
+    .await
+}
+
+/// Attach a gui-window to the Neovim already running at `addr` (a socket
+/// path from its `serverlist()`), e.g. a session detached from an earlier
+/// gui-window. Same handshake as [`connect`]; the process is not gneovim's,
+/// so dropping the returned one kills nothing and closing the window leaves
+/// that Neovim running, as a `:detach` would.
+pub async fn attach(
+    tx: UnboundedSender<BridgeEvent>,
+    addr: &str,
+    dark: bool,
+) -> Result<(Bridge, NvimProcess), String> {
+    let stream = tokio::net::UnixStream::connect(addr)
+        .await
+        .map_err(|e| format!("connect to Neovim at {addr}: {e}"))?;
+    let (r, w) = stream.into_split();
+    let reader: Box<dyn tokio::io::AsyncRead + Send + Unpin> = Box::new(r);
+    let writer: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(w);
+    let addr = addr.to_string();
+    let stuck = move || {
+        format!(
+            "Neovim at {addr} did not respond within {}s; it is likely waiting at a \
+             prompt (a terminal attached to it would show it).",
+            CONNECT_TIMEOUT.as_secs()
+        )
+    };
+    let process = NvimProcess(None);
+    start(
+        tx,
+        reader.compat(),
+        writer.compat_write(),
+        process,
+        None,
+        false,
+        dark,
+        stuck,
+    )
+    .await
+}
+
+/// Whether the Neovim at `addr` has a UI attached (a terminal, another GUI).
+/// `None` when it cannot be reached or does not answer within a second
+/// (gone, or busy).
+pub async fn has_ui(addr: &str) -> Option<bool> {
+    let ask = async {
+        let (nvim, io) =
+            nvim_rs::create::tokio::new_path(addr, nvim_rs::rpc::handler::Dummy::new())
+                .await
+                .ok()?;
+        let uis = nvim.list_uis().await.ok();
+        io.abort();
+        Some(!uis?.is_empty())
+    };
+    tokio::time::timeout(Duration::from_secs(1), ask)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Wire the bridge over an RPC channel (a spawned nvim's pipes, or a running
+/// nvim's socket) and run the startup handshake on it. `process` is dropped,
+/// killing a spawned nvim, if the handshake fails or `stuck` times out.
+#[allow(clippy::too_many_arguments)]
+async fn start(
+    tx: UnboundedSender<BridgeEvent>,
+    reader: NReader,
+    writer: NWriter,
+    process: NvimProcess,
+    content: Option<Vec<String>>,
+    always_on_top: bool,
+    dark: bool,
+    stuck: impl FnOnce() -> String,
+) -> Result<(Bridge, NvimProcess), String> {
+    let shared = Shared {
+        tx,
+        forwarding: Arc::new(AtomicBool::new(true)),
+        edit_sync: Arc::new(std::sync::Mutex::new(EditSync::default())),
+        edit_lock: Arc::new(Mutex::new(())),
+        grid_batch: Arc::new(std::sync::Mutex::new(Vec::new())),
+        ui_attached: Arc::new(AtomicBool::new(false)),
+    };
+    let bufs: Bufs = Arc::new(Mutex::new(HashMap::new()));
+
+    let handler = NvHandler {
+        shared: shared.clone(),
+        bufs: bufs.clone(),
+    };
+
+    let (nvim, io) = Neovim::new(reader, writer, handler);
+    let io = tokio::spawn(io);
+
+    // The io loop future resolves when the channel closes: nvim exited, or
+    // detached (see `NvimProcess::release`).
+    {
+        let tx = shared.tx.clone();
+        tokio::spawn(async move {
+            let reason = match io.await {
+                Ok(Ok(())) => "Neovim exited".to_string(),
+                Ok(Err(e)) => format!("Neovim connection lost: {e}"),
+                Err(e) => format!("Neovim io task failed: {e}"),
+            };
+            let _ = tx.send(BridgeEvent::Gone(reason));
         });
     }
 
@@ -1437,10 +1583,20 @@ pub async fn connect(
             }
         }
 
+        // Last, since it undoes the above: when this UI leaves a Neovim that
+        // keeps running (`:detach`), drop the glue that needs gneovim on the
+        // other end of `chan`. A later `attach` injects it all again.
+        if let Err(e) = nvim
+            .exec_lua(include_str!("runtime/ui_leave.lua"), vec![chan.into()])
+            .await
+        {
+            log::warn!("ui_leave.lua injection failed: {e}");
+        }
+
         // A moved `[No Name]` buffer (`:OpenInNewGneovimTab` with no args, on
         // a buffer with no file): seed the initial buffer with its
         // carried-over text.
-        if let Some(lines) = open.content {
+        if let Some(lines) = content {
             let arr = Value::Array(lines.into_iter().map(Value::from).collect());
             if let Err(e) = nvim
                 .exec_lua(
@@ -1464,25 +1620,13 @@ pub async fn connect(
         // client calls `ui_start` once its listeners are live; see
         // `Bridge::ui_start`.
 
-        Ok::<(Bridge, Child), String>((Bridge { nvim, shared, bufs }, child))
+        Ok::<Bridge, String>(Bridge { nvim, shared, bufs })
     };
 
     match tokio::time::timeout(CONNECT_TIMEOUT, handshake).await {
-        Ok(result) => result,
-        Err(_) => {
-            let tail: Vec<String> = stderr_tail.lock().unwrap().iter().cloned().collect();
-            let mut msg = format!(
-                "Neovim did not respond within {}s of starting; it is likely stuck at a \
-                 startup prompt this embedded session cannot answer (e.g. a config error \
-                 that a terminal nvim would show as \u{201c}Press ENTER to continue\u{201d}).",
-                CONNECT_TIMEOUT.as_secs()
-            );
-            if !tail.is_empty() {
-                msg.push_str("\n\nNeovim's own output:\n");
-                msg.push_str(&tail.join("\n"));
-            }
-            Err(msg)
-        }
+        Ok(Ok(bridge)) => Ok((bridge, process)),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(stuck()),
     }
 }
 
